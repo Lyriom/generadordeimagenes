@@ -14,3 +14,5 @@ psd-tools>=1.9,<2.0
 
 # Pruebas
 pytest>=8.0,<9.0
+celery>=5.4.0
+redis>=5.0.4

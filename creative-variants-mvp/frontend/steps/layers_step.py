@@ -7,6 +7,10 @@ versión de Streamlit.
 from __future__ import annotations
 
 import streamlit as st
+from streamlit_drawable_canvas import st_canvas
+import io
+from PIL import Image
+
 
 import api_client as api
 
@@ -64,47 +68,45 @@ def _geometry_and_mask(project: dict, layer: dict) -> None:
             project, {"layer_id": layer["id"], "reset_from_box": True, "re_extract": True}
         )
 
-    with st.expander("Pincel (añadir o quitar zonas)"):
-        shape = st.radio(
-            "Forma", ["rect", "ellipse"], horizontal=True, key=f"shape-{layer['id']}"
+    with st.expander("Pincel (dibujo libre a mano alzada)"):
+        st.caption("Dibuja sobre la imagen para definir la nueva máscara de la capa.")
+        bg_image_path = cached_file(project["project_id"], project["source"]["path"], token())
+        bg_image = Image.open(bg_image_path).convert("RGBA")
+        
+        # Calculate proportional size for display
+        display_width = 600
+        ratio = display_width / canvas["width"]
+        display_height = int(canvas["height"] * ratio)
+        
+        stroke_width = st.slider("Tamaño del pincel", 1, 50, 10, key=f"sw-{layer['id']}")
+        
+        canvas_result = st_canvas(
+            fill_color="rgba(0, 255, 0, 0.3)",
+            stroke_width=stroke_width,
+            stroke_color="rgba(0, 255, 0, 1.0)",
+            background_image=bg_image,
+            update_streamlit=False,
+            height=display_height,
+            width=display_width,
+            drawing_mode="freedraw",
+            key=f"canvas-{layer['id']}",
         )
-        bcol1, bcol2 = st.columns(2)
-        bx = bcol1.number_input(
-            "X pincel", 0, canvas["width"] - 1, int(layer["x"]), key=f"bx-{layer['id']}"
-        )
-        by = bcol2.number_input(
-            "Y pincel", 0, canvas["height"] - 1, int(layer["y"]), key=f"by-{layer['id']}"
-        )
-        size = st.slider(
-            "Tamaño del pincel (px)",
-            8,
-            max(16, min(canvas["width"], canvas["height"])),
-            max(16, min(canvas["width"], canvas["height"]) // 8),
-            key=f"bs-{layer['id']}",
-        )
-        feather = st.slider("Suavizado de borde", 0, 12, 2, key=f"bf-{layer['id']}")
-        acol1, acol2 = st.columns(2)
-        operation = {"shape": shape, "x": int(bx), "y": int(by), "width": int(size), "height": int(size)}
-        if acol1.button("➕ Añadir zona", key=f"add-{layer['id']}"):
-            _mask_op(
-                project,
-                {
-                    "layer_id": layer["id"],
-                    "operations": [{**operation, "op": "add"}],
-                    "feather": feather,
-                    "re_extract": True,
-                },
-            )
-        if acol2.button("➖ Quitar zona", key=f"sub-{layer['id']}"):
-            _mask_op(
-                project,
-                {
-                    "layer_id": layer["id"],
-                    "operations": [{**operation, "op": "subtract"}],
-                    "feather": feather,
-                    "re_extract": True,
-                },
-            )
+        
+        if st.button("Guardar dibujo como máscara", type="primary", key=f"save-canvas-{layer['id']}"):
+            if canvas_result.image_data is not None:
+                # Resize the canvas mask back to original resolution
+                mask_image = Image.fromarray(canvas_result.image_data.astype('uint8'), 'RGBA')
+                mask_image = mask_image.resize((canvas["width"], canvas["height"]), Image.NEAREST)
+                # Convert to L (grayscale)
+                mask_l = Image.new("L", mask_image.size, 0)
+                mask_l.paste(255, mask=mask_image.split()[3]) # Use alpha channel as mask
+                
+                buf = io.BytesIO()
+                mask_l.save(buf, format="PNG")
+                api.upload_mask(project["project_id"], layer["id"], buf.getvalue())
+                refresh_project()
+                st.rerun()
+
 
 
 def _behaviour(project: dict, layer: dict) -> None:

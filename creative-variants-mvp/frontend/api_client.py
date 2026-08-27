@@ -304,3 +304,15 @@ def preview_mask(project_id: str, layer_id: str) -> bytes:
     return _handle(
         requests.get(_url(f"/projects/{project_id}/preview/mask/{layer_id}"), timeout=TIMEOUT)
     )
+
+def get_task_status(project_id: str, task_id: str) -> dict:
+    return _handle(requests.get(_url(f"/projects/{project_id}/tasks/{task_id}"), timeout=TIMEOUT))
+
+def upload_mask(project_id: str, layer_id: str, mask_bytes: bytes) -> dict:
+    return _handle(
+        requests.post(
+            _url(f"/projects/{project_id}/layers/{layer_id}/mask/upload"),
+            files={"mask_file": ("mask.png", mask_bytes, "image/png")},
+            timeout=TIMEOUT
+        )
+    )

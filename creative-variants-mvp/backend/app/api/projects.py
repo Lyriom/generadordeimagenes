@@ -563,6 +563,37 @@ def create_layer(project_id: str, request: LayerCreateRequest) -> Layer:
     response_model=Layer,
     summary="Corregir la máscara de una capa (pincel add/subtract)",
 )
+
+@router.post(
+    "/{project_id}/layers/{layer_id}/mask/upload",
+    response_model=Layer,
+    summary="Subir una máscara dibujada a mano alzada",
+)
+async def upload_mask(project_id: str, layer_id: str, mask_file: UploadFile = File(...)):
+    project = load_project_or_404(project_id)
+    layer = project.layer_by_id(layer_id)
+    if not layer:
+        raise bad_request("Layer not found")
+        
+    temp_path = await _stream_upload(project.project_id, mask_file, 10 * 1024 * 1024)
+    try:
+        import numpy as np
+        from PIL import Image
+        img = Image.open(temp_path).convert("L")
+        mask = np.array(img)
+        
+        layer_extraction.write_mask(project, layer, mask)
+        layer.meta["mask_edited"] = True
+        layer.extracted = False
+        if layer.category != LayerCategory.BACKGROUND:
+            ok, warning = layer_extraction.extract_layer(project, layer, feather=0, force=True)
+            if not ok and warning:
+                layer.warnings.append(warning)
+        storage.save_project(project)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return layer
+
 def edit_mask(project_id: str, request: MaskEditRequest) -> Layer:
     project = load_project_or_404(project_id)
     layer = project.layer_by_id(request.layer_id)
@@ -726,51 +757,40 @@ def reconstruct_background(
 # --------------------------------------------------------------------- variantes
 @router.post(
     "/{project_id}/generate",
-    response_model=GenerateResponse,
-    summary="Generar variantes de composición",
+    summary="Encolar generación de variantes de composición",
 )
-def generate(project_id: str, request: GenerateRequest | None = None) -> GenerateResponse:
+def generate(project_id: str, request: GenerateRequest | None = None):
     project = load_project_or_404(project_id)
     request = request or GenerateRequest()
-    try:
-        generated, warnings = variants_service.generate_variants(project, request)
-        storage.save_project(project)
-    except Exception as exc:  # noqa: BLE001
-        raise as_http_error(exc) from exc
-    if not generated:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={
-                "message": "No se pudo generar ninguna variante.",
-                "warnings": warnings,
-            },
-        )
-    return GenerateResponse(
-        project_id=project.project_id, variants=generated, warnings=warnings
-    )
+    from app.worker import generate_variants_task
+    task = generate_variants_task.delay(project_id, request.model_dump())
+    return {"task_id": task.id, "status": "PENDING"}
+
+@router.get(
+    "/{project_id}/tasks/{task_id}",
+    summary="Consultar estado de una tarea",
+)
+def get_task_status(project_id: str, task_id: str):
+    from app.worker import celery_app
+    task = celery_app.AsyncResult(task_id)
+    return {
+        "task_id": task_id,
+        "state": task.state,
+        "result": task.result if task.state == "COMPLETED" else None,
+        "meta": task.info if task.state == "PROGRESS" else None
+    }
 
 
 @router.post(
     "/{project_id}/auto",
-    response_model=AutoResponse,
-    summary="Modo automático: detectar, recortar, rellenar el fondo y generar en un paso",
+    summary="Modo automático: encolar detectar, recortar, rellenar y generar",
 )
-def auto(project_id: str, request: AutoRequest | None = None) -> AutoResponse:
+def auto(project_id: str, request: AutoRequest | None = None):
     project = load_project_or_404(project_id)
     request = request or AutoRequest()
-    try:
-        steps, generated, warnings = autopilot.run(project, request)
-        storage.save_project(project)
-    except Exception as exc:  # noqa: BLE001
-        raise as_http_error(exc) from exc
-    # En una campaña por lotes, una tanda sin aprobados no debe cancelar los demás
-    # productos/KV. El cliente recibe la lista vacía y continúa con la siguiente.
-    return AutoResponse(
-        project_id=project.project_id,
-        steps=steps,
-        variants=generated,
-        warnings=warnings,
-    )
+    from app.worker import auto_task
+    task = auto_task.delay(project_id, request.model_dump())
+    return {"task_id": task.id, "status": "PENDING"}
 
 
 @router.get(

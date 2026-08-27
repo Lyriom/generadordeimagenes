@@ -12,6 +12,8 @@ services:
     environment:
       DATA_DIR: /app/data
       INGEST_DIR: /app/data/ingest
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
     ports:
       - "8000:8000"
     volumes:
@@ -44,4 +46,32 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: cv-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      args:
+        INSTALL_OCR: ${INSTALL_OCR:-false}
+    image: creative-variants-backend:latest
+    container_name: cv-worker
+    command: celery -A app.worker.celery_app worker --loglevel=info
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      INGEST_DIR: /app/data/ingest
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - redis
     restart: unless-stopped

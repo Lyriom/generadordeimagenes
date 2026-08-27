@@ -5,6 +5,7 @@ sola llamada: POST /projects/{id}/auto. Aquí no hay lógica de imagen.
 """
 from __future__ import annotations
 
+import time
 import streamlit as st
 
 import api_client as api
@@ -517,6 +518,24 @@ def _sizes() -> list[str] | None:
     return chosen or None
 
 
+
+def _poll_task(project_id: str, task_id: str, progress_text: str):
+    progress_bar = st.progress(0, text=progress_text)
+    while True:
+        status = api.get_task_status(project_id, task_id)
+        if status["state"] == "COMPLETED":
+            progress_bar.progress(1.0, text=f"{progress_text} (Completado)")
+            time.sleep(0.5)
+            progress_bar.empty()
+            return status["result"]
+        elif status["state"] == "FAILED":
+            progress_bar.empty()
+            raise Exception("La tarea asíncrona falló.")
+        elif status["state"] == "PROGRESS":
+            meta = status["meta"] or {}
+            progress_bar.progress(meta.get("progress", 0) / 100.0, text=meta.get("status", progress_text))
+        time.sleep(2)
+
 def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]) -> None:
     st.subheader("4 · Elige formatos y genera")
     individual = product_batch.get("individual", [])
@@ -621,7 +640,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             project["project_id"], image=_file_tuple(product),
                             layer_id=target, hide_others=True,
                         )
-                        result = api.auto_generate(
+                        task = api.auto_generate(
                             project["project_id"], count=int(count), formats=formats,
                             intensity=intensity, instruction=instruction or None,
                             seed=int(seed) + kv_index * 100 + product_index,
@@ -634,6 +653,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                                 background_provider == "openai" and first_batch
                             ),
                         )
+                        result = _poll_task(project["project_id"], task["task_id"], f"Generando {product.name}...")
                         first_batch = False
                         all_steps.extend(result.get("steps", []))
                         all_warnings.extend(replaced.get("warnings", []))
@@ -656,7 +676,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                         group_label = " + ".join(
                             product.name.rsplit(".", 1)[0] for product in group_products
                         )
-                        result = api.auto_generate(
+                        task = api.auto_generate(
                             project["project_id"], count=int(count), formats=formats,
                             intensity=intensity, instruction=instruction or None,
                             seed=int(seed) + kv_index * 100 + len(individual) + group_index,
@@ -669,6 +689,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                                 background_provider == "openai" and first_batch
                             ),
                         )
+                        result = _poll_task(project["project_id"], task["task_id"], f"Generando {group_label}...")
                         first_batch = False
                         all_steps.extend(result.get("steps", []))
                         all_warnings.extend(result.get("warnings", []))
