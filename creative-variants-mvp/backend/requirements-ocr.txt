@@ -1,0 +1,11 @@
+# OCR opcional (PaddleOCR). Pesa ~1 GB y descarga modelos en el primer uso.
+#
+# Habilitar en el build:
+#   docker compose build --build-arg INSTALL_OCR=true backend
+# o localmente:
+#   pip install -r requirements-ocr.txt
+#
+# Sin estos paquetes la app sigue funcionando: /analyze devuelve una advertencia
+# y las capas de texto se crean manualmente en el paso 3.
+paddlepaddle>=2.6,<4.0
+paddleocr>=2.7,<4.0

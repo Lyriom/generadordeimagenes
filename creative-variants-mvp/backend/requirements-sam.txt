@@ -1,0 +1,19 @@
+# Segmentación SAM 2 / SAM opcional (CPU). Pesa varios GB.
+#
+# 1) Instalar:
+#      pip install -r requirements-sam.txt
+# 2) Descargar un checkpoint manualmente (nunca se descarga solo):
+#      SAM 2.1 small → https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
+#      SAM  1  vit_b → https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth
+# 3) Configurar en .env:
+#      SEGMENTATION_PROVIDER=sam
+#      SAM_VARIANT=sam2                     # o "sam"
+#      SAM_CHECKPOINT=/models/sam2.1_hiera_small.pt
+#      SAM_MODEL_TYPE=configs/sam2.1/sam2.1_hiera_s.yaml   # o vit_b para SAM 1
+# 4) Montar la carpeta de modelos en docker-compose.yml:
+#      volumes: [ ./models:/models:ro ]
+torch>=2.2
+torchvision>=0.17
+# Elegir UNA de las dos:
+# sam2 @ git+https://github.com/facebookresearch/sam2.git
+# segment-anything @ git+https://github.com/facebookresearch/segment-anything.git

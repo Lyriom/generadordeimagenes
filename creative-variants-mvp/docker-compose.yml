@@ -1,0 +1,47 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      args:
+        # OCR opcional: docker compose build --build-arg INSTALL_OCR=true backend
+        INSTALL_OCR: ${INSTALL_OCR:-false}
+    image: creative-variants-backend:latest
+    container_name: cv-backend
+    env_file:
+      - .env
+    environment:
+      DATA_DIR: /app/data
+      INGEST_DIR: /app/data/ingest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      # Descomente para habilitar SAM con checkpoints locales:
+      # - ./models:/models:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    image: creative-variants-frontend:latest
+    container_name: cv-frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "8501:8501"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped

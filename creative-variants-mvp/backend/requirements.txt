@@ -1,0 +1,16 @@
+# Núcleo del backend: funciona sin GPU y sin APIs externas.
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.12
+pydantic>=2.9,<3.0
+python-dotenv>=1.0,<2.0
+Pillow>=10.4,<12.0
+opencv-python-headless>=4.10,<5.0
+numpy>=1.26,<3.0
+httpx>=0.27,<1.0
+
+# Importación de PSD con capas reales (solo depende de attrs; sin GPU)
+psd-tools>=1.9,<2.0
+
+# Pruebas
+pytest>=8.0,<9.0

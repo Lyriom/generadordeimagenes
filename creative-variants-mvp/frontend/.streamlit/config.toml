@@ -1,0 +1,15 @@
+[server]
+maxUploadSize = 300
+# La protección XSRF exige CORS activo: no las mezcle.
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2563EB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F4F6"
+textColor = "#111827"
+font = "sans serif"
