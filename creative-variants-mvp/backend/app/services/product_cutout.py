@@ -31,6 +31,7 @@ from ..models import (
 from ..providers import ProviderUnavailableError, get_inpainting_provider
 from ..providers.magnific import MagnificCutoutProvider, MagnificSceneProvider
 from . import layer_extraction, storage
+from . import imaging
 from .imaging import dilate_mask, mask_bbox, save_mask
 
 logger = logging.getLogger(__name__)
@@ -490,6 +491,41 @@ def _clean_plate(
     # Se rellena en un archivo aparte y solo se mueve si sale bien: si el
     # proveedor falla a medias, la plancha anterior sigue intacta.
     staged = target.with_name("plate_sin_producto.png")
+
+    # En un ciclorama no hay nada que inventar, solo degradado que continuar. Un
+    # modelo generativo ahí se aburre y se saca un objeto: con un KV real devolvió
+    # un rollo de cartón con tipografía falsa donde estaba la mesa.
+    with Image.open(plate) as opened:
+        pixeles = np.asarray(opened.convert("RGB"))
+    detalle = imaging.surrounding_detail(pixeles, mask)
+    if detalle <= imaging.PLAIN_BACKDROP_DETAIL:
+        # Con margen: el contorno del producto y sus patas finas se salen de la
+        # máscara ajustada y, si no, quedan dibujados de fantasma. Lo de más se
+        # tapa después con el producto nuevo.
+        ancho = dilate_mask(mask, 24)
+        Image.fromarray(imaging.harmonic_fill(pixeles, ancho)).save(
+            staged, format="PNG", optimize=True
+        )
+        staged.replace(target)
+        project.background = BackgroundInfo(
+            path=BACKGROUND_REL,
+            provider=(
+                f"{project.background.provider}+fondo-liso"
+                if project.background.path
+                else "fondo-liso"
+            ),
+            generated_at=utcnow(),
+            warnings=["Se continuó el degradado del fondo donde estaba el producto."],
+        )
+        logger.info(
+            "%s: fondo liso (detalle %.2f), relleno sin IA", project.project_id, detalle
+        )
+        warnings.append(
+            "El fondo era liso, así que el hueco se continuó por cálculo en vez de "
+            "con IA: no hay nada inventado detrás del producto."
+        )
+        return warnings
+
     provider = get_inpainting_provider(provider_name, model)
     used = getattr(provider, "name", "opencv")
     try:

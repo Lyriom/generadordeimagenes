@@ -297,3 +297,83 @@ def pil_to_bgr(image: Image.Image) -> np.ndarray:
 
 def bgr_to_pil(image: np.ndarray) -> Image.Image:
     return Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+
+
+#: Detalle medio alrededor del hueco por debajo del cual el fondo es liso.
+#:
+#: Medido con KV reales: un ciclorama en degradado da 0,85; la fotografía de una
+#: habitación, con muebles, cuadros y textura de piso, está un orden por encima.
+PLAIN_BACKDROP_DETAIL = 2.5
+
+
+def surrounding_detail(image: np.ndarray, mask: np.ndarray) -> float:
+    """Cuánta textura hay alrededor del hueco. Bajo = ciclorama o pared lisa.
+
+    Sirve para decidir quién rellena. En un fondo liso no hay nada que inventar y
+    pedírselo a un modelo generativo termina mal: en un KV real devolvió un rollo
+    de cartón con tipografía falsa donde solo hacía falta continuar el degradado.
+    """
+    binaria = ((mask > 24) * 255).astype(np.uint8)
+    anillo = cv2.dilate(
+        binaria, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (121, 121))
+    ) - cv2.dilate(binaria, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (21, 21)))
+    if not (anillo > 0).any():
+        return float("inf")
+    gris = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    bordes = cv2.Laplacian(cv2.GaussianBlur(gris, (5, 5), 0), cv2.CV_32F)
+    return float(np.abs(bordes)[anillo > 0].mean())
+
+
+def harmonic_fill(
+    image: np.ndarray, mask: np.ndarray, side: int = 96, iterations: int = 4000
+) -> np.ndarray:
+    """Rellena el hueco con la superficie más suave que encaja con su borde.
+
+    Es estirar una membrana entre los bordes del agujero: el degradado del fondo y
+    la caída de la sombra continúan solos. Frente a las alternativas probadas con
+    un KV real, `cv2.inpaint` dejaba facetas poligonales y un promediado por
+    pirámide dejaba una silueta clara del producto; esto no deja ninguna de las
+    dos, y a diferencia de un modelo generativo no puede inventarse un objeto.
+
+    Se resuelve muy en pequeño y se amplía. No es una economía: la difusión
+    necesita del orden del ancho del hueco al cuadrado en iteraciones, así que a
+    resolución alta se queda a medias y deja una meseta con la silueta del
+    producto. En 96 px converge de verdad, y como la superficie buscada es suave
+    por definición, al ampliarla no se pierde nada.
+    """
+    alto, ancho = image.shape[:2]
+    hole = mask > 24
+    if not hole.any():
+        return image.copy()
+
+    escala = side / max(alto, ancho, 1)
+    pequeno = cv2.resize(
+        image,
+        (max(8, int(ancho * escala)), max(8, int(alto * escala))),
+        interpolation=cv2.INTER_AREA,
+    ).astype(np.float32)
+    chico = cv2.resize(
+        hole.astype(np.uint8), (pequeno.shape[1], pequeno.shape[0]),
+        interpolation=cv2.INTER_NEAREST,
+    ) > 0
+    if chico.all():
+        return image.copy()
+
+    # Semilla con el color del borde: converge en muchas menos iteraciones.
+    borde = cv2.dilate(chico.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    borde &= ~chico
+    pequeno[chico] = (
+        pequeno[borde].mean(axis=0) if borde.any() else pequeno[~chico].mean(axis=0)
+    )
+    for _ in range(iterations):
+        vecinos = (
+            np.roll(pequeno, 1, 0) + np.roll(pequeno, -1, 0)
+            + np.roll(pequeno, 1, 1) + np.roll(pequeno, -1, 1)
+        ) / 4.0
+        pequeno[chico] = vecinos[chico]
+
+    grande = cv2.resize(pequeno, (ancho, alto), interpolation=cv2.INTER_CUBIC)
+    peso = cv2.GaussianBlur((hole * 255).astype(np.uint8), (0, 0), 6)
+    peso = (peso.astype(np.float32) / 255.0)[..., None]
+    mezcla = image.astype(np.float32) * (1 - peso) + np.clip(grande, 0, 255) * peso
+    return mezcla.astype(np.uint8)

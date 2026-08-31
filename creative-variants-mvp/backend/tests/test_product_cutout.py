@@ -245,6 +245,64 @@ def test_the_hole_left_by_the_product_is_filled(
     assert np.abs(centre - np.array([90, 60, 40])).sum(axis=1).mean() > 30
 
 
+def test_a_plain_backdrop_is_filled_without_ai(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """En un ciclorama no hay nada que inventar: el modelo sobra y estorba.
+
+    Caso real: donde estaba la mesa de centro, el modelo devolvió un rollo de
+    cartón con tipografía inventada. El fondo era un degradado liso: basta con
+    continuarlo.
+    """
+    project_id = flat_project["project_id"]
+    _mock_magnific(monkeypatch, _cutout_png())
+
+    def no_llamar(*args, **kwargs):  # pragma: no cover - no debe ejecutarse
+        raise AssertionError("un fondo liso no necesita IA")
+
+    monkeypatch.setattr(product_cutout, "get_inpainting_provider", no_llamar)
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+
+    assert payload["detected"] is True, payload["warnings"]
+    assert any("nada inventado" in w for w in payload["warnings"])
+
+    # Y el mueble ya no está: el degradado siguió su curso.
+    plate = storage.abs_path(project_id, "backgrounds/background.png")
+    with Image.open(plate) as image:
+        arr = np.asarray(image.convert("RGB"), dtype=np.int16)
+    x0, y0, x1, y1 = SUBJECT_BOX
+    centro = arr[y0 + 40 : y1 - 40, x0 + 40 : x1 - 40].reshape(-1, 3)
+    assert np.abs(centro - np.array([90, 60, 40])).sum(axis=1).mean() > 30
+
+
+def test_a_textured_background_still_goes_to_the_model(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """Con textura sí hay contenido que reconstruir: ahí el modelo aporta."""
+    from app.services import imaging
+
+    monkeypatch.setattr(imaging, "PLAIN_BACKDROP_DETAIL", -1.0)
+    project_id = flat_project["project_id"]
+    _mock_magnific(monkeypatch, _cutout_png())
+    llamadas: list = []
+
+    class Falso:
+        name = "falso"
+
+        def fill(self, image_path, mask_path, prompt=None, output_path=None):
+            llamadas.append(output_path)
+            Image.open(image_path).convert("RGB").save(output_path)
+            return output_path
+
+    monkeypatch.setattr(product_cutout, "get_inpainting_provider", lambda *a, **k: Falso())
+
+    client.post(f"/projects/{project_id}/layers/detect-product", json={})
+    assert llamadas, "con textura hay que llamar al proveedor"
+
+
 def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
     client: TestClient, flat_project: dict, monkeypatch
 ):
