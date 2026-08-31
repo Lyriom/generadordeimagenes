@@ -695,3 +695,139 @@ class MagnificCutoutProvider:
         buffer = io.BytesIO()
         image.save(buffer, format="JPEG", quality=92, optimize=True)
         return buffer.getvalue(), "recorte-entrada.jpg"
+
+
+#: Aislar el producto de una foto de ambiente.
+#:
+#: `remove-background` no sirve aquí: en una habitación considera "fondo" solo lo
+#: que hay detrás de la cámara, así que devuelve la escena entera —pared, piso y
+#: muebles— y el producto sigue sin separarse. Un modelo de edición sí entiende
+#: qué es mueble y qué es cuarto, y al dejarlo sobre un plano liso el recortador
+#: ya puede hacer su trabajo.
+ISOLATE_INSTRUCTION = (
+    "Keep only the products shown in this advertising photograph — the furniture "
+    "or merchandise being sold — with their exact shape, colour, materials, "
+    "scale, position and perspective. Delete the surrounding scene: replace every "
+    "wall, floor, ceiling, window, houseplant, shelf and piece of wall art with a "
+    "flat, uniform pure white background. Keep no shadows on that background. "
+    "Do not add any object, text, logo or watermark."
+)
+
+#: Vaciar la escena para que quede de plancha de fondo.
+EMPTY_INSTRUCTION = (
+    "Remove every product from this advertising photograph — all furniture and "
+    "merchandise — and leave the empty setting behind. Keep the same walls, "
+    "floor, ceiling, lighting, colour palette, camera angle and perspective, and "
+    "reconstruct whatever the products were covering. Do not add any object, "
+    "text, logo or watermark."
+)
+
+
+class MagnificSceneProvider:
+    """Ediciones por instrucción sobre la foto completa, sin máscara.
+
+    Se usa cuando el producto está aplanado dentro de una foto de ambiente y hay
+    que separarlo del decorado. Son dos operaciones complementarias: `isolate`
+    deja el producto sobre fondo plano y `empty` deja el decorado sin producto.
+
+    El modelo **regenera** la imagen: el resultado es fiel al original en estilo,
+    color y encuadre, pero no idéntico píxel a píxel. Para una plancha de fondo
+    publicitaria es suficiente; quien necesite exactitud tiene la máscara a mano.
+    """
+
+    name = "magnific-scene"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        self.client = MagnificClient(api_key=api_key)
+        self.model_id = (model or settings.magnific_scene_model).strip()
+
+    def available(self) -> bool:
+        return self.client.available() and self.model_id in MODELS
+
+    @property
+    def model(self) -> MagnificModel:
+        return resolve_model(self.model_id)
+
+    def isolate(self, image_path: str, output_path: str | None = None, prompt: str | None = None) -> str:
+        """El producto sobre fondo blanco liso, listo para recortar."""
+        return self._edit(image_path, prompt or ISOLATE_INSTRUCTION, output_path, "aislado")
+
+    def empty(self, image_path: str, output_path: str | None = None, prompt: str | None = None) -> str:
+        """El decorado sin el producto, listo para usarse de plancha."""
+        return self._edit(image_path, prompt or EMPTY_INSTRUCTION, output_path, "vacio")
+
+    # ------------------------------------------------------------------ interno
+    def _edit(self, image_path: str, prompt: str, output_path: str | None, suffix: str) -> str:
+        if not self.client.available():
+            raise ProviderUnavailableError("MAGNIFIC_API_KEY no está configurada.")
+        model = self.model
+        if model.supports_mask:
+            raise ProviderUnavailableError(
+                f"{model.label} solo trabaja con máscara y aquí todavía no la hay. "
+                "Elija otro modelo para las fotos de ambiente (MAGNIFIC_SCENE_MODEL)."
+            )
+
+        source = Path(image_path)
+        with Image.open(source) as opened:
+            size = opened.size
+
+        try:
+            with httpx.Client(timeout=self.client.timeout) as client:
+                reference = self.client.upload(client, source)
+                task = self.client.submit(
+                    client, model.endpoint, self._payload(model, reference, prompt, size)
+                )
+                url = self.client.wait(client, model.endpoint, task)
+                raw = self.client.download(client, url)
+        except httpx.HTTPStatusError as exc:
+            raise ProviderUnavailableError(
+                f"Magnific {model.id} devolvió {exc.response.status_code}: "
+                f"{exc.response.text[:500]}"
+            ) from exc
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            raise ProviderUnavailableError(f"Magnific {model.id} no respondió: {exc}") from exc
+
+        try:
+            edited = Image.open(io.BytesIO(raw)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderUnavailableError(
+                f"Magnific {model.id} no devolvió una imagen válida."
+            ) from exc
+        # El modelo elige su propio tamaño: se devuelve al del arte para que todo
+        # lo que venga después encaje con el lienzo del proyecto.
+        if edited.size != size:
+            edited = edited.resize(size, Image.Resampling.LANCZOS)
+
+        target = Path(output_path) if output_path else source.with_name(f"{suffix}.png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        edited.save(target, format="PNG", optimize=True)
+        edited.close()
+        return str(target)
+
+    def _payload(
+        self, model: MagnificModel, reference: str, prompt: str, size: tuple[int, int]
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"prompt": prompt}
+        if model.aspect_ratios:
+            payload["aspect_ratio"] = closest_ratio(*size, model.aspect_ratios)
+        if model.resolutions:
+            wanted = settings.magnific_resolution.strip().lower()
+            match = next((item for item in model.resolutions if item.lower() == wanted), None)
+            payload["resolution"] = match or model.resolutions[-1]
+        if model.mode == "references":
+            payload["reference_images"] = [reference]
+        elif model.mode == "reference_objects":
+            payload["reference_images"] = [{"image": reference, "mime_type": "image/png"}]
+        elif model.mode == "image":
+            payload["input_image"] = reference
+            if model.extras.get("size_in_pixels"):
+                payload["width"], payload["height"] = _clamp_pixels(*size)
+        elif model.mode == "structure":
+            payload["structure_reference"] = reference
+            payload["structure_strength"] = settings.magnific_structure_strength
+            payload["adherence"] = settings.magnific_adherence
+            payload["model"] = settings.magnific_mystic_model
+            payload["engine"] = settings.magnific_engine
+        else:  # pragma: no cover - el catálogo no define otros modos
+            raise ProviderUnavailableError(f"Modo no soportado: {model.mode}")
+        return payload

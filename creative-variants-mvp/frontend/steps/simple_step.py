@@ -477,8 +477,10 @@ def _rescue_products(missing: list[tuple[str, str]]) -> None:
         "como capa aparte."
     )
     st.caption(
-        "Magnific recorta el mueble o el producto de la foto y limpia el fondo "
-        "detrás. Consume créditos: una llamada por KV."
+        "Magnific recorta el producto de la foto y deja el fondo limpio detrás. "
+        "En las fotos de ambiente —una sala montada en un cuarto— hace falta "
+        "además separar el mueble del decorado, así que esos KV tardan más y "
+        "gastan alguna llamada extra."
     )
     if not st.button(
         f"🔍 Detectar el producto con IA en {len(missing)} KV",
@@ -499,9 +501,17 @@ def _rescue_products(missing: list[tuple[str, str]]) -> None:
             if result.get("detected"):
                 logrados += 1
                 layer = result["layer"]
-                st.write(
-                    f"　　↳ producto de {layer['width']}×{layer['height']} px recortado"
+                como = (
+                    " (foto de ambiente: se separó del decorado)"
+                    if layer.get("meta", {}).get("detected_by") == "magnific-scene"
+                    else ""
                 )
+                st.write(
+                    f"　　↳ producto de {layer['width']}×{layer['height']} px "
+                    f"recortado{como}"
+                )
+                for aviso in result.get("warnings") or []:
+                    st.caption(f"　　　{aviso}")
             else:
                 fallidos.append(f"{name}: " + " ".join(result.get("warnings") or []))
     if logrados:

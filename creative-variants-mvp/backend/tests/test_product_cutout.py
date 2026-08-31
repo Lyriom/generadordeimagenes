@@ -46,9 +46,16 @@ def _cutout_png(box=SUBJECT_BOX, size=CANVAS) -> bytes:
     return buffer.getvalue()
 
 
-def _mock_magnific(monkeypatch, cutout_bytes: bytes, calls: list | None = None):
-    """Simula subida → remove-background → descarga."""
+def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None):
+    """Simula subida → remove-background → descarga, y las ediciones de escena.
+
+    `cutout_bytes` puede ser una lista: cada llamada a remove-background consume
+    el siguiente recorte, y el último se repite. Así se cubre la foto de ambiente,
+    donde primero vuelve la escena entera y después el producto aislado.
+    """
     real_client = httpx.Client
+    recortes = list(cutout_bytes) if isinstance(cutout_bytes, list) else [cutout_bytes]
+    pedidos = {"cut": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -64,14 +71,27 @@ def _mock_magnific(monkeypatch, cutout_bytes: bytes, calls: list | None = None):
         if path == "/v1/ai/beta/remove-background":
             if calls is not None:
                 calls.append(request.content.decode())
+            indice = min(pedidos["cut"], len(recortes) - 1)
+            pedidos["cut"] += 1
             return httpx.Response(200, json={
                 "original": "https://cdn.test/asset.png",
-                "high_resolution": "https://cdn.test/cut.png",
+                "high_resolution": f"https://cdn.test/cut{indice}.png",
                 "preview": "https://cdn.test/prev.png",
-                "url": "https://cdn.test/cut.png",
+                "url": f"https://cdn.test/cut{indice}.png",
             })
-        if str(request.url) == "https://cdn.test/cut.png":
-            return httpx.Response(200, content=cutout_bytes)
+        if request.url.host == "cdn.test" and path.startswith("/cut"):
+            return httpx.Response(200, content=recortes[int(path[4:-4])])
+        # Edición por instrucción: aislar el producto o vaciar el decorado.
+        if path.startswith("/v1/ai/text-to-image/") or path.startswith("/v1/ai/gemini"):
+            if calls is not None:
+                calls.append(request.content.decode())
+            return httpx.Response(200, json={"data": {
+                "task_id": "tsk_1",
+                "status": "COMPLETED",
+                "generated": ["https://cdn.test/editada.png"],
+            }})
+        if str(request.url) == "https://cdn.test/editada.png":
+            return httpx.Response(200, content=_room_photo())
         return httpx.Response(404, json={"message": f"sin ruta {request.url}"})
 
     def factory(*args, **kwargs):
@@ -204,9 +224,9 @@ def test_the_hole_left_by_the_product_is_filled(
 def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
     client: TestClient, flat_project: dict, monkeypatch
 ):
-    """Si el recortador devuelve casi todo, no se crea una capa inútil."""
+    """Si ni siquiera separando la escena sale un producto, no se crea la capa."""
     project_id = flat_project["project_id"]
-    _mock_magnific(monkeypatch, _cutout_png(box=(0, 0, 400, 400)))
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 0, 400, 400))] * 2)
 
     payload = client.post(
         f"/projects/{project_id}/layers/detect-product", json={}
@@ -217,16 +237,93 @@ def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
     assert any("escena completa" in w for w in payload["warnings"])
 
 
-def test_an_ambience_photo_is_rejected_as_a_product(
+def test_an_ambience_photo_is_separated_instead_of_rejected(
     client: TestClient, flat_project: dict, monkeypatch
 ):
     """El caso real de la portada: el recorte devolvió el 75 % del arte.
 
-    Era la sala entera, no un mueble. Aceptarla daba una capa inútil y obligaba a
-    rellenar tres cuartos del lienzo, donde el modelo alucinaba tipografía.
+    Era la sala entera —piso y alfombra incluidos—, porque en una habitación
+    `remove-background` no tiene fondo que quitar. En vez de rendirse, un modelo
+    de edición deja el mueble sobre fondo plano y ahí el recorte sí funciona.
     """
     project_id = flat_project["project_id"]
-    # 0..400 x 100..400 = 75 % del lienzo, igual que el KV de Marcimex.
+    # Primero la escena entera (75 %), después el mueble aislado.
+    _mock_magnific(monkeypatch, [
+        _cutout_png(box=(0, 100, 400, 400)),
+        _cutout_png(),
+    ])
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+
+    assert payload["detected"] is True, payload["warnings"]
+    layer = payload["layer"]
+    assert layer["category"] == LayerCategory.PRODUCT.value
+    x0, y0, x1, y1 = SUBJECT_BOX
+    assert (layer["x"], layer["y"], layer["width"], layer["height"]) == (
+        x0, y0, x1 - x0, y1 - y0
+    )
+    assert layer["meta"]["detected_by"] == "magnific-scene"
+    assert any("ambiente" in w for w in payload["warnings"])
+
+
+def test_the_emptied_scene_becomes_the_plate_without_inpainting(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """El decorado vacío ya viene generado: no hay que rellenar ningún hueco."""
+    project_id = flat_project["project_id"]
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()])
+
+    def no_llamar(*args, **kwargs):  # pragma: no cover - debe no ejecutarse
+        raise AssertionError("no hay que rellenar: el decorado ya se regeneró")
+
+    monkeypatch.setattr(product_cutout, "_clean_plate", no_llamar)
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+
+    assert payload["detected"] is True
+    project = client.get(f"/projects/{project_id}").json()
+    assert project["background"]["path"] == "backgrounds/background.png"
+    assert "magnific-scene" in project["background"]["provider"]
+
+
+def test_the_kv_graphics_survive_the_regenerated_plate(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """El modelo rehace la foto entera; el panel del titular no puede perderse.
+
+    Caso real: la plancha traía un recuadro blanco donde va "Días WOW · 70 %".
+    Al vaciar la sala el modelo lo borró. Fuera de la foto mandan los píxeles
+    originales.
+    """
+    project_id = flat_project["project_id"]
+    # La foto ocupa de y=100 abajo: de ahí para arriba es gráfico del KV.
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()])
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+    assert payload["detected"] is True, payload["warnings"]
+
+    plate = storage.abs_path(project_id, "backgrounds/background.png")
+    with Image.open(plate) as image:
+        rehecha = np.asarray(image.convert("RGB"), dtype=np.int16)
+    original = np.asarray(
+        Image.open(io.BytesIO(_room_photo())).convert("RGB"), dtype=np.int16
+    )
+    # Franja de gráfico (y < 90, lejos del degradado del borde): intacta.
+    assert np.abs(rehecha[:90] - original[:90]).max() <= 2
+
+
+def test_without_a_scene_model_the_ambience_photo_explains_itself(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """Sin modelo de edición no se puede separar: hay que decirlo, no reventar."""
+    project_id = flat_project["project_id"]
+    monkeypatch.setattr(magnific.settings, "magnific_scene_model", "no-existe")
     _mock_magnific(monkeypatch, _cutout_png(box=(0, 100, 400, 400)))
 
     payload = client.post(
@@ -234,7 +331,18 @@ def test_an_ambience_photo_is_rejected_as_a_product(
     ).json()
 
     assert payload["detected"] is False
-    assert any("75%" in w for w in payload["warnings"])
+    assert any("MAGNIFIC_SCENE_MODEL" in w for w in payload["warnings"])
+
+
+def test_a_mask_only_model_is_rejected_for_scenes(tmp_path):
+    """Ideogram necesita máscara y aquí todavía no hay: hay que avisarlo claro."""
+    photo = tmp_path / "sala.png"
+    photo.write_bytes(_room_photo())
+    scene = magnific.MagnificSceneProvider(api_key="clave", model="ideogram-image-edit")
+
+    with pytest.raises(ProviderUnavailableError) as error:
+        scene.isolate(str(photo))
+    assert "máscara" in str(error.value)
 
 
 def test_a_large_but_plausible_product_is_accepted_with_a_warning(

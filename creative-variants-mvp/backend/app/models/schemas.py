@@ -314,6 +314,13 @@ class DetectProductRequest(BaseModel):
         description="Proveedor para limpiar el fondo tras el recorte (auto | opencv | magnific | …).",
     )
     model: str | None = Field(default=None, description="Modelo de Magnific para el fondo.")
+    scene_model: str | None = Field(
+        default=None,
+        description=(
+            "Modelo de edición para las fotos de ambiente, donde el producto hay "
+            "que separarlo del decorado (por defecto MAGNIFIC_SCENE_MODEL)."
+        ),
+    )
     prompt: str | None = Field(default=None, max_length=800)
     dilate: int = Field(
         default=4, ge=0, le=32, description="Expansión del borde al borrar el producto."

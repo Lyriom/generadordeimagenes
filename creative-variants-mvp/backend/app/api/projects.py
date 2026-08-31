@@ -1053,6 +1053,7 @@ def detect_product(
             inpaint_model=payload.model,
             prompt=payload.prompt,
             dilate=payload.dilate,
+            scene_model=payload.scene_model,
         )
         storage.save_project(project)
     except product_cutout.NoProductFoundError as exc:

@@ -78,6 +78,12 @@ class Settings:
         self.magnific_hdr: int = _env_int("MAGNIFIC_HDR", 40)
         self.magnific_creative_detailing: int = _env_int("MAGNIFIC_CREATIVE_DETAILING", 20)
         # Bajo este tamaño la imagen viaja en base64; por encima se sube primero.
+        # Modelo de edición por instrucción para las fotos de ambiente: aísla el
+        # producto sobre fondo plano y vacía la escena. Necesita entender la orden,
+        # así que no puede ser el de máscara (ideogram-image-edit).
+        self.magnific_scene_model: str = os.getenv(
+            "MAGNIFIC_SCENE_MODEL", "seedream-v4-5-edit"
+        )
         self.magnific_inline_max_mb: int = _env_int("MAGNIFIC_INLINE_MAX_MB", 6)
         # Suavizado del borde al recomponer lo generado sobre el arte original.
         self.magnific_feather: int = _env_int("MAGNIFIC_FEATHER", 6)

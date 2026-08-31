@@ -120,6 +120,37 @@ que suba el arte aplanado si esperaba una descomposición completa.
 > (`Image.convert("RGB")` rellena el alfa con negro y ensucia fondos, paletas y
 > segmentación). Ver `FLATTEN_BACKGROUND` en `services/imaging.py`.
 
+### Cuando el producto no viene como capa
+
+Muchos KV traen el producto **aplanado dentro de la fotografía**: la mesa sobre un
+ciclorama, la sala montada en un cuarto. El importador ve una capa que cubre todo
+el lienzo y es opaca, así que la toma como fondo —lo correcto para un fondo— y la
+pieza se queda sin nada que reemplazar.
+
+En el paso 3 aparece **“🔍 Detectar el producto con IA”**, que lo recupera. Hay dos
+caminos según la foto:
+
+| Foto | Qué pasa | Llamadas |
+| --- | --- | --- |
+| Producto sobre fondo liso | `remove-background` recorta el sujeto y se rellena el hueco. | 2 |
+| Ambiente (una sala en una habitación) | `remove-background` devuelve el cuarto entero, así que un modelo de edición deja el producto sobre fondo plano —y ahí sí se recorta— y en paralelo vacía el decorado, que pasa a ser la plancha. | 4 |
+
+Medido con un KV real de Marcimex: la mesa de centro sale al 12 % del arte por el
+camino corto; la sala en ambiente devolvía el 75 % —piso y alfombra incluidos— y
+solo se separa por el segundo camino, quedando en el 13 %.
+
+Dos cosas que conviene saber:
+
+- ⚠️ En el camino de ambiente **la imagen se regenera**: producto y decorado son
+  fieles al original en estilo, color y encuadre, pero no idénticos píxel a píxel.
+- ✅ Lo que no es fotografía —el panel del titular, una franja, un degradado— se
+  repone tal cual del arte original: el modelo no puede borrarlo.
+
+```bash
+POST /projects/{id}/layers/detect-product
+{"provider": "auto", "scene_model": "seedream-v4-5-edit"}
+```
+
 ## 2.c Tres reglas para obtener buenos resultados
 
 1. **Dibuje las máscaras un poco más grandes que el elemento.** Lo que no se borra
@@ -476,6 +507,7 @@ interfaz**, pieza por pieza. Pegue la clave y reinicie:
 INPAINTING_PROVIDER=auto        # usa Magnific en cuanto haya clave
 MAGNIFIC_API_KEY=...            # https://www.magnific.com/user/organization/api-keys
 MAGNIFIC_MODEL=ideogram-image-edit   # modelo por defecto
+MAGNIFIC_SCENE_MODEL=seedream-v4-5-edit  # separa producto y decorado en fotos de ambiente
 ```
 
 ```bash
