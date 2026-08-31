@@ -306,6 +306,27 @@ class ReplaceableLayersResponse(BaseModel):
     layers: list[ReplaceableLayer] = Field(default_factory=list)
 
 
+class DetectProductRequest(BaseModel):
+    """Recortar el producto de la fotografía cuando el PSD no lo trae como capa."""
+
+    provider: str | None = Field(
+        default=None,
+        description="Proveedor para limpiar el fondo tras el recorte (auto | opencv | magnific | …).",
+    )
+    model: str | None = Field(default=None, description="Modelo de Magnific para el fondo.")
+    prompt: str | None = Field(default=None, max_length=800)
+    dilate: int = Field(
+        default=4, ge=0, le=32, description="Expansión del borde al borrar el producto."
+    )
+
+
+class DetectProductResponse(BaseModel):
+    project_id: str
+    layer: Layer | None = None
+    detected: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
 class ReplaceProductResponse(BaseModel):
     project_id: str
     layer: Layer

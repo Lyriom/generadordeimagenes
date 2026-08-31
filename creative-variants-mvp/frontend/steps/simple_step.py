@@ -463,6 +463,56 @@ def _review_layers(projects: list[dict]) -> tuple[list[dict], bool]:
     return projects, done == len(project_ids)
 
 
+def _rescue_products(missing: list[tuple[str, str]]) -> None:
+    """Los KV cuyo producto viene aplanado dentro de la foto, no como capa.
+
+    Es lo normal en fotos de ambiente: la sala o el mueble están dentro de una
+    sola imagen que el importador tomó como fondo. Se recorta con IA para que la
+    pieza tenga algo que reemplazar.
+    """
+    st.info(
+        "Estos KV no tienen una capa identificada como Producto: "
+        + ", ".join(name for _id, name in missing)
+        + ". Suele pasar cuando el producto viene dentro de la fotografía y no "
+        "como capa aparte."
+    )
+    st.caption(
+        "Magnific recorta el mueble o el producto de la foto y limpia el fondo "
+        "detrás. Consume créditos: una llamada por KV."
+    )
+    if not st.button(
+        f"🔍 Detectar el producto con IA en {len(missing)} KV",
+        key="rescue-products",
+    ):
+        st.caption("También puedes marcarlo a mano en **Ajustes finos**.")
+        return
+
+    logrados, fallidos = 0, []
+    with st.status(f"Recortando el producto en {len(missing)} KV…", expanded=True):
+        for index, (project_id, name) in enumerate(missing, start=1):
+            st.write(f"{index}/{len(missing)} · {name}")
+            try:
+                result = api.detect_product(project_id)
+            except Exception as exc:  # noqa: BLE001 - un KV no debe frenar al resto
+                fallidos.append(f"{name}: {exc}")
+                continue
+            if result.get("detected"):
+                logrados += 1
+                layer = result["layer"]
+                st.write(
+                    f"　　↳ producto de {layer['width']}×{layer['height']} px recortado"
+                )
+            else:
+                fallidos.append(f"{name}: " + " ".join(result.get("warnings") or []))
+    if logrados:
+        st.session_state.cache_token += 1
+        st.success(f"Producto detectado en {logrados} KV.")
+    for detalle in fallidos:
+        st.warning(detalle)
+    if logrados:
+        st.rerun()
+
+
 def _product_batch(projects: list[dict]):
     """Recoge productos para reconstruir piezas desde la plantilla del KV."""
     st.subheader("3 · Carga los productos")
@@ -481,7 +531,7 @@ def _product_batch(projects: list[dict]):
                     item for item in candidates if item.get("category") == "product"
                 ]
                 if not product_candidates:
-                    missing.append(project["name"])
+                    missing.append((project["project_id"], project["name"]))
                     continue
                 target_by_project[project["project_id"]] = product_candidates[0]["id"]
                 original_count += len(product_candidates)
@@ -489,11 +539,7 @@ def _product_batch(projects: list[dict]):
             show_error(exc)
             return {"individual": [], "groups": [], "valid": False}, {}
         if missing:
-            st.info(
-                "Estos KV no tienen una capa identificada como Producto: "
-                + ", ".join(missing)
-                + ". Selecciónalos arriba y corrígelos en **Ajustes finos**."
-            )
+            _rescue_products(missing)
         if not target_by_project:
             return {"individual": [], "groups": [], "valid": False}, {}
 

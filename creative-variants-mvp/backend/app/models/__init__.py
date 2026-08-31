@@ -27,6 +27,8 @@ from .schemas import (  # noqa: F401
     AutoStep,
     CapabilitiesResponse,
     DeleteResponse,
+    DetectProductRequest,
+    DetectProductResponse,
     ExtractRequest,
     ExtractResponse,
     GenerateRequest,

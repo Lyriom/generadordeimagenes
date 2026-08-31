@@ -20,6 +20,8 @@ from ..models import (
     AutoResponse,
     Canvas,
     DeleteResponse,
+    DetectProductRequest,
+    DetectProductResponse,
     ExtractRequest,
     ExtractResponse,
     GenerateRequest,
@@ -54,6 +56,7 @@ from ..services import (
     export as export_service,
     inpainting,
     layer_extraction,
+    product_cutout,
     renderer,
     segmentation as seg_service,
     storage,
@@ -1027,6 +1030,43 @@ def extract(project_id: str, request: ExtractRequest | None = None) -> ExtractRe
 
 
 # ------------------------------------------------------------------------ fondo
+@router.post(
+    "/{project_id}/layers/detect-product",
+    response_model=DetectProductResponse,
+    summary="Recortar el producto de la foto cuando el PSD no lo trae como capa",
+)
+def detect_product(
+    project_id: str, request: DetectProductRequest | None = None
+) -> DetectProductResponse:
+    project = load_project_or_404(project_id)
+    payload = request or DetectProductRequest()
+    if product_cutout.has_product(project):
+        return DetectProductResponse(
+            project_id=project.project_id,
+            detected=False,
+            warnings=["La pieza ya tiene una capa Producto: no se recortó nada."],
+        )
+    try:
+        layer, warnings = product_cutout.detect_product(
+            project,
+            inpaint_provider=payload.provider,
+            inpaint_model=payload.model,
+            prompt=payload.prompt,
+            dilate=payload.dilate,
+        )
+        storage.save_project(project)
+    except product_cutout.NoProductFoundError as exc:
+        # No es un error del sistema: la foto simplemente no tiene sujeto separable.
+        return DetectProductResponse(
+            project_id=project.project_id, detected=False, warnings=[str(exc)]
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise as_http_error(exc) from exc
+    return DetectProductResponse(
+        project_id=project.project_id, layer=layer, detected=True, warnings=warnings
+    )
+
+
 @router.post(
     "/{project_id}/reconstruct-background",
     response_model=ReconstructBackgroundResponse,

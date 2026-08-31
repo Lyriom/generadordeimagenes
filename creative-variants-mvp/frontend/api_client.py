@@ -322,6 +322,22 @@ def auto_generate(
     )
 
 
+def detect_product(
+    project_id: str,
+    provider: str | None = None,
+    model: str | None = None,
+    prompt: str | None = None,
+) -> dict:
+    """Recorta el producto de la foto cuando el PSD no lo trae como capa."""
+    return _handle(
+        requests.post(
+            _url(f"/projects/{project_id}/layers/detect-product"),
+            json={"provider": provider, "model": model, "prompt": prompt},
+            timeout=TIMEOUT,
+        )
+    )
+
+
 def replaceable_layers(project_id: str) -> dict:
     return _handle(
         requests.get(_url(f"/projects/{project_id}/layers/replaceable"), timeout=60)

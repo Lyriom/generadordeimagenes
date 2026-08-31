@@ -589,3 +589,109 @@ def compose_inpaint(
         composed = original.copy()
         composed.paste(generated, (0, 0), alpha)
         return composed
+
+
+class MagnificCutoutProvider:
+    """Recorta el sujeto de una foto con `remove-background` de Magnific.
+
+    Resuelve el caso de los KV en los que el producto **no viene como capa**:
+    sofás, mesas o zapatos aplanados dentro de una sola fotografía de ambiente.
+    Sin esto no hay nada que mover ni que reemplazar.
+
+    El endpoint es síncrono y solo acepta URL, así que la imagen se sube antes
+    con la Upload Files API. Las URL que devuelve caducan a los 5 minutos.
+    """
+
+    name = "magnific-cutout"
+    endpoint = "/v1/ai/beta/remove-background"
+    #: Límites del endpoint: 20 MB de entrada y 25 megapíxeles de salida.
+    MAX_BYTES = 20 * 1024 * 1024
+    MAX_PIXELS = 25_000_000
+
+    def __init__(self, api_key: str | None = None) -> None:
+        self.client = MagnificClient(api_key=api_key)
+        self.api_key = self.client.api_key
+        self.timeout = self.client.timeout
+
+    def available(self) -> bool:
+        return self.client.available()
+
+    def cutout(self, image_path: str, output_path: str | None = None) -> str:
+        """Devuelve la ruta de un PNG RGBA con el sujeto y el resto transparente."""
+        if not self.available():
+            raise ProviderUnavailableError("MAGNIFIC_API_KEY no está configurada.")
+
+        source = Path(image_path)
+        with Image.open(source) as opened:
+            size = opened.size
+        payload, upload_name = self._prepared(source, size)
+
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                # El nombre decide el content-type de la subida: tiene que
+                # coincidir con los bytes que se envían.
+                asset_url = self.client.upload(client, Path(upload_name), payload)
+                response = client.post(
+                    f"{self.client.base_url}{self.endpoint}",
+                    headers={"x-magnific-api-key": self.api_key or ""},
+                    data={"image_url": asset_url},
+                )
+                response.raise_for_status()
+                body = response.json() or {}
+                result_url = body.get("high_resolution") or body.get("url")
+                if not result_url:
+                    raise ProviderUnavailableError(
+                        "Magnific no devolvió el recorte (respuesta sin URL)."
+                    )
+                image_bytes = self.client.download(client, result_url)
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:500]
+            raise ProviderUnavailableError(
+                f"Magnific remove-background devolvió {exc.response.status_code}: {detail}"
+            ) from exc
+        except (httpx.HTTPError, ValueError, KeyError) as exc:
+            raise ProviderUnavailableError(
+                f"Magnific remove-background no respondió: {exc}"
+            ) from exc
+
+        try:
+            cut = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderUnavailableError(
+                "El recorte devuelto por Magnific no es una imagen válida."
+            ) from exc
+
+        # El servicio puede reescalar: se devuelve al tamaño del arte para que la
+        # máscara encaje pixel a pixel con el lienzo del proyecto.
+        if cut.size != size:
+            cut = cut.resize(size, Image.Resampling.LANCZOS)
+
+        target = Path(output_path) if output_path else source.with_name("cutout.png")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cut.save(target, format="PNG", optimize=True)
+        cut.close()
+        return str(target)
+
+    def _prepared(self, source: Path, size: tuple[int, int]) -> tuple[bytes, str]:
+        """(bytes, nombre) dentro de los límites del endpoint: 20 MB y 25 MP."""
+        raw = source.read_bytes()
+        width, height = size
+        if len(raw) <= self.MAX_BYTES and width * height <= self.MAX_PIXELS:
+            return raw, source.name
+
+        with Image.open(source) as opened:
+            image = opened.convert("RGB")
+        scale = min(1.0, (self.MAX_PIXELS / max(1, width * height)) ** 0.5)
+        if scale < 1.0:
+            image = image.resize(
+                (max(1, int(width * scale)), max(1, int(height * scale))),
+                Image.Resampling.LANCZOS,
+            )
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+        if buffer.tell() <= self.MAX_BYTES:
+            return buffer.getvalue(), "recorte-entrada.png"
+        # Aún pesa demasiado en PNG: JPEG, y el nombre lo declara.
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=92, optimize=True)
+        return buffer.getvalue(), "recorte-entrada.jpg"
