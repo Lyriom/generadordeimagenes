@@ -1204,6 +1204,19 @@ def preview_detections(project_id: str):
     return _png_response(image)
 
 
+@router.get(
+    "/{project_id}/preview/template",
+    summary="El KV sin el producto, tal como quedará la plantilla",
+)
+def preview_template(project_id: str):
+    project = load_project_or_404(project_id)
+    try:
+        image = renderer.render_template_preview(project)
+    except Exception as exc:  # noqa: BLE001
+        raise as_http_error(exc) from exc
+    return _png_response(image)
+
+
 @router.get("/{project_id}/preview/mask/{layer_id}", summary="Original con la máscara resaltada")
 def preview_mask(project_id: str, layer_id: str):
     project = load_project_or_404(project_id)

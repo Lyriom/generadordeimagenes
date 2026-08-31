@@ -51,6 +51,11 @@ def cached_piece_preview(source: str, index: int) -> bytes:
 
 
 @st.cache_data(show_spinner=False, ttl=900, max_entries=40)
+def cached_template(project_id: str, token: int) -> bytes:
+    return api.preview_template(project_id)
+
+
+@st.cache_data(show_spinner=False, ttl=900, max_entries=40)
 def cached_detections(project_id: str, token: int) -> bytes:
     return api.preview_detections(project_id)
 

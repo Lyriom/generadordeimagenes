@@ -344,6 +344,13 @@ def detect_product(
     )
 
 
+def preview_template(project_id: str) -> bytes:
+    """El KV sin el producto: la plantilla que quedará."""
+    response = requests.get(_url(f"/projects/{project_id}/preview/template"), timeout=120)
+    response.raise_for_status()
+    return response.content
+
+
 def replaceable_layers(project_id: str) -> dict:
     return _handle(
         requests.get(_url(f"/projects/{project_id}/layers/replaceable"), timeout=60)

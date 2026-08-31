@@ -278,6 +278,24 @@ def test_a_plain_backdrop_is_filled_without_ai(
     assert np.abs(centro - np.array([90, 60, 40])).sum(axis=1).mean() > 30
 
 
+def test_the_template_preview_shows_the_kv_without_the_product(
+    client: TestClient, project: dict, monkeypatch
+):
+    """La plancha desnuda asusta; la plantilla compuesta es lo que se va a usar."""
+    from tests.conftest import create_manual_layers
+
+    project_id = project["project_id"]
+    create_manual_layers(client, project_id)
+
+    response = client.get(f"/projects/{project_id}/preview/template")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/png"
+
+    datos = client.get(f"/projects/{project_id}").json()
+    with Image.open(io.BytesIO(response.content)) as vista:
+        assert vista.size == (datos["canvas"]["width"], datos["canvas"]["height"])
+
+
 def test_a_textured_background_still_goes_to_the_model(
     client: TestClient, flat_project: dict, monkeypatch
 ):

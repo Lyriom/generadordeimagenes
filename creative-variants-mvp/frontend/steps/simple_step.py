@@ -13,6 +13,7 @@ import api_client as api
 from . import results_step
 from .common import (
     cached_file,
+    cached_template,
     cached_piece_preview,
     cached_pieces,
     refresh_project,
@@ -516,6 +517,12 @@ def _rescue_products(missing: list[tuple[str, str]]) -> None:
                 fallidos.append(f"{name}: " + " ".join(result.get("warnings") or []))
     if logrados:
         st.session_state.cache_token += 1
+        # Sin volver a leer los proyectos, la vista de "qué se retira" sigue
+        # mirando las capas de antes y no encuentra el producto recién creado.
+        st.session_state.campaign_projects = [
+            api.get_project(item["project_id"])
+            for item in (st.session_state.get("campaign_projects") or [])
+        ]
         st.success(f"Producto detectado en {logrados} KV.")
     for detalle in fallidos:
         st.warning(detalle)
@@ -562,19 +569,25 @@ def _show_what_is_removed(projects: list[dict], targets: dict[str, str]) -> None
                     show_error(exc)
                 else:
                     st.session_state.cache_token += 1
+                    st.session_state.campaign_projects = [
+                        api.get_project(item["project_id"])
+                        for item in (st.session_state.get("campaign_projects") or [])
+                    ]
                     if resultado.get("detected"):
                         st.session_state["flash"] = f"Recorte rehecho en {project['name']}."
                     else:
                         st.warning(" ".join(resultado.get("warnings") or []))
                     st.rerun()
-            producto, fondo = st.columns(2)
+            producto, plantilla = st.columns(2)
             _thumb(producto, project, capa.get("src") if capa else None, "producto que se retira")
-            _thumb(
-                fondo,
-                project,
-                (project.get("background") or {}).get("path"),
-                "fondo que queda",
-            )
+            try:
+                plantilla.image(
+                    cached_template(project["project_id"], token()),
+                    caption="el KV sin el producto, listo para el nuevo",
+                    width="stretch",
+                )
+            except Exception as exc:  # noqa: BLE001 - una miniatura no frena el paso
+                plantilla.caption(f"No se pudo componer la plantilla: {exc}")
 
 
 def _thumb(column, project: dict, relative: str | None, caption: str) -> None:

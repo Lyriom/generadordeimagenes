@@ -442,3 +442,34 @@ def render_mask_preview(project: Project, layer_id: str) -> Image.Image:
         width=stroke,
     )
     return composed
+
+
+def render_template_preview(project: Project) -> Image.Image:
+    """El KV listo para recibir un producto nuevo: todo menos el producto.
+
+    Enseñar la plancha desnuda asusta: es un degradado borroso donde antes había
+    un mueble, y fuera de contexto parece un error. Compuesta con el logo, el
+    precio y los legales encima se ve lo que de verdad va a pasar, que es una
+    plantilla esperando el producto.
+    """
+    height, width = project.canvas.height, project.canvas.width
+    if project.background.path:
+        base = load_flat_rgb(storage.abs_path(project.project_id, project.background.path))
+    else:
+        base = load_flat_rgb(storage.abs_path(project.project_id, project.source.path))
+    canvas = base.convert("RGBA").resize((width, height), Image.Resampling.LANCZOS)
+
+    for layer in sorted(project.layers, key=lambda item: item.z_index):
+        if layer.category in {LayerCategory.PRODUCT, LayerCategory.BACKGROUND}:
+            continue
+        if not layer.visible or not layer.src:
+            continue
+        path = storage.abs_path(project.project_id, layer.src)
+        if not path.exists():
+            continue
+        with Image.open(path) as opened:
+            pieza = opened.convert("RGBA")
+            if pieza.size != (layer.width, layer.height):
+                pieza = pieza.resize((layer.width, layer.height), Image.Resampling.LANCZOS)
+            canvas.alpha_composite(pieza, (layer.x, layer.y))
+    return canvas.convert("RGB")

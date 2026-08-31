@@ -499,11 +499,11 @@ def _clean_plate(
         pixeles = np.asarray(opened.convert("RGB"))
     detalle = imaging.surrounding_detail(pixeles, mask)
     if detalle <= imaging.PLAIN_BACKDROP_DETAIL:
-        # Con margen: el contorno del producto y sus patas finas se salen de la
-        # máscara ajustada y, si no, quedan dibujados de fantasma. Lo de más se
-        # tapa después con el producto nuevo.
-        ancho = dilate_mask(mask, 24)
-        Image.fromarray(imaging.harmonic_fill(pixeles, ancho)).save(
+        # Con mucho margen: el contorno del producto, sus patas finas y parte de
+        # la sombra se salen de la máscara ajustada, y en un fondo liso borrar de
+        # más no cuesta nada. Lo que sobre lo tapa el producto nuevo.
+        ancho = dilate_mask(mask, 60)
+        Image.fromarray(imaging.flat_backdrop_fill(pixeles, ancho)).save(
             staged, format="PNG", optimize=True
         )
         staged.replace(target)

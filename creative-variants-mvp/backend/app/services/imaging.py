@@ -324,56 +324,46 @@ def surrounding_detail(image: np.ndarray, mask: np.ndarray) -> float:
     return float(np.abs(bordes)[anillo > 0].mean())
 
 
-def harmonic_fill(
-    image: np.ndarray, mask: np.ndarray, side: int = 96, iterations: int = 4000
+def flat_backdrop_fill(
+    image: np.ndarray, mask: np.ndarray, grid: int = 40, iterations: int = 4000
 ) -> np.ndarray:
-    """Rellena el hueco con la superficie más suave que encaja con su borde.
+    """Reconstruye un fondo de estudio detrás del producto.
 
-    Es estirar una membrana entre los bordes del agujero: el degradado del fondo y
-    la caída de la sombra continúan solos. Frente a las alternativas probadas con
-    un KV real, `cv2.inpaint` dejaba facetas poligonales y un promediado por
-    pirámide dejaba una silueta clara del producto; esto no deja ninguna de las
-    dos, y a diferencia de un modelo generativo no puede inventarse un objeto.
+    Un ciclorama es un degradado suave, así que se estima **desde toda la foto**,
+    no desde el borde del hueco: se promedia en una rejilla gruesa descartando las
+    celdas que el producto tapa, se rellenan esas celdas interpolando desde las
+    limpias y se amplía. Sale el degradado y la caída de luz, nada más.
 
-    Se resuelve muy en pequeño y se amplía. No es una economía: la difusión
-    necesita del orden del ancho del hueco al cuadrado en iteraciones, así que a
-    resolución alta se queda a medias y deja una meseta con la silueta del
-    producto. En 96 px converge de verdad, y como la superficie buscada es suave
-    por definición, al ampliarla no se pierde nada.
+    Interpolar desde el borde —una membrana armónica— parecía lo natural y no lo
+    es: el borde incluye la sombra proyectada del producto, así que el relleno la
+    hereda y deja un bulto con su silueta. Probado también `cv2.inpaint`, que deja
+    facetas poligonales, y un promediado por pirámide, que deja una meseta clara.
     """
     alto, ancho = image.shape[:2]
     hole = mask > 24
     if not hole.any():
         return image.copy()
 
-    escala = side / max(alto, ancho, 1)
-    pequeno = cv2.resize(
-        image,
-        (max(8, int(ancho * escala)), max(8, int(alto * escala))),
-        interpolation=cv2.INTER_AREA,
-    ).astype(np.float32)
-    chico = cv2.resize(
-        hole.astype(np.uint8), (pequeno.shape[1], pequeno.shape[0]),
-        interpolation=cv2.INTER_NEAREST,
-    ) > 0
-    if chico.all():
+    valido = (~hole).astype(np.float32)
+    color = image.astype(np.float32) * valido[..., None]
+    celdas = cv2.resize(color, (grid, grid), interpolation=cv2.INTER_AREA)
+    cobertura = cv2.resize(valido, (grid, grid), interpolation=cv2.INTER_AREA)
+    libre = cobertura > 0.55
+    if not libre.any():
         return image.copy()
 
-    # Semilla con el color del borde: converge en muchas menos iteraciones.
-    borde = cv2.dilate(chico.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
-    borde &= ~chico
-    pequeno[chico] = (
-        pequeno[borde].mean(axis=0) if borde.any() else pequeno[~chico].mean(axis=0)
-    )
+    rejilla = np.zeros_like(celdas)
+    rejilla[libre] = celdas[libre] / cobertura[libre][..., None]
+    rejilla[~libre] = rejilla[libre].mean(axis=0)
     for _ in range(iterations):
         vecinos = (
-            np.roll(pequeno, 1, 0) + np.roll(pequeno, -1, 0)
-            + np.roll(pequeno, 1, 1) + np.roll(pequeno, -1, 1)
+            np.roll(rejilla, 1, 0) + np.roll(rejilla, -1, 0)
+            + np.roll(rejilla, 1, 1) + np.roll(rejilla, -1, 1)
         ) / 4.0
-        pequeno[chico] = vecinos[chico]
+        rejilla[~libre] = vecinos[~libre]
 
-    grande = cv2.resize(pequeno, (ancho, alto), interpolation=cv2.INTER_CUBIC)
-    peso = cv2.GaussianBlur((hole * 255).astype(np.uint8), (0, 0), 6)
+    fondo = cv2.resize(rejilla, (ancho, alto), interpolation=cv2.INTER_CUBIC)
+    peso = cv2.GaussianBlur((hole * 255).astype(np.uint8), (0, 0), 12)
     peso = (peso.astype(np.float32) / 255.0)[..., None]
-    mezcla = image.astype(np.float32) * (1 - peso) + np.clip(grande, 0, 255) * peso
+    mezcla = image.astype(np.float32) * (1 - peso) + np.clip(fondo, 0, 255) * peso
     return mezcla.astype(np.uint8)

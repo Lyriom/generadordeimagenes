@@ -1,5 +1,8 @@
 data/projects/*
 !data/projects/.gitkeep
+# Los PSD de los clientes pesan 100-200 MB y son material ajeno: nunca al repo.
+data/ingest/*
+!data/ingest/.gitkeep
 __pycache__/
 *.pyc
 .env
