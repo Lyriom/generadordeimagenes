@@ -59,6 +59,14 @@ def capabilities() -> dict:
     return _handle(requests.get(_url("/capabilities"), timeout=15))
 
 
+def image_models() -> list[dict]:
+    """Catálogo de modelos de IA de imagen que ofrece el motor (Magnific)."""
+    try:
+        return capabilities().get("image_models") or []
+    except Exception:  # noqa: BLE001 - el catálogo no debe romper la interfaz
+        return []
+
+
 # ------------------------------------------------------------------ proyectos
 def create_project(
     name: str,
@@ -85,8 +93,82 @@ def create_project(
     )
 
 
-def list_ingest() -> dict:
-    return _handle(requests.get(_url("/ingest"), timeout=60))
+def list_ingest(with_pieces: bool = False) -> dict:
+    return _handle(
+        requests.get(_url("/ingest"), params={"with_pieces": with_pieces}, timeout=120)
+    )
+
+
+def ingest_pieces(source: str, analyse_pixels: bool = True) -> dict:
+    """Piezas que contiene un PSD del pliego (artboards o detección geométrica)."""
+    return _handle(
+        requests.get(
+            _url("/ingest/pieces"),
+            params={"source": source, "analyse_pixels": analyse_pixels},
+            timeout=TIMEOUT,
+        )
+    )
+
+
+def ingest_piece_preview(source: str, index: int, max_side: int = 320) -> bytes:
+    return _handle(
+        requests.get(
+            _url("/ingest/pieces/preview"),
+            params={"source": source, "index": index, "max_side": max_side},
+            timeout=TIMEOUT,
+        )
+    )
+
+
+def create_projects_from_ingest_split(
+    source: str,
+    name: str | None = None,
+    kv: str | None = None,
+    import_layers: bool = True,
+    pieces: list[int] | None = None,
+) -> dict:
+    """Un proyecto por cada pieza del PSD. Devuelve {projects, pieces_detected, …}."""
+    return _handle(
+        requests.post(
+            _url("/projects/from-ingest/split"),
+            json={
+                "source": source,
+                "name": name,
+                "kv": kv,
+                "import_layers": import_layers,
+                "pieces": pieces,
+            },
+            timeout=TIMEOUT,
+        )
+    )
+
+
+def create_projects_split(
+    name: str,
+    artwork: tuple[str, bytes, str],
+    pieces: list[int] | None = None,
+    logo: tuple[str, bytes, str] | None = None,
+    font: tuple[str, bytes, str] | None = None,
+    import_layers: bool = True,
+) -> dict:
+    """Sube un PSD y crea un proyecto por cada pieza que contenga."""
+    files: dict[str, tuple[str, bytes, str]] = {"artwork": artwork}
+    if logo:
+        files["logo"] = logo
+    if font:
+        files["font"] = font
+    return _handle(
+        requests.post(
+            _url("/projects/split"),
+            data={
+                "name": name,
+                "pieces": ",".join(str(index) for index in pieces or []),
+                "import_layers": str(import_layers).lower(),
+            },
+            files=files,
+            timeout=TIMEOUT,
+        )
+    )
 
 
 def create_project_from_ingest(
@@ -177,11 +259,17 @@ def reconstruct_background(
     prompt: str | None = None,
     dilate: int = 6,
     provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     return _handle(
         requests.post(
             _url(f"/projects/{project_id}/reconstruct-background"),
-            json={"prompt": prompt, "dilate": dilate, "provider": provider},
+            json={
+                "prompt": prompt,
+                "dilate": dilate,
+                "provider": provider,
+                "model": model,
+            },
             timeout=TIMEOUT,
         )
     )
@@ -207,6 +295,7 @@ def auto_generate(
     product_label: str | None = None,
     template_mode: bool = False,
     background_provider: str | None = None,
+    background_model: str | None = None,
     background_prompt: str | None = None,
     regenerate_background: bool = False,
 ) -> dict:
@@ -224,6 +313,7 @@ def auto_generate(
                 "product_label": product_label,
                 "template_mode": template_mode,
                 "background_provider": background_provider,
+                "background_model": background_model,
                 "background_prompt": background_prompt,
                 "regenerate_background": regenerate_background,
             },

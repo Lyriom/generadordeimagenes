@@ -3,7 +3,7 @@
 Orden de preferencia:
 - Segmentación: SAM (si está habilitado y el checkpoint existe) → local OpenCV → manual.
 - OCR: PaddleOCR (si está instalado) → ninguno (advertencia + creación manual).
-- Inpainting: OpenAI / FLUX / Adobe (si hay credenciales) → OpenCV.
+- Inpainting: Magnific / OpenAI / FLUX / Adobe (si hay credenciales) → OpenCV.
 """
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ from .base import (  # noqa: F401
 )
 from .flux_inpaint import FluxInpaintProvider
 from .local_segmentation import LocalSegmentationProvider
+from .magnific import MagnificInpaintProvider, model_catalog as magnific_catalog
 from .manual_segmentation import ManualSegmentationProvider
 from .opencv_inpaint import OpenCVInpaintProvider
 from .openai_inpaint import OpenAIInpaintProvider
@@ -68,10 +69,22 @@ def get_ocr_provider() -> PaddleOcrProvider:
     return PaddleOcrProvider()
 
 
-def get_inpainting_provider(preferred: str | None = None) -> Any:
+def get_inpainting_provider(
+    preferred: str | None = None, model: str | None = None
+) -> Any:
+    """Devuelve el proveedor pedido; `model` solo aplica al catálogo de Magnific."""
     choice = (preferred or settings.inpainting_provider or "auto").lower()
     if choice == "opencv":
         return OpenCVInpaintProvider()
+    if choice in {"magnific", "auto"}:
+        magnific = MagnificInpaintProvider(model=model)
+        if magnific.available():
+            return magnific
+        if choice == "magnific":
+            logger.warning(
+                "INPAINTING_PROVIDER=magnific sin MAGNIFIC_API_KEY (o modelo "
+                "desconocido): se usa OpenCV."
+            )
     if choice in {"openai", "auto"}:
         openai = OpenAIInpaintProvider()
         if openai.available():
@@ -102,6 +115,7 @@ def provider_status() -> dict[str, dict[str, Any]]:
     flux = FluxInpaintProvider()
     adobe = AdobeInpaintProvider()
     openai = OpenAIInpaintProvider()
+    magnific = MagnificInpaintProvider()
     active_segmentation = get_segmentation_provider()
     active_inpainting = get_inpainting_provider()
     return {
@@ -120,6 +134,9 @@ def provider_status() -> dict[str, dict[str, Any]]:
         },
         "inpainting": {
             "active": getattr(active_inpainting, "name", "opencv"),
+            "magnific_available": magnific.available(),
+            "magnific_model": settings.magnific_model,
+            "magnific_models": magnific_catalog(),
             "openai_available": openai.available(),
             "openai_model": settings.openai_image_model,
             "flux_available": flux.available(),

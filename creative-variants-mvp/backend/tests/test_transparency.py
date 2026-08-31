@@ -7,6 +7,7 @@ import numpy as np
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
+from tests.conftest import await_task
 from app.services import storage
 from app.services.imaging import load_alpha, load_flat_rgb, read_bgr_flat
 
@@ -89,8 +90,7 @@ def test_variants_from_transparent_source_are_not_black(client: TestClient):
         f"/projects/{project_id}/generate",
         json={"count": 4, "seed": 7, "formats": ["1080x1080"], "intensity": "moderate"},
     )
-    assert response.status_code == 200, response.text
-    variants = response.json()["variants"]
+    variants = await_task(client, project_id, response)["variants"]
 
     for variant in variants:
         with Image.open(storage.abs_path(project_id, variant["image"])) as image:
@@ -108,10 +108,14 @@ def test_empty_composition_is_not_scored_100(client: TestClient):
     ).json()["project_id"]
     client.post(f"/projects/{project_id}/analyze", json={"run_ocr": False})
 
-    variants = client.post(
-        f"/projects/{project_id}/generate",
-        json={"count": 4, "seed": 3, "formats": ["1080x1080"], "intensity": "conservative"},
-    ).json()["variants"]
+    variants = await_task(
+        client,
+        project_id,
+        client.post(
+            f"/projects/{project_id}/generate",
+            json={"count": 4, "seed": 3, "formats": ["1080x1080"], "intensity": "conservative"},
+        ),
+    )["variants"]
 
     for variant in variants:
         quality = variant["quality"]

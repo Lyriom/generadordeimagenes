@@ -11,7 +11,14 @@ import streamlit as st
 import api_client as api
 
 from . import results_step
-from .common import cached_file, refresh_project, show_error, token
+from .common import (
+    cached_file,
+    cached_piece_preview,
+    cached_pieces,
+    refresh_project,
+    show_error,
+    token,
+)
 
 ALLOWED_ARTWORK = ["psd"]
 
@@ -64,6 +71,57 @@ def _open_many(projects: list[dict], message: str) -> None:
     st.rerun()
 
 
+def _choose_pieces(sources: list[str]) -> dict[str, list[int] | None]:
+    """Detecta las piezas de cada PSD y deja marcar cuáles importar.
+
+    Devuelve {ruta: índices} y `None` cuando el PSD trae una sola pieza, que es
+    la forma de decirle al backend "todas". Los archivos sin ninguna pieza
+    marcada se quedan fuera del diccionario.
+    """
+    selection: dict[str, list[int] | None] = {}
+    for source in sources:
+        try:
+            with st.spinner(f"Analizando {source}…"):
+                info = cached_pieces(source)
+        except Exception as exc:  # noqa: BLE001 - un archivo ilegible no bloquea el resto
+            st.warning(f"{source}: no se pudieron detectar las piezas ({exc}).")
+            selection[source] = None
+            continue
+
+        pieces = info.get("pieces") or []
+        if len(pieces) <= 1:
+            selection[source] = None
+            continue
+
+        with st.expander(f"📐 {source} · {len(pieces)} piezas detectadas", expanded=True):
+            st.caption(
+                "El PSD trae varias piezas en el mismo lienzo. Cada una marcada se "
+                "convierte en una plantilla independiente con sus capas reales."
+            )
+            chosen: list[int] = []
+            columns = st.columns(min(4, len(pieces)))
+            for position, piece in enumerate(pieces):
+                column = columns[position % len(columns)]
+                with column:
+                    try:
+                        st.image(
+                            cached_piece_preview(source, piece["index"]),
+                            width="stretch",
+                        )
+                    except Exception:  # noqa: BLE001 - la miniatura es un extra
+                        st.caption("(sin vista previa)")
+                    marked = st.checkbox(
+                        f"{piece['name'][:22]} · {piece['width']}×{piece['height']}",
+                        value=True,
+                        key=f"pieza-{source}-{piece['index']}",
+                    )
+                    if marked:
+                        chosen.append(piece["index"])
+            if chosen:
+                selection[source] = chosen
+    return selection
+
+
 # ------------------------------------------------------------------- 1 · el arte
 def _pick_artwork() -> None:
     st.subheader("1 · Carga los KV de la campaña")
@@ -90,19 +148,32 @@ def _pick_artwork() -> None:
                 "no un enlace ni un .rtf. Y solo se usa si hay que volver a dibujar los "
                 "textos — si vienen del PSD se conservan tal cual y no hace falta."
             )
+        st.caption(
+            "Si un PSD trae varias piezas (varios avisos en el mismo lienzo), se "
+            "detectan solas y cada una se convierte en una plantilla independiente."
+        )
         if st.button("Crear campaña con estos KV", type="primary", disabled=not uploaded):
             try:
                 projects = []
                 with st.status(f"Importando {len(uploaded)} KV…", expanded=True):
                     for index, artwork in enumerate(uploaded):
                         st.write(f"{index + 1}/{len(uploaded)} · {artwork.name}")
-                        projects.append(api.create_project(
+                        result = api.create_projects_split(
                             name=artwork.name.rsplit(".", 1)[0][:120],
-                            artwork=_file_tuple(artwork), kv=None,
+                            artwork=_file_tuple(artwork),
                             logo=_file_tuple(logo),
                             font=_file_tuple(font, "font/ttf"),
-                        ))
-                _open_many(projects, f"{len(projects)} KV listos. Continúa en el punto 2.")
+                        )
+                        detected = result.get("pieces_detected", 1)
+                        if detected > 1:
+                            st.write(f"　　↳ {detected} piezas detectadas en el pliego")
+                        projects.extend(result.get("projects", []))
+                        for warning in result.get("warnings", []):
+                            st.caption(f"⚠️ {warning}")
+                _open_many(
+                    projects,
+                    f"{len(projects)} plantilla(s) lista(s). Continúa en el punto 2.",
+                )
             except Exception as exc:  # noqa: BLE001
                 show_error(exc)
 
@@ -129,19 +200,29 @@ def _pick_artwork() -> None:
                 "Archivos PSD", list(labels), default=list(labels),
                 format_func=lambda key: labels[key]
             )
+            selection = _choose_pieces(sources)
+            total = sum(
+                len(chosen) if chosen is not None else 1 for chosen in selection.values()
+            )
             if st.button(
-                "Crear campaña con estos KV", type="primary", key="use-ingest",
-                disabled=not sources,
+                f"Crear campaña con {total} plantilla(s)", type="primary", key="use-ingest",
+                disabled=not selection,
             ):
                 try:
                     projects = []
-                    with st.status(f"Importando {len(sources)} KV…", expanded=True):
-                        for index, source in enumerate(sources):
-                            st.write(f"{index + 1}/{len(sources)} · {source}")
-                            projects.append(api.create_project_from_ingest(
-                                source=source, kv=None,
-                            ))
-                    _open_many(projects, f"{len(projects)} KV listos. Continúa en el punto 2.")
+                    with st.status(f"Importando {total} plantilla(s)…", expanded=True):
+                        for index, source in enumerate(selection):
+                            st.write(f"{index + 1}/{len(selection)} · {source}")
+                            result = api.create_projects_from_ingest_split(
+                                source=source, kv=None, pieces=selection[source],
+                            )
+                            projects.extend(result.get("projects", []))
+                            for warning in result.get("warnings", []):
+                                st.caption(f"⚠️ {warning}")
+                    _open_many(
+                        projects,
+                        f"{len(projects)} plantilla(s) lista(s). Continúa en el punto 2.",
+                    )
                 except Exception as exc:  # noqa: BLE001
                     show_error(exc)
 
@@ -558,34 +639,69 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
     except Exception:  # noqa: BLE001
         provider_status = {}
     openai_ready = bool(provider_status.get("openai_available"))
+    magnific_ready = bool(provider_status.get("magnific_available"))
+    magnific_models = provider_status.get("magnific_models") or []
     background_provider = "opencv"
+    background_model = None
     background_prompt = None
 
     with st.expander("Reconstrucción del fondo y variación"):
         st.caption(
-            "OpenAI reconstruye únicamente los huecos del fondo. La ubicación de los "
+            "La IA reconstruye únicamente los huecos del fondo. La ubicación de los "
             "productos se toma de la zona diseñada en el PSD y no se delega a la IA."
         )
+        engines = []
+        if magnific_ready:
+            engines.append("magnific")
+        if openai_ready:
+            engines.append("openai")
+        engines.append("local")
         background_mode = st.radio(
-            "Calidad del fondo",
-            ["openai", "local"] if openai_ready else ["local"],
+            "Motor del fondo",
+            engines,
             format_func=lambda value: {
                 "local": "Local · gratis",
-                "openai": "OpenAI · IA de mayor calidad (con costo)",
+                "magnific": "Magnific · eliges el modelo de IA (con costo)",
+                "openai": "OpenAI · IA de imagen (con costo)",
             }[value],
             horizontal=True,
         )
-        if not openai_ready:
+        if not magnific_ready:
             st.caption(
-                "Para habilitar OpenAI, pega la clave en `OPENAI_API_KEY=` dentro de "
-                "`.env` y reinicia los contenedores."
+                "Para habilitar Magnific, pega la clave en `MAGNIFIC_API_KEY=` dentro "
+                "de `.env` y reinicia los contenedores."
             )
-        else:
+        if background_mode == "magnific":
+            background_provider = "magnific"
+            by_id = {model["id"]: model for model in magnific_models}
+            options = list(by_id)
+            preferred = provider_status.get("magnific_model")
+            index = options.index(preferred) if preferred in options else 0
+            background_model = st.selectbox(
+                "Modelo de IA",
+                options,
+                index=index,
+                format_func=lambda key: by_id[key]["label"],
+                help="Todos usan la misma clave de Magnific; cambia el costo y el estilo.",
+            )
+            chosen = by_id.get(background_model, {})
+            st.caption(chosen.get("description", ""))
+            if chosen.get("supports_mask"):
+                st.success(
+                    "Repinta solo el hueco de los productos: el resto del arte queda "
+                    "idéntico al original."
+                )
+            else:
+                st.info(
+                    "Este modelo regenera la imagen completa. El resultado se recompone "
+                    "solo dentro de la zona borrada, así el resto del KV no se altera."
+                )
+        elif background_mode == "openai":
+            background_provider = "openai"
             st.success(
                 f"OpenAI listo · modelo {provider_status.get('openai_model', 'gpt-image-2')}"
             )
-        if background_mode == "openai":
-            background_provider = "openai"
+        if background_mode in {"magnific", "openai"}:
             background_prompt = st.text_area(
                 "Dirección visual para el fondo",
                 placeholder=(
@@ -593,8 +709,8 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                     "sin texto, sin logos y con espacio para el producto"
                 ),
                 help=(
-                    "OpenAI genera solamente el fondo una vez por lote. Producto, logo y "
-                    "copy se componen después con sus archivos reales."
+                    "El fondo se genera una sola vez por lote. Producto, logo y copy se "
+                    "componen después con sus archivos reales."
                 ),
             ) or None
         intensity = st.radio(
@@ -648,9 +764,11 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             product_label=product.name.rsplit(".", 1)[0],
                             template_mode=True,
                             background_provider=background_provider,
+                            background_model=background_model,
                             background_prompt=background_prompt,
                             regenerate_background=(
-                                background_provider == "openai" and first_batch
+                                background_provider in {"magnific", "openai"}
+                                and first_batch
                             ),
                         )
                         result = _poll_task(project["project_id"], task["task_id"], f"Generando {product.name}...")
@@ -684,9 +802,11 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             product_label=group_label,
                             template_mode=True,
                             background_provider=background_provider,
+                            background_model=background_model,
                             background_prompt=background_prompt,
                             regenerate_background=(
-                                background_provider == "openai" and first_batch
+                                background_provider in {"magnific", "openai"}
+                                and first_batch
                             ),
                         )
                         result = _poll_task(project["project_id"], task["task_id"], f"Generando {group_label}...")

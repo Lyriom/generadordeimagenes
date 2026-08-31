@@ -113,6 +113,7 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
                 project,
                 prompt=request.background_prompt,
                 preferred_provider=request.background_provider,
+                model=getattr(request, "background_model", None),
             )
             warnings.extend(background_warnings)
             steps.append(_step("Preparar el fondo", f"reconstruido con {provider_name}"))

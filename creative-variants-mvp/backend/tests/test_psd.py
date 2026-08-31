@@ -10,7 +10,7 @@ from PIL import Image
 from app.config import settings
 from app.models import LayerCategory
 from app.services import psd_import, storage
-from tests.conftest import make_artwork
+from tests.conftest import await_task, make_artwork
 from tests.psd_fixture import sample_kv
 
 pytest.importorskip("psd_tools", reason="psd-tools no instalado")
@@ -249,8 +249,7 @@ def test_generate_variants_from_psd_project(client: TestClient, psd_bytes: bytes
         f"/projects/{project_id}/generate",
         json={"count": 4, "seed": 5, "formats": ["1080x1350"], "intensity": "moderate"},
     )
-    assert response.status_code == 200, response.text
-    variants = response.json()["variants"]
+    variants = await_task(client, project_id, response)["variants"]
     assert len(variants) == 4
     for variant in variants:
         assert storage.abs_path(project_id, variant["image"]).exists()

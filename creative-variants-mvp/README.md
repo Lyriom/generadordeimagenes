@@ -64,6 +64,28 @@ docker compose down -v         # también borra volúmenes anónimos
 | **Arte publicitario aplanado** (JPG/PNG) | Descomposición asistida: detección aproximada + corrección manual en Ajustes finos |
 | **PNG de producto recortado** (con transparencia) | El alfa se usa como máscara exacta del producto, pero **no hay textos ni logo que descomponer**: hay que crearlos en Ajustes finos |
 
+### Un PSD con varias piezas (pliego)
+
+Las agencias suelen entregar **un solo PSD con varios avisos** en el mismo lienzo
+(por ejemplo el cuadrado y el vertical de dos productos). Al cargarlo se detecta
+cuántas piezas trae y cada una se convierte en una plantilla independiente, con
+sus capas reales y su propio tamaño de lienzo.
+
+Cómo se detectan, en este orden:
+
+1. **Artboards de Photoshop** (lo normal). Cada artboard es una pieza y su
+   rectángulo es exacto; las capas se toman de dentro del artboard.
+2. **Por geometría**, si el PSD no usa artboards: se busca el contenido separado
+   por espacio vacío (los pasillos del pliego) y se recorta ahí. En este caso la
+   app avisa para que revise el recorte antes de producir.
+
+En la pantalla **Generar → Carpeta compartida** aparece una miniatura por pieza
+con una casilla: se importan las marcadas (todas por defecto). En **Subir PSD** el
+corte es automático y se informa cuántas piezas se encontraron.
+
+Un PSD de una sola pieza se comporta exactamente como antes: un archivo, un
+proyecto, sin sufijos en el nombre.
+
 ### PSD: importación en lugar de adivinanza
 
 ```bash
@@ -304,10 +326,14 @@ set_predictor(MiPredictor())
 
 ```text
 GET    /health                                     Estado + proveedores activos
-GET    /capabilities                               Formatos, layouts, intensidades
-GET    /ingest                                     Artes disponibles en data/ingest
+GET    /capabilities                               Formatos, layouts, intensidades y modelos de IA
+GET    /ingest                                     Artes disponibles en data/ingest (?with_pieces=)
+GET    /ingest/pieces                              Piezas que contiene un PSD (?source=)
+GET    /ingest/pieces/preview                      Miniatura PNG de una pieza (?source=&index=)
 POST   /projects/from-ingest                       Crear proyecto desde la ingesta (PSD)
+POST   /projects/from-ingest/split                 Un proyecto por cada pieza del pliego
 POST   /projects                                   Crear (multipart: name, artwork, kv?, logo?, font?)
+POST   /projects/split                             Subir un pliego y crear un proyecto por pieza
 GET    /projects                                   Listar
 GET    /projects/{project_id}                      Obtener
 DELETE /projects/{project_id}                      Eliminar
@@ -319,8 +345,9 @@ POST   /projects/{project_id}/layers/mask          Corregir máscara (pincel add
 GET    /projects/{project_id}/layers/replaceable   Elementos que pueden recibir otro producto
 POST   /projects/{project_id}/layers/replace       Cambiar el producto (multipart: image, layer_id?, hide_others?)
 POST   /projects/{project_id}/extract              Extraer capas como PNG RGBA
-POST   /projects/{project_id}/reconstruct-background   Inpainting del fondo
-POST   /projects/{project_id}/generate             Generar variantes
+POST   /projects/{project_id}/reconstruct-background   Inpainting del fondo (provider, model)
+POST   /projects/{project_id}/generate             Encolar generación de variantes
+GET    /projects/{project_id}/tasks/{task_id}      Estado de una tarea encolada
 GET    /projects/{project_id}/variants             Listar variantes
 GET    /projects/{project_id}/variants/{id}        Metadatos (o imagen con ?download=true)
 GET    /projects/{project_id}/export               ZIP (?variant_ids=&include_layers=)
@@ -328,6 +355,16 @@ GET    /projects/{project_id}/files/{ruta}         Servir un archivo del proyect
 GET    /projects/{project_id}/preview/detections   Original con bounding boxes
 GET    /projects/{project_id}/preview/mask/{id}    Original con la máscara resaltada
 ```
+
+`POST /projects/split` y `POST /projects/from-ingest/split` devuelven
+`{projects, pieces_detected, pieces_imported, warnings}`. Con `pieces` se eligen
+índices concretos (`[0, 2]`); vacío importa todas. Los endpoints sin `/split`
+siguen devolviendo un único proyecto con el pliego completo.
+
+El modelo de IA se elige por petición: `POST /reconstruct-background` acepta
+`{"provider": "magnific", "model": "mystic"}` y `POST /auto` acepta
+`{"background_provider": "magnific", "background_model": "mystic"}`. Los ids válidos
+salen de `GET /capabilities` → `image_models`.
 
 Camino corto (lo que hace la interfaz):
 
@@ -430,10 +467,58 @@ Sin PaddleOCR, `/analyze` devuelve una advertencia clara y las capas de texto se
 mano en Ajustes finos. No se intenta identificar la tipografía real: se usa una fuente por
 defecto (DejaVu) modificable, o la tipografía que suba el usuario.
 
-### Inpainting: FLUX Fill o Adobe Firefly
+### Generación con IA: Magnific (recomendado)
+
+Una sola clave abre todo el catálogo de Magnific y **el modelo se elige desde la
+interfaz**, pieza por pieza. Pegue la clave y reinicie:
+
+```env
+INPAINTING_PROVIDER=auto        # usa Magnific en cuanto haya clave
+MAGNIFIC_API_KEY=...            # https://www.magnific.com/user/organization/api-keys
+MAGNIFIC_MODEL=ideogram-image-edit   # modelo por defecto
+```
+
+```bash
+docker compose up -d --build backend worker
+```
+
+Modelos disponibles (`GET /capabilities` → `image_models`):
+
+| Modelo | Máscara real | Para qué sirve |
+| --- | --- | --- |
+| `ideogram-image-edit` | ✅ | Repinta **solo** el hueco de los productos borrados. El más fiel al KV; es el valor por defecto. |
+| `mystic` | — | Modelo propio de Magnific. Fotorrealismo 1K/2K/4K guiado por la estructura del arte. |
+| `flux-kontext-pro`, `flux-kontext-max` | — | Edición por instrucción con buena coherencia de contexto. |
+| `flux-2-pro`, `flux-2-flex`, `flux-2-turbo`, `flux-2-klein` | — | Familia Flux 2: de máxima calidad a máxima velocidad. |
+| `seedream-v4-edit`, `seedream-v4-5-edit`, `seedream-v5-lite-edit`, `seedream-v5-pro-edit` | — | Preservan muy bien textura, color e iluminación al editar. |
+| `gemini-2-5-flash-image-preview`, `nano-banana-pro`, `nano-banana-pro-flash` | — | Google Gemini: rápidos y baratos; Pro llega a 4K. |
+
+Cómo trabaja el proveedor:
+
+1. **Con máscara** (`ideogram-image-edit`): se envía el arte y la máscara invertida
+   (la API de Ideogram edita el área negra) y la IA solo repinta ese hueco.
+2. **Sin máscara**: primero se limpia el arte en local con OpenCV —así el modelo no
+   tiene que adivinar qué producto quitar— y se manda como referencia de estructura
+   o imagen de entrada según el modelo.
+3. En ambos casos el resultado se **recompone localmente solo dentro de la zona
+   borrada**, con el borde suavizado (`MAGNIFIC_FEATHER`). El resto del KV queda
+   idéntico al original, pixel a pixel.
+4. Las imágenes viajan en base64 si pesan menos de `MAGNIFIC_INLINE_MAX_MB`; por
+   encima se suben antes con la Upload Files API de Magnific.
+
+Ajustes finos (todos opcionales, ver `.env.example`): `MAGNIFIC_RESOLUTION`,
+`MAGNIFIC_RENDERING_SPEED`, `MAGNIFIC_MYSTIC_MODEL`, `MAGNIFIC_ENGINE`,
+`MAGNIFIC_STRUCTURE_STRENGTH`, `MAGNIFIC_ADHERENCE`, `MAGNIFIC_HDR`,
+`MAGNIFIC_CREATIVE_DETAILING`.
+
+Si la llamada falla o se agota el tiempo, el backend cae a OpenCV Inpaint y lo
+reporta en las advertencias de la pieza.
+
+### Inpainting: OpenAI, FLUX Fill o Adobe Firefly
 
 ```env
 INPAINTING_PROVIDER=auto      # usa el externo solo si hay credenciales
+OPENAI_API_KEY=...            # GPT Image (solo reconstruye el fondo)
 BFL_API_KEY=...               # FLUX (Black Forest Labs)
 ADOBE_CLIENT_ID=...
 ADOBE_CLIENT_SECRET=...

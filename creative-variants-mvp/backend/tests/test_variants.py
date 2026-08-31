@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.services import storage
-from tests.conftest import create_manual_layers
+from tests.conftest import await_task, create_manual_layers
 
 FORMATS = ["1080x1080", "1080x1350", "1080x1920"]
 
@@ -29,8 +29,7 @@ def _generate(client: TestClient, project_id: str, **overrides) -> dict:
     }
     payload.update(overrides)
     response = client.post(f"/projects/{project_id}/generate", json=payload)
-    assert response.status_code == 200, response.text
-    return response.json()
+    return await_task(client, project_id, response)
 
 
 def test_generate_twelve_variants_in_three_formats(client: TestClient, project: dict):
@@ -236,11 +235,16 @@ def test_export_zip_contains_selected_variants(client: TestClient, project: dict
         assert any(name.startswith("capas/") for name in names)
 
 
-def test_generate_without_layers_returns_422(client: TestClient, project: dict):
+def test_generate_without_layers_produces_nothing_and_explains_why(
+    client: TestClient, project: dict
+):
+    """Sin capas no hay nada que componer. La tarea termina, pero vacía y con aviso."""
     project_id = project["project_id"]
     response = client.post(f"/projects/{project_id}/generate", json={"count": 4})
-    assert response.status_code == 422
-    assert "warnings" in response.json()["detail"]
+    result = await_task(client, project_id, response)
+
+    assert result["variants"] == []
+    assert result["warnings"]
 
 
 def test_generate_rejects_invalid_format_and_count(client: TestClient, project: dict):

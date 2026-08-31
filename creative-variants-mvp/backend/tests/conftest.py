@@ -18,6 +18,10 @@ os.environ["SEGMENTATION_PROVIDER"] = "local"
 os.environ["INPAINTING_PROVIDER"] = "opencv"
 os.environ["MIN_IMAGE_SIDE"] = "64"
 os.environ["INGEST_DIR"] = str(pathlib.Path(_TMP_DATA) / "ingest")
+# Celery en memoria: las pruebas no dependen de Redis ni de un worker aparte.
+os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"
+os.environ["CELERY_BROKER_URL"] = "memory://"
+os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -81,6 +85,22 @@ def project(client: TestClient, artwork_png: bytes) -> dict:
     )
     assert response.status_code == 201, response.text
     return response.json()
+
+
+def await_task(client: TestClient, project_id: str, response) -> dict:
+    """Encola → espera → devuelve el resultado de una tarea de generación.
+
+    `/generate` y `/auto` responden con un `task_id` y trabajan en Celery. En las
+    pruebas Celery corre en modo eager, así que la tarea ya terminó cuando llega
+    la respuesta y basta con leer su estado una vez.
+    """
+    assert response.status_code == 200, response.text
+    task_id = response.json()["task_id"]
+    status = client.get(f"/projects/{project_id}/tasks/{task_id}")
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["state"] == "COMPLETED", body
+    return body["result"]
 
 
 def create_manual_layers(client: TestClient, project_id: str) -> dict[str, dict]:

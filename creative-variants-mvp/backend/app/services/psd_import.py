@@ -10,15 +10,21 @@ diferencia entre descomponer (aproximado) e importar (exacto).
   inteligentes suelen tener bounding boxes gigantes fuera del arte y
   renderizarlos completos agota la memoria.
 - Las capas de tipo texto llegan con su contenido real y se vuelven editables.
+- Un PSD puede traer **varias piezas** en un mismo lienzo (un pliego). Photoshop
+  las guarda como *artboards*, así que se detectan por su rectángulo exacto y
+  cada una puede importarse como un proyecto propio. Si el PSD no usa artboards
+  se detectan por geometría (bandas vacías entre piezas).
 """
 from __future__ import annotations
 
 import logging
 import re
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -38,6 +44,12 @@ from .imaging import save_mask
 logger = logging.getLogger(__name__)
 
 PSD_MAGIC = b"8BPS"
+
+#: Detección geométrica de piezas (solo si el PSD no usa artboards).
+GRID_MIN_AREA_RATIO = 0.02   # una pieza ocupa al menos el 2 % del pliego
+GRID_MIN_SIDE = 120          # y mide al menos 120 px de lado
+GRID_MAX_SIDE_ANALYSIS = 1400  # el análisis se hace sobre una copia reducida
+GRID_CLOSE_KERNEL = 5        # cierra huecos pequeños dentro de una misma pieza
 
 # Piezas de identidad y venta que se conservan exactamente como se diseñaron en
 # Photoshop. Aunque Photoshop permita leer el contenido de una capa de texto,
@@ -167,21 +179,273 @@ def classify_by_geometry(
     return LayerCategory.DECORATION, 0.35
 
 
+# ------------------------------------------------------------------ piezas
+@dataclass(frozen=True)
+class PsdPiece:
+    """Una pieza dentro de un PSD: su rectángulo y de dónde salió.
+
+    `artboard_path` es el nombre del artboard que la contiene. Cuando existe, las
+    capas se toman de su subárbol (exacto) en lugar de filtrarse por geometría.
+    """
+
+    index: int
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    origin: str  # artboard | grid | canvas
+    artboard_path: str | None = None
+
+    @property
+    def box(self) -> tuple[int, int, int, int]:
+        return self.x, self.y, self.x + self.width, self.y + self.height
+
+    @property
+    def label(self) -> str:
+        return f"{self.name} · {self.width}×{self.height}"
+
+
+def _artboard_nodes(node, depth: int = 0) -> list[Any]:
+    """Artboards del PSD. Photoshop los deja arriba, pero se busca un nivel más."""
+    found: list[Any] = []
+    for layer in node:
+        if str(getattr(layer, "kind", "")) == "artboard":
+            found.append(layer)
+        elif depth == 0 and layer.is_group():
+            found.extend(_artboard_nodes(layer, depth + 1))
+    return found
+
+
+def _clip_to_canvas(bbox, canvas_w: int, canvas_h: int) -> tuple[int, int, int, int] | None:
+    x0, y0, x1, y1 = (int(value) for value in bbox)
+    cx0, cy0 = max(0, x0), max(0, y0)
+    cx1, cy1 = min(canvas_w, x1), min(canvas_h, y1)
+    if cx1 - cx0 < GRID_MIN_SIDE or cy1 - cy0 < GRID_MIN_SIDE:
+        return None
+    return cx0, cy0, cx1 - cx0, cy1 - cy0
+
+
+def _reading_order(boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+    """Ordena arriba→abajo, izquierda→derecha, tolerando filas desalineadas."""
+    if not boxes:
+        return []
+    tolerance = max(24, min(box[3] for box in boxes) // 2)
+    return sorted(boxes, key=lambda box: (box[1] // max(1, tolerance), box[0]))
+
+
+def _content_mask(flat: Image.Image) -> np.ndarray:
+    """Máscara del contenido real: descarta el lienzo vacío entre piezas.
+
+    Si el pliego es transparente fuera de las piezas basta el alfa. Si es opaco
+    (lienzo negro o blanco), el fondo es el color dominante del borde.
+    """
+    rgba = flat.convert("RGBA")
+    alpha = np.asarray(rgba.getchannel("A"), dtype=np.uint8)
+    if float((alpha > 8).mean()) < 0.995:
+        return ((alpha > 8).astype(np.uint8)) * 255
+
+    rgb = np.asarray(rgba.convert("RGB"), dtype=np.int16)
+    border = np.concatenate([rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]], axis=0)
+    background = np.median(border, axis=0)
+    distance = np.abs(rgb - background).sum(axis=2)
+    return ((distance > 30).astype(np.uint8)) * 255
+
+
+def _snap_box(
+    mask: np.ndarray, box: tuple[int, int, int, int], margin: int
+) -> tuple[int, int, int, int] | None:
+    """Ajusta la caja al contenido real a resolución completa.
+
+    El análisis se hace sobre una copia reducida, así que el borde puede quedar
+    uno o dos píxeles corrido. Un desfase de 1 px desplaza todas las capas de la
+    pieza, así que aquí se aprieta la caja mirando el original.
+    """
+    height, width = mask.shape[:2]
+    x, y, w, h = box
+    x0, y0 = max(0, x - margin), max(0, y - margin)
+    x1, y1 = min(width, x + w + margin), min(height, y + h + margin)
+    window = mask[y0:y1, x0:x1]
+    rows = np.where(window.any(axis=1))[0]
+    columns = np.where(window.any(axis=0))[0]
+    if rows.size == 0 or columns.size == 0:
+        return None
+    return (
+        x0 + int(columns[0]),
+        y0 + int(rows[0]),
+        int(columns[-1] - columns[0]) + 1,
+        int(rows[-1] - rows[0]) + 1,
+    )
+
+
+def _grid_boxes(mask: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Piezas como componentes conexas del contenido.
+
+    Cada pieza publicitaria trae su propia plancha de fondo, así que forma un
+    bloque continuo. Los pasillos vacíos del pliego las separan.
+    """
+    height, width = mask.shape[:2]
+    scale = min(1.0, GRID_MAX_SIDE_ANALYSIS / max(width, height))
+    if scale < 1.0:
+        small = cv2.resize(
+            mask, (max(1, int(width * scale)), max(1, int(height * scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+    else:
+        small = mask
+    small = (small > 96).astype(np.uint8) * 255
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_RECT, (GRID_CLOSE_KERNEL, GRID_CLOSE_KERNEL)
+    )
+    closed = cv2.morphologyEx(small, cv2.MORPH_CLOSE, kernel)
+
+    count, _, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    canvas_area = float(width * height)
+    binary = mask > 96
+    margin = int(round(GRID_CLOSE_KERNEL / scale)) + 4
+    boxes: list[tuple[int, int, int, int]] = []
+    for index in range(1, count):
+        sx, sy, sw, sh, _area = stats[index]
+        box = _clip_to_canvas(
+            (sx / scale, sy / scale, (sx + sw) / scale, (sy + sh) / scale), width, height
+        )
+        if box is None:
+            continue
+        snapped = _snap_box(binary, box, margin)
+        if snapped is not None:
+            box = snapped
+        if min(box[2], box[3]) < GRID_MIN_SIDE:
+            continue
+        if (box[2] * box[3]) / canvas_area < GRID_MIN_AREA_RATIO:
+            continue
+        boxes.append(box)
+    return _reading_order(boxes)
+
+
+def detect_pieces(psd_path: Path, *, analyse_pixels: bool = True) -> tuple[list[PsdPiece], list[str]]:
+    """Piezas que contiene el PSD. Siempre devuelve al menos una.
+
+    `analyse_pixels=False` limita la detección a los artboards (solo lee el árbol
+    de capas): es lo que usa el listado de la carpeta de ingesta, donde aplanar
+    un PSD de 100 MB por archivo sería inaceptable.
+    """
+    warnings: list[str] = []
+    available, reason = psd_available()
+    if not available:
+        return [], [reason or "psd-tools no disponible."]
+
+    from psd_tools import PSDImage
+
+    try:
+        psd = PSDImage.open(psd_path)
+    except Exception as exc:  # noqa: BLE001
+        return [], [f"No se pudo leer el PSD: {exc}"]
+
+    canvas_w, canvas_h = psd.width, psd.height
+    whole = PsdPiece(
+        index=0, name=psd_path.stem[:80], x=0, y=0,
+        width=canvas_w, height=canvas_h, origin="canvas",
+    )
+
+    # 1 · Artboards: es como Photoshop guarda un pliego de varias piezas.
+    artboards: list[tuple[tuple[int, int, int, int], str]] = []
+    for node in _artboard_nodes(psd):
+        box = _clip_to_canvas(node.bbox, canvas_w, canvas_h)
+        if box is not None:
+            artboards.append((box, str(node.name or "")))
+    if artboards:
+        by_box = {box: name for box, name in artboards}
+        ordered = _reading_order(list(by_box))
+        pieces = [
+            PsdPiece(
+                index=index,
+                name=(by_box[box] or f"Pieza {index + 1}")[:80],
+                x=box[0], y=box[1], width=box[2], height=box[3],
+                origin="artboard",
+                artboard_path=by_box[box] or None,
+            )
+            for index, box in enumerate(ordered)
+        ]
+        if len(pieces) > 1:
+            warnings.append(
+                f"El PSD trae {len(pieces)} piezas como artboards de Photoshop: "
+                "cada una se puede importar por separado con sus capas reales."
+            )
+        return pieces, warnings
+
+    if not analyse_pixels:
+        return [whole], warnings
+
+    # 2 · Sin artboards: se buscan las piezas por geometría sobre el aplanado.
+    try:
+        flat = psd.composite()
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"No se pudo aplanar el PSD para detectar piezas: {exc}")
+        return [whole], warnings
+    if flat is None:
+        return [whole], warnings
+
+    boxes = _grid_boxes(_content_mask(flat))
+    if len(boxes) <= 1:
+        return [whole], warnings
+
+    warnings.append(
+        f"El PSD no usa artboards, pero se detectaron {len(boxes)} piezas separadas "
+        "por espacio vacío. Revise el recorte antes de producir."
+    )
+    return [
+        PsdPiece(
+            index=index,
+            name=f"Pieza {index + 1}",
+            x=box[0], y=box[1], width=box[2], height=box[3],
+            origin="grid",
+        )
+        for index, box in enumerate(boxes)
+    ], warnings
+
+
+def piece_preview(psd_path: Path, piece: PsdPiece, max_side: int = 420) -> Image.Image:
+    """Miniatura de una pieza, para elegirla antes de importar."""
+    from psd_tools import PSDImage
+
+    psd = PSDImage.open(psd_path)
+    flat = psd.composite()
+    if flat is None:
+        raise ValueError("La pieza no tiene contenido visible.")
+    image = flat.convert("RGB").crop(piece.box)
+    scale = min(1.0, max_side / max(image.width, image.height))
+    if scale < 1.0:
+        image = image.resize(
+            (max(1, int(image.width * scale)), max(1, int(image.height * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    return image
+
+
 # --------------------------------------------------------------------- aplanado
-def flatten_with_pillow(psd_path: Path, target_png: Path) -> tuple[int, int]:
+def flatten_with_pillow(
+    psd_path: Path, target_png: Path, box: tuple[int, int, int, int] | None = None
+) -> tuple[int, int]:
     """Composición plana del PSD usando Pillow (siempre disponible)."""
     with Image.open(psd_path) as image:
         flat = image.convert("RGB")
+        if box is not None:
+            flat = flat.crop(box)
         target_png.parent.mkdir(parents=True, exist_ok=True)
         flat.save(target_png, format="PNG", optimize=True)
         return flat.width, flat.height
 
 
-def flatten_psd(psd_path: Path, target_png: Path) -> tuple[int, int]:
-    """Aplana el PSD con psd-tools si está, con Pillow si no."""
+def flatten_psd(
+    psd_path: Path, target_png: Path, box: tuple[int, int, int, int] | None = None
+) -> tuple[int, int]:
+    """Aplana el PSD con psd-tools si está, con Pillow si no.
+
+    `box` recorta el resultado a una pieza del pliego (coordenadas del PSD).
+    """
     available, _ = psd_available()
     if not available:
-        return flatten_with_pillow(psd_path, target_png)
+        return flatten_with_pillow(psd_path, target_png, box)
     try:
         from psd_tools import PSDImage
 
@@ -190,11 +454,29 @@ def flatten_psd(psd_path: Path, target_png: Path) -> tuple[int, int]:
         if flat is None:
             raise ValueError("composición vacía")
         target_png.parent.mkdir(parents=True, exist_ok=True)
-        flat.convert("RGB").save(target_png, format="PNG", optimize=True)
-        return psd.width, psd.height
+        rgb = flat.convert("RGB")
+        # Ojo: `PSDImage.composite(viewport=…)` ignora el viewport y devuelve el
+        # lienzo completo (a nivel de capa sí lo respeta). Por eso se recorta aquí.
+        if box is not None:
+            rgb = rgb.crop(box)
+        rgb.save(target_png, format="PNG", optimize=True)
+        return rgb.width, rgb.height
     except Exception as exc:  # noqa: BLE001
         logger.warning("psd-tools no pudo aplanar %s (%s); se usa Pillow", psd_path, exc)
-        return flatten_with_pillow(psd_path, target_png)
+        return flatten_with_pillow(psd_path, target_png, box)
+
+
+def crop_flat(flat_png: Path, target_png: Path, box: tuple[int, int, int, int]) -> tuple[int, int]:
+    """Recorta una pieza de un aplanado ya generado.
+
+    Componer un PSD de 100 MB cuesta segundos; con cuatro piezas se haría cuatro
+    veces. Se aplana una sola vez y cada pieza sale de un recorte en PNG.
+    """
+    with Image.open(flat_png) as flat:
+        piece = flat.convert("RGB").crop(box)
+        target_png.parent.mkdir(parents=True, exist_ok=True)
+        piece.save(target_png, format="PNG", optimize=True)
+        return piece.width, piece.height
 
 
 # ------------------------------------------------------------------ importación
@@ -230,13 +512,22 @@ def _apply_opacity(rgba: Image.Image, opacity: float) -> Image.Image:
     return rgba
 
 
-def _clip_box(bbox, canvas_w: int, canvas_h: int) -> tuple[int, int, int, int] | None:
+def _clip_box(
+    bbox, view: tuple[int, int, int, int]
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]] | None:
+    """Recorta la capa al viewport.
+
+    Devuelve (caja_relativa_al_viewport, viewport_absoluto_de_render). Lo primero
+    son las coordenadas que ve el proyecto; lo segundo, lo que hay que pedirle a
+    psd-tools, que trabaja siempre en coordenadas del PSD.
+    """
+    vx0, vy0, vx1, vy1 = view
     x0, y0, x1, y1 = (int(v) for v in bbox)
-    cx0, cy0 = max(0, x0), max(0, y0)
-    cx1, cy1 = min(canvas_w, x1), min(canvas_h, y1)
+    cx0, cy0 = max(vx0, x0), max(vy0, y0)
+    cx1, cy1 = min(vx1, x1), min(vy1, y1)
     if cx1 <= cx0 or cy1 <= cy0:
         return None
-    return cx0, cy0, cx1 - cx0, cy1 - cy0
+    return (cx0 - vx0, cy0 - vy0, cx1 - cx0, cy1 - cy0), (cx0, cy0, cx1, cy1)
 
 
 def _text_content(layer) -> str | None:
@@ -255,11 +546,16 @@ def import_psd_layers(
     psd_path: Path,
     *,
     max_layers: int | None = None,
+    piece: PsdPiece | None = None,
 ) -> tuple[list[Layer], list[str]]:
     """Crea las capas del proyecto a partir del PSD. Devuelve (capas, avisos).
 
     `psd_path` es absoluta: el PSD puede vivir en la carpeta de ingesta y no hace
     falta copiar 90 MB dentro del proyecto.
+
+    `piece` limita la importación a una pieza del pliego: las capas se recortan a
+    su rectángulo y sus coordenadas quedan relativas a ella, de modo que el
+    proyecto resultante mide lo que mide la pieza y no el pliego completo.
     """
     warnings: list[str] = []
     available, reason = psd_available()
@@ -276,13 +572,39 @@ def import_psd_layers(
     except Exception as exc:  # noqa: BLE001
         return [], [f"No se pudo leer el PSD: {exc}"]
 
-    if (psd.width, psd.height) != (canvas_w, canvas_h):
+    view = piece.box if piece is not None else (0, 0, psd.width, psd.height)
+    view_w, view_h = view[2] - view[0], view[3] - view[1]
+    if (view_w, view_h) != (canvas_w, canvas_h):
+        origen = f"La pieza '{piece.name}'" if piece is not None else "El PSD"
         warnings.append(
-            f"El PSD mide {psd.width}x{psd.height} y el lienzo del proyecto "
+            f"{origen} mide {view_w}x{view_h} y el lienzo del proyecto "
             f"{canvas_w}x{canvas_h}: se recorta al lienzo."
         )
 
-    leaves = _leaf_layers(psd)
+    root = psd
+    if piece is not None and piece.artboard_path:
+        # El artboard es un grupo real: sus capas son exactamente las de la pieza.
+        match = next(
+            (
+                node
+                for node in _artboard_nodes(psd)
+                if str(node.name or "") == piece.artboard_path
+            ),
+            None,
+        )
+        if match is not None:
+            root = match
+        else:
+            warnings.append(
+                f"No se encontró el artboard '{piece.artboard_path}': las capas de la "
+                "pieza se filtran por posición."
+            )
+
+    if root is psd:
+        leaves = _leaf_layers(psd)
+    else:
+        board_opacity = max(0.0, min(1.0, float(getattr(root, "opacity", 255) or 255) / 255.0))
+        leaves = _leaf_layers(root, str(root.name or ""), board_opacity)
     if len(leaves) > max_layers:
         warnings.append(
             f"El PSD tiene {len(leaves)} capas; se importan las {max_layers} superiores "
@@ -301,14 +623,14 @@ def import_psd_layers(
         if not psd_layer.visible:
             hidden += 1
             continue
-        box = _clip_box(psd_layer.bbox, canvas_w, canvas_h)
-        if box is None:
+        clipped = _clip_box(psd_layer.bbox, view)
+        if clipped is None:
             empty += 1
             continue
-        x, y, width, height = box
+        (x, y, width, height), render_view = clipped
 
         try:
-            rendered = psd_layer.composite(viewport=(x, y, x + width, y + height))
+            rendered = psd_layer.composite(viewport=render_view)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"No se pudo renderizar la capa '{name}': {exc}")
             continue
@@ -317,6 +639,10 @@ def import_psd_layers(
             continue
 
         rgba = _apply_opacity(rendered.convert("RGBA"), opacity)
+        if rgba.size != (width, height):
+            fitted = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+            fitted.paste(rgba, (0, 0))
+            rgba = fitted
         alpha = np.asarray(rgba.split()[-1], dtype=np.uint8)
         opaque_ratio = float((alpha > 8).mean()) if alpha.size else 0.0
         if opaque_ratio < settings.psd_min_opaque_ratio:
@@ -326,7 +652,7 @@ def import_psd_layers(
         category, confidence = classify_layer_name(name, group_path)
         if category is None or _is_generic(name):
             geometry_category, geometry_confidence = classify_by_geometry(
-                box, (canvas_w, canvas_h), assigned, opaque_ratio
+                (x, y, width, height), (canvas_w, canvas_h), assigned, opaque_ratio
             )
             if category is None:
                 category, confidence = geometry_category, geometry_confidence

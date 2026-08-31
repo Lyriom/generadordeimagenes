@@ -21,6 +21,7 @@ def reconstruct_background(
     prompt: str | None = None,
     dilate: int = 6,
     preferred_provider: str | None = None,
+    model: str | None = None,
 ) -> tuple[str, str, list[str]]:
     """Rellena las zonas de las capas extraídas. Devuelve (ruta_rel, proveedor, avisos)."""
     warnings: list[str] = []
@@ -38,8 +39,9 @@ def reconstruct_background(
     save_mask(mask_path, mask)
 
     target = storage.abs_path(project.project_id, BACKGROUND_REL)
-    provider = get_inpainting_provider(preferred_provider)
+    provider = get_inpainting_provider(preferred_provider, model)
     provider_name = getattr(provider, "name", "opencv")
+    provider_model = getattr(provider, "model_id", None)
     try:
         provider.fill(str(original), str(mask_path), prompt=prompt, output_path=str(target))
     except (ProviderUnavailableError, Exception) as exc:  # noqa: BLE001
@@ -58,8 +60,11 @@ def reconstruct_background(
     if provider_name == "opencv" and coverage > 0.35:
         warnings.append(
             "Se reconstruyó más del 35% del fondo con OpenCV: el resultado puede verse "
-            "borroso. Configure FLUX o Adobe para mejor calidad."
+            "borroso. Configure MAGNIFIC_API_KEY para usar Magnific y elegir un modelo."
         )
+
+    if provider_model and provider_name != "opencv":
+        provider_name = f"{provider_name}:{provider_model}"
 
     project.background = BackgroundInfo(
         path=BACKGROUND_REL,

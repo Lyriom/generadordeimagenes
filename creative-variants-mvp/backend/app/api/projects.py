@@ -33,6 +33,7 @@ from ..models import (
     Project,
     ProjectReferences,
     IngestImportRequest,
+    ProjectImportResponse,
     ProjectSummary,
     ReconstructBackgroundRequest,
     ReconstructBackgroundResponse,
@@ -62,12 +63,11 @@ from ..services.analysis import Z_ORDER
 from ..services.imaging import box_mask
 from ..services.security import (
     FileValidationError,
-    resolve_inside,
     safe_stored_name,
     validate_font_bytes,
     validate_image_path,
 )
-from .deps import as_http_error, bad_request, load_project_or_404
+from .deps import as_http_error, bad_request, load_project_or_404, resolve_ingest
 
 logger = logging.getLogger(__name__)
 
@@ -177,9 +177,11 @@ async def _store_image(project_id: str, file: UploadFile, folder: str, *, allow_
         temp_path.unlink(missing_ok=True)
 
 
-def _apply_psd_layers(project: Project, psd_path: Path) -> list[str]:
+def _apply_psd_layers(
+    project: Project, psd_path: Path, piece: psd_import.PsdPiece | None = None
+) -> list[str]:
     """Importa las capas del PSD al proyecto y devuelve las advertencias."""
-    layers, warnings = psd_import.import_psd_layers(project, psd_path)
+    layers, warnings = psd_import.import_psd_layers(project, psd_path, piece=piece)
     if layers:
         project.layers = [
             Layer(
@@ -279,28 +281,31 @@ async def create_project(
         raise as_http_error(exc) from exc
 
 
-def _resolve_ingest(relative: str) -> Path:
-    """Ruta absoluta dentro de la carpeta de ingesta (bloquea path traversal)."""
-    path = resolve_inside(settings.ingest_dir, relative)
-    if not path.exists() or not path.is_file():
-        raise bad_request(f"No existe el archivo en la carpeta de ingesta: {relative}")
-    return path
-
-
-def _source_from_ingest(project_id: str, source_path: Path, folder: str):
+def _source_from_ingest(
+    project_id: str,
+    source_path: Path,
+    folder: str,
+    piece: psd_import.PsdPiece | None = None,
+    flat_sheet: Path | None = None,
+):
     """Crea la fuente del proyecto desde un archivo de la ingesta.
 
     Un PSD no se copia al proyecto (pesa demasiado): se aplana dentro del proyecto y
-    las capas se importan leyendo el original en su sitio.
+    las capas se importan leyendo el original en su sitio. Si se indica `piece`, el
+    aplanado se recorta a esa pieza del pliego.
     """
     image_format, width, height = validate_image_path(
         source_path, source_path.name, allow_psd=True
     )
     if image_format == "PSD":
         flat_rel = f"{folder}/{uuid.uuid4().hex}_flat.png"
-        flat_width, flat_height = psd_import.flatten_psd(
-            source_path, storage.abs_path(project_id, flat_rel)
-        )
+        target = storage.abs_path(project_id, flat_rel)
+        if flat_sheet is not None and piece is not None:
+            flat_width, flat_height = psd_import.crop_flat(flat_sheet, target, piece.box)
+        else:
+            flat_width, flat_height = psd_import.flatten_psd(
+                source_path, target, piece.box if piece is not None else None
+            )
         return (
             SourceImage(
                 path=flat_rel,
@@ -337,7 +342,7 @@ def _source_from_ingest(project_id: str, source_path: Path, folder: str):
     summary="Crear proyecto desde la carpeta de ingesta (ideal para PSD grandes)",
 )
 def create_project_from_ingest(request: IngestImportRequest) -> Project:
-    source_path = _resolve_ingest(request.source)
+    source_path = resolve_ingest(request.source)
     project_id = new_id()
     storage.ensure_project_dirs(project_id)
     try:
@@ -345,7 +350,7 @@ def create_project_from_ingest(request: IngestImportRequest) -> Project:
         references = ProjectReferences()
         if request.kv:
             kv_source, _ = _source_from_ingest(
-                project_id, _resolve_ingest(request.kv), "references"
+                project_id, resolve_ingest(request.kv), "references"
             )
             references.kv = kv_source
 
@@ -372,6 +377,303 @@ def create_project_from_ingest(request: IngestImportRequest) -> Project:
         return project
     except Exception as exc:  # noqa: BLE001
         storage.delete_project(project_id)
+        raise as_http_error(exc) from exc
+
+
+# ------------------------------------------------------- pliegos de varias piezas
+def _select_pieces(
+    psd_path: Path, wanted: list[int] | None
+) -> tuple[list[psd_import.PsdPiece], int, list[str]]:
+    """Piezas a importar. Devuelve (elegidas, total_detectado, avisos)."""
+    detected, warnings = psd_import.detect_pieces(psd_path)
+    if not detected:
+        raise bad_request(
+            "No se pudo analizar el PSD: " + (warnings[0] if warnings else "archivo ilegible.")
+        )
+    if not wanted:
+        return detected, len(detected), warnings
+    by_index = {piece.index: piece for piece in detected}
+    missing = [index for index in wanted if index not in by_index]
+    if missing:
+        raise bad_request(
+            f"El PSD no tiene las piezas {missing}. Detectadas: {sorted(by_index)}."
+        )
+    chosen = [by_index[index] for index in dict.fromkeys(wanted)]
+    return chosen, len(detected), warnings
+
+
+def _parse_indices(raw: str) -> list[int] | None:
+    """Convierte "0,2" en [0, 2]. Vacío → None, que significa todas las piezas."""
+    if not raw or not raw.strip():
+        return None
+    values: list[int] = []
+    for chunk in raw.split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        if not token.isdigit():
+            raise bad_request(f"Índice de pieza no válido: '{token}'.")
+        values.append(int(token))
+    return values or None
+
+
+def _store_payload(project_id: str, payload: bytes, filename: str, folder: str):
+    """Guarda un archivo pequeño ya leído en memoria (logo de marca, por ejemplo)."""
+    storage.ensure_project_dirs(project_id)
+    temp = storage.abs_path(project_id, f"tmp/{uuid.uuid4().hex}.upload")
+    temp.parent.mkdir(parents=True, exist_ok=True)
+    temp.write_bytes(payload)
+    try:
+        return _ingest_source(project_id, temp, filename, folder, allow_psd=False)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _project_from_piece(
+    *,
+    psd_path: Path,
+    piece: psd_import.PsdPiece | None,
+    base_name: str,
+    import_layers: bool,
+    kv_path: Path | None = None,
+    ingest_source: str | None = None,
+    original_filename: str | None = None,
+    single: bool = False,
+    flat_sheet: Path | None = None,
+    logo: tuple[str, bytes] | None = None,
+    font: tuple[str, bytes] | None = None,
+) -> Project:
+    """Crea un proyecto a partir de una pieza del PSD (o del PSD completo).
+
+    `logo` y `font` son (nombre, contenido) y se copian a **cada** pieza: son los
+    recursos de marca de la campaña, no de un aviso concreto.
+    """
+    project_id = new_id()
+    storage.ensure_project_dirs(project_id)
+    try:
+        source, _ = _source_from_ingest(
+            project_id, psd_path, "original", piece, flat_sheet
+        )
+        if original_filename:
+            source.original_filename = original_filename[:180]
+        references = ProjectReferences()
+        if kv_path is not None:
+            kv_source, _ = _source_from_ingest(project_id, kv_path, "references")
+            references.kv = kv_source
+        if logo is not None:
+            logo_source, _ = _store_payload(project_id, logo[1], logo[0], "references")
+            references.logo = logo_source
+        if font is not None:
+            suffix = validate_font_bytes(font[1], font[0])
+            font_rel = f"references/font{suffix}"
+            storage.write_bytes(project_id, font_rel, font[1])
+            references.font = font_rel
+
+        name = base_name if (piece is None or single) else f"{base_name} · {piece.name}"
+        project = Project(
+            project_id=project_id,
+            name=(name or "Proyecto sin título").strip()[:120],
+            canvas=Canvas(width=source.width, height=source.height),
+            source=source,
+            references=references,
+        )
+        if ingest_source:
+            project.meta["ingest_source"] = ingest_source
+        if original_filename:
+            project.meta["psd_original_name"] = original_filename[:180]
+        if piece is not None:
+            project.meta["psd_piece"] = {
+                "index": piece.index,
+                "name": piece.name,
+                "x": piece.x,
+                "y": piece.y,
+                "width": piece.width,
+                "height": piece.height,
+                "origin": piece.origin,
+            }
+
+        available, reason = psd_import.psd_available()
+        if import_layers and available:
+            project.warnings.extend(_apply_psd_layers(project, psd_path, piece))
+        elif import_layers:
+            project.warnings.append(reason or "No se importaron las capas del PSD.")
+        else:
+            project.warnings.append(
+                "PSD aplanado sin importar capas: marque los elementos en Ajustes finos."
+            )
+        storage.save_project(project)
+        return project
+    except Exception:
+        storage.delete_project(project_id)  # limpieza segura si algo falla
+        raise
+
+
+def _import_pieces(
+    *,
+    psd_path: Path,
+    wanted: list[int] | None,
+    base_name: str,
+    import_layers: bool,
+    kv_path: Path | None = None,
+    ingest_source: str | None = None,
+    original_filename: str | None = None,
+    logo: tuple[str, bytes] | None = None,
+    font: tuple[str, bytes] | None = None,
+) -> ProjectImportResponse:
+    """Un proyecto por pieza. Si el PSD trae una sola, se comporta como siempre."""
+    chosen, total, warnings = _select_pieces(psd_path, wanted)
+    single = total == 1
+    projects: list[Project] = []
+    # Con varias piezas se aplana el pliego una sola vez y cada pieza se recorta
+    # de ese PNG: componer un PSD de 100 MB por pieza sería cuatro veces el costo.
+    flat_sheet: Path | None = None
+    if len(chosen) > 1:
+        staging = settings.data_dir / "tmp"
+        staging.mkdir(parents=True, exist_ok=True)
+        flat_sheet = staging / f"{uuid.uuid4().hex}_sheet.png"
+        psd_import.flatten_psd(psd_path, flat_sheet)
+    try:
+        for piece in chosen:
+            projects.append(
+                _project_from_piece(
+                    psd_path=psd_path,
+                    piece=piece,
+                    base_name=base_name,
+                    import_layers=import_layers,
+                    kv_path=kv_path,
+                    ingest_source=ingest_source,
+                    original_filename=original_filename,
+                    single=single,
+                    flat_sheet=flat_sheet,
+                    logo=logo,
+                    font=font,
+                )
+            )
+    except Exception:
+        # Un pliego a medias no sirve: se descartan los proyectos ya creados.
+        for created in projects:
+            storage.delete_project(created.project_id)
+        raise
+    finally:
+        if flat_sheet is not None:
+            flat_sheet.unlink(missing_ok=True)
+    return ProjectImportResponse(
+        projects=projects,
+        pieces_detected=total,
+        pieces_imported=len(projects),
+        warnings=warnings,
+    )
+
+
+async def _stage_upload(file: UploadFile, max_bytes: int, suffix: str = ".psd") -> Path:
+    """Guarda el PSD subido fuera de los proyectos mientras se cortan sus piezas.
+
+    Con varias piezas hay varios proyectos, y copiar 100 MB en cada uno no tiene
+    sentido: el PSD solo hace falta durante la importación. El archivo conserva su
+    extensión porque las validaciones posteriores la comprueban.
+    """
+    staging = settings.data_dir / "tmp"
+    staging.mkdir(parents=True, exist_ok=True)
+    target = staging / f"{uuid.uuid4().hex}{suffix}"
+    total = 0
+    try:
+        with target.open("wb") as handle:
+            while True:
+                chunk = await file.read(CHUNK)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise FileValidationError(
+                        f"'{file.filename}' supera el límite de "
+                        f"{max_bytes // (1024 * 1024)} MB."
+                    )
+                handle.write(chunk)
+    except Exception:
+        target.unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    return target
+
+
+@router.post(
+    "/split",
+    response_model=ProjectImportResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Subir un PSD y crear un proyecto por cada pieza que contenga",
+)
+async def create_projects_split(
+    name: str = Form("", description="Nombre base; vacío = nombre del archivo."),
+    artwork: UploadFile = File(..., description="PSD, puede traer varias piezas."),
+    logo: UploadFile | None = File(None, description="Logo original (opcional)."),
+    font: UploadFile | None = File(None, description="Tipografía .ttf/.otf (opcional)."),
+    pieces: str = Form(
+        "", description="Índices separados por coma (ver GET /ingest/pieces). Vacío = todas."
+    ),
+    import_layers: bool = Form(True),
+) -> ProjectImportResponse:
+    wanted = _parse_indices(pieces)
+    logo_payload: tuple[str, bytes] | None = None
+    if logo is not None and logo.filename:
+        logo_payload = (logo.filename, await _read_upload(logo, settings.max_upload_bytes))
+    font_payload: tuple[str, bytes] | None = None
+    if font is not None and font.filename:
+        font_payload = (font.filename, await _read_upload(font, 10 * 1024 * 1024))
+    filename = artwork.filename or "arte.psd"
+    # Solo se toma la extensión del nombre subido, nunca la ruta.
+    suffix = Path(filename).suffix.lower()
+    staged = await _stage_upload(
+        artwork,
+        settings.max_upload_bytes,
+        suffix if suffix in {".psd", ".psb"} else ".psd",
+    )
+    try:
+        image_format, _width, _height = validate_image_path(staged, filename, allow_psd=True)
+        if image_format != "PSD":
+            raise bad_request(
+                "Solo un PSD puede contener varias piezas. Use POST /projects para "
+                "artes aplanados."
+            )
+        base = (name or Path(filename).stem)[:120]
+        return _import_pieces(
+            psd_path=staged,
+            wanted=wanted,
+            base_name=base,
+            import_layers=import_layers,
+            original_filename=filename,
+            logo=logo_payload,
+            font=font_payload,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise as_http_error(exc) from exc
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+@router.post(
+    "/from-ingest/split",
+    response_model=ProjectImportResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Crear un proyecto por cada pieza de un PSD de la carpeta de ingesta",
+)
+def create_projects_from_ingest_split(request: IngestImportRequest) -> ProjectImportResponse:
+    source_path = resolve_ingest(request.source)
+    try:
+        if source_path.suffix.lower() not in {".psd", ".psb"}:
+            raise bad_request(
+                "Solo un PSD puede contener varias piezas. Use POST /projects/from-ingest."
+            )
+        return _import_pieces(
+            psd_path=source_path,
+            wanted=request.pieces,
+            base_name=(request.name or source_path.stem)[:120],
+            import_layers=request.import_layers,
+            kv_path=resolve_ingest(request.kv) if request.kv else None,
+            ingest_source=request.source,
+            original_filename=source_path.name,
+        )
+    except Exception as exc:  # noqa: BLE001
         raise as_http_error(exc) from exc
 
 
@@ -559,12 +861,6 @@ def create_layer(project_id: str, request: LayerCreateRequest) -> Layer:
 
 
 @router.post(
-    "/{project_id}/layers/mask",
-    response_model=Layer,
-    summary="Corregir la máscara de una capa (pincel add/subtract)",
-)
-
-@router.post(
     "/{project_id}/layers/{layer_id}/mask/upload",
     response_model=Layer,
     summary="Subir una máscara dibujada a mano alzada",
@@ -573,8 +869,8 @@ async def upload_mask(project_id: str, layer_id: str, mask_file: UploadFile = Fi
     project = load_project_or_404(project_id)
     layer = project.layer_by_id(layer_id)
     if not layer:
-        raise bad_request("Layer not found")
-        
+        raise bad_request(f"No existe la capa {layer_id}.")
+
     temp_path = await _stream_upload(project.project_id, mask_file, 10 * 1024 * 1024)
     try:
         import numpy as np
@@ -594,6 +890,12 @@ async def upload_mask(project_id: str, layer_id: str, mask_file: UploadFile = Fi
         temp_path.unlink(missing_ok=True)
     return layer
 
+
+@router.post(
+    "/{project_id}/layers/mask",
+    response_model=Layer,
+    summary="Corregir la máscara de una capa (pincel add/subtract)",
+)
 def edit_mask(project_id: str, request: MaskEditRequest) -> Layer:
     project = load_project_or_404(project_id)
     layer = project.layer_by_id(request.layer_id)
@@ -742,6 +1044,7 @@ def reconstruct_background(
             prompt=payload.prompt,
             dilate=payload.dilate,
             preferred_provider=payload.provider,
+            model=payload.model,
         )
         storage.save_project(project)
     except Exception as exc:  # noqa: BLE001
@@ -773,11 +1076,14 @@ def generate(project_id: str, request: GenerateRequest | None = None):
 def get_task_status(project_id: str, task_id: str):
     from app.worker import celery_app
     task = celery_app.AsyncResult(task_id)
+    # Celery usa SUCCESS/FAILURE; la interfaz habla en COMPLETED/FAILED.
+    state = {"SUCCESS": "COMPLETED", "FAILURE": "FAILED"}.get(task.state, task.state)
     return {
         "task_id": task_id,
-        "state": task.state,
-        "result": task.result if task.state == "COMPLETED" else None,
-        "meta": task.info if task.state == "PROGRESS" else None
+        "state": state,
+        "result": task.result if state == "COMPLETED" else None,
+        "error": str(task.result) if state == "FAILED" else None,
+        "meta": task.info if task.state == "PROGRESS" else None,
     }
 
 

@@ -5,7 +5,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from .project import Canvas, Layer, LayerCategory, LayerType, QualityReport, Variant
+from .project import (
+    Canvas,
+    Layer,
+    LayerCategory,
+    LayerType,
+    Project,
+    QualityReport,
+    Variant,
+)
 
 SUPPORTED_FORMATS: dict[str, tuple[int, int]] = {
     # Redes sociales
@@ -38,6 +46,30 @@ class IngestFile(BaseModel):
     width: int
     height: int
     size_mb: float
+    pieces: int = Field(
+        default=1,
+        description="Piezas detectadas dentro del archivo (artboards del PSD).",
+    )
+
+
+class PsdPieceInfo(BaseModel):
+    """Una pieza dentro de un PSD, con su rectángulo en el pliego."""
+
+    index: int
+    name: str
+    x: int
+    y: int
+    width: int
+    height: int
+    origin: str = Field(description="artboard | grid | canvas")
+
+
+class PsdPiecesResponse(BaseModel):
+    source: str
+    width: int
+    height: int
+    pieces: list[PsdPieceInfo] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class IngestListResponse(BaseModel):
@@ -53,6 +85,22 @@ class IngestImportRequest(BaseModel):
     import_layers: bool = Field(
         default=True, description="Importar las capas del PSD (si psd-tools está instalado)."
     )
+    pieces: list[int] | None = Field(
+        default=None,
+        description=(
+            "Índices de las piezas a importar (ver GET /ingest/pieces). "
+            "Vacío o nulo = todas las detectadas."
+        ),
+    )
+
+
+class ProjectImportResponse(BaseModel):
+    """Resultado de importar un archivo que puede contener varias piezas."""
+
+    projects: list[Project] = Field(default_factory=list)
+    pieces_detected: int = 1
+    pieces_imported: int = 0
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ProjectSummary(BaseModel):
@@ -178,11 +226,28 @@ class ExtractResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ImageModelInfo(BaseModel):
+    """Un modelo de IA de imagen que el usuario puede elegir."""
+
+    id: str
+    label: str
+    description: str = ""
+    provider: str = "magnific"
+    supports_mask: bool = False
+    resolutions: list[str] = Field(default_factory=list)
+
+
 class ReconstructBackgroundRequest(BaseModel):
     layer_ids: list[str] | None = None
     prompt: str | None = None
     dilate: int = Field(default=6, ge=0, le=64)
-    provider: str | None = Field(default=None, description="auto | opencv | flux | adobe")
+    provider: str | None = Field(
+        default=None, description="auto | opencv | magnific | openai | flux | adobe"
+    )
+    model: str | None = Field(
+        default=None,
+        description="Modelo de Magnific (ver /capabilities → image_models).",
+    )
 
 
 class ReconstructBackgroundResponse(BaseModel):
@@ -264,7 +329,14 @@ class AutoRequest(BaseModel):
         default=False,
         description="Recompone el arte como plantilla y excluye la copia fiel del KV.",
     )
-    background_provider: Literal["opencv", "openai", "flux", "adobe"] | None = None
+    background_provider: (
+        Literal["auto", "opencv", "magnific", "openai", "flux", "adobe"] | None
+    ) = None
+    background_model: str | None = Field(
+        default=None,
+        max_length=80,
+        description="Modelo de Magnific a usar (ver /capabilities → image_models).",
+    )
     background_prompt: str | None = Field(default=None, max_length=800)
     regenerate_background: bool = False
 
@@ -315,6 +387,7 @@ class CapabilitiesResponse(BaseModel):
     segmentation: dict[str, Any]
     ocr: dict[str, Any]
     inpainting: dict[str, Any]
+    image_models: list[ImageModelInfo] = Field(default_factory=list)
     formats: dict[str, list[int]]
     layouts: list[dict[str, str]]
     intensities: list[str]
