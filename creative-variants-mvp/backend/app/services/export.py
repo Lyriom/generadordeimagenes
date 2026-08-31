@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -12,6 +13,32 @@ from ..models import Project
 from . import renderer, storage
 from .layout_engine import Placement, VariantPlan
 from .security import slugify
+
+
+#: Codificación del campo heredado de nombre de capa en el formato PSD.
+PSD_NAME_ENCODING = "macroman"
+
+
+def psd_layer_name(raw: str) -> str:
+    """Nombre de capa que psd-tools pueda escribir sin reventar.
+
+    Photoshop entrega los acentos **descompuestos** —"Promocio" más un acento
+    combinante— y el campo heredado del PSD se escribe en MacRoman, que no sabe
+    representar combinantes: guardar el PSD moría con UnicodeEncodeError y se
+    perdía la tanda entera. Se recomponen (NFC), que además es lo que MacRoman sí
+    tiene; lo que aun así no quepa se translitera, porque exportar con el nombre
+    sin tilde es mejor que no exportar.
+    """
+    name = unicodedata.normalize("NFC", raw or "")
+    try:
+        name.encode(PSD_NAME_ENCODING)
+    except UnicodeEncodeError:
+        name = (
+            unicodedata.normalize("NFKD", name)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+        )
+    return name.strip() or "capa"
 
 
 def build_psd(project: Project, variant) -> Path:
@@ -51,7 +78,9 @@ def build_psd(project: Project, variant) -> Path:
     )
     document = PSDImage.new("RGB", (variant.width, variant.height), color=(0, 0, 0))
     background = renderer.build_background(project, plan).convert("RGBA")
-    document.create_pixel_layer(background, name="00 · Fondo", top=0, left=0)
+    document.create_pixel_layer(
+        background, name=psd_layer_name("00 · Fondo"), top=0, left=0
+    )
     background.close()
 
     for index, placement in enumerate(sorted(placements, key=lambda item: item.z_index), 1):
@@ -65,7 +94,7 @@ def build_psd(project: Project, variant) -> Path:
             crop = surface.crop(bbox)
             document.create_pixel_layer(
                 crop,
-                name=f"{index:02d} · {placement.layer.name}"[:255],
+                name=psd_layer_name(f"{index:02d} · {placement.layer.name}")[:255],
                 top=bbox[1],
                 left=bbox[0],
             )

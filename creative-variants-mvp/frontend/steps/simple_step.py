@@ -667,7 +667,8 @@ def _poll_task(project_id: str, task_id: str, progress_text: str):
             return status["result"]
         elif status["state"] == "FAILED":
             progress_bar.empty()
-            raise Exception("La tarea asíncrona falló.")
+            # El detalle viene del worker: sin él no hay forma de saber qué pasó.
+            raise Exception(status.get("error") or "La tarea asíncrona falló.")
         elif status["state"] == "PROGRESS":
             meta = status["meta"] or {}
             progress_bar.progress(meta.get("progress", 0) / 100.0, text=meta.get("status", progress_text))

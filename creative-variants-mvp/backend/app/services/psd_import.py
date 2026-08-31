@@ -489,7 +489,10 @@ def _leaf_layers(
     """
     result: list[tuple[str, str, Any, float]] = []
     for layer in node:
-        name = str(layer.name or "")
+        # Photoshop entrega los acentos descompuestos ("Promocio" + combinante).
+        # Sin recomponer, "Promoción" no casa con ningún patrón de clasificación
+        # y el PSD exportado ni siquiera se puede guardar.
+        name = unicodedata.normalize("NFC", str(layer.name or ""))
         own = max(0.0, min(1.0, float(getattr(layer, "opacity", 255) or 255) / 255.0))
         if layer.is_group():
             child_path = f"{group_path}/{name}" if group_path else name
