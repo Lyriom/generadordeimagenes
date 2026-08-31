@@ -12,6 +12,7 @@ limpio. A partir de ahí la pieza funciona como cualquier otra plantilla.
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
 
 import cv2
@@ -59,23 +60,57 @@ def has_product(project: Project) -> bool:
 
 
 BACKGROUND_REL = "backgrounds/background.png"
+#: Copia intacta de la foto de partida. Sin ella, repetir el recorte trabajaría
+#: sobre un fondo ya modificado y cada intento saldría peor que el anterior.
+ORIGINAL_REL = "backgrounds/plancha_original.png"
+
+
+def drop_detected(project: Project) -> int:
+    """Quita las capas Producto que puso el detector, para poder repetirlo.
+
+    Solo las suyas: una capa que venía del PSD o que marcó el usuario a mano no
+    se toca, porque repetir el recorte no debe borrar trabajo ajeno.
+    """
+    antes = len(project.layers)
+    project.layers = [
+        layer
+        for layer in project.layers
+        if not (
+            layer.category == LayerCategory.PRODUCT
+            and layer.meta.get("detected_by", "").startswith("magnific")
+        )
+    ]
+    return antes - len(project.layers)
 
 
 def _plate_path(project: Project) -> Path:
-    """La foto de donde sale el producto.
+    """La foto de donde sale el producto, siempre en su estado original.
 
     Se prefiere la plancha de fondo del PSD: ya está limpia de logo, precio y
     legales, así que el recortador no se distrae con ellos. Si no hay plancha se
     lee el arte original, que **nunca** se modifica.
+
+    La primera vez se guarda una copia intacta. A partir de ahí se parte siempre
+    de esa copia: repetir el recorte sobre un fondo ya vaciado lo degradaba en
+    cada intento, y reintentar es justo lo que hace falta cuando el modelo tiene
+    un mal día.
     """
+    guardada = storage.abs_path(project.project_id, ORIGINAL_REL)
+    if guardada.exists():
+        return guardada
+
     if project.background.path:
         plate = storage.abs_path(project.project_id, project.background.path)
         if plate.exists():
-            return plate
+            guardada.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(plate, guardada)
+            return guardada
     source = storage.abs_path(project.project_id, project.source.path)
     if not source.exists():
         raise FileNotFoundError("No se encuentra la imagen del proyecto.")
-    return source
+    guardada.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, guardada)
+    return guardada
 
 
 def detect_product(
@@ -232,16 +267,18 @@ def _scene_pass(
 ) -> tuple[np.ndarray, Image.Image, Path, list[str]]:
     """Separa producto y decorado en una foto de ambiente.
 
-    Dos ediciones sobre la misma foto. Una la vacía: comparándola con la original
-    se sabe, píxel a píxel, dónde estaba el mueble, y ese trozo —solo ese— se
-    sustituye por el cuarto vacío. Fuera de la máscara no se toca nada, así que
-    la perspectiva, la línea del piso y el gráfico del KV quedan intactos; si se
-    adoptara el cuarto regenerado entero, el encuadre cambiaría y el producto
-    acabaría flotando.
+    Ningún modelo generativo es fiable a la primera: de dos vaciados del mismo
+    cuarto, uno salió impecable y el otro dejó un sofá puesto. Así que aquí no se
+    confía en el modelo, se le comprueba el trabajo.
 
-    La otra edición deja el mueble sobre fondo blanco, que es donde el recortador
-    sí sabe trabajar. Ese recorte se encaja en el hueco que ocupaba el original,
-    apoyado abajo, para que siga pisando el suelo.
+    Se le piden dos ediciones —el cuarto sin muebles y los muebles sin cuarto— y
+    con ellas se arma la máscara de lo que hay que borrar: la unión de lo que
+    cambió al vaciar y de la silueta del producto aislado. Se pega el vaciado
+    dentro de esa máscara y **se verifica** que ahí ya no quede nada del original.
+    Si queda, el vaciado no sirvió y se rellena con OpenCV, que no inventa nada.
+
+    Fuera de la máscara no se toca un píxel: perspectiva, línea del piso y
+    gráficos del KV quedan como estaban.
 
     Devuelve (alfa, RGBA, plancha limpia, avisos).
     """
@@ -254,12 +291,20 @@ def _scene_pass(
         )
 
     emptied = Path(scene.empty(str(plate), output_path=str(workdir / "vacio.png")))
-    hueco = _subject_mask(plate, emptied, photo_alpha)
+    isolated = Path(scene.isolate(str(plate), output_path=str(workdir / "aislado.png")))
+    try:
+        alpha, rgba = _cut(cutter, isolated, size, workdir)
+    finally:
+        isolated.unlink(missing_ok=True)
+
+    hueco = _subject_mask(plate, emptied, photo_alpha, alpha)
     if hueco is None:
         emptied.unlink(missing_ok=True)
+        rgba.close()
         raise NoProductFoundError(
-            "Al vaciar la escena no cambió nada reconocible: no se pudo aislar un "
-            "producto. Márquelo a mano en Ajustes finos."
+            "No se pudo aislar un producto de la fotografía: ni al vaciarla cambió "
+            "nada reconocible ni el recorte encontró un sujeto. Márquelo a mano en "
+            "Ajustes finos."
         )
 
     avisos = [
@@ -267,38 +312,15 @@ def _scene_pass(
         f"{scene.model_id}. El producto se regenera, así que es fiel al original en "
         "estilo y color, pero no idéntico píxel a píxel."
     ]
-    # Cuánto del decorado dice el modelo que era producto. Si es poco, se cambia
-    # solo ese trozo y el resto del cuarto queda intacto —perspectiva incluida—.
-    # Si es casi todo, el vaciado se desvió tanto que mezclarlo dejaría costuras:
-    # se adopta entero y se avisa, porque el encuadre habrá cambiado.
-    foto = max(float((photo_alpha > 24).mean()), 1e-6)
-    parte = float((hueco > 24).mean()) / foto
-    fiel = parte <= SCENE_BLEND_MAX
-    if fiel:
-        limpia = _blend_hole(plate, emptied, hueco, workdir)
-        emptied.unlink(missing_ok=True)
-        avisos.append("El fondo solo cambia donde estaba el producto.")
-    else:
-        _restore_graphics(plate, emptied, photo_alpha)
-        limpia = emptied
-        avisos.append(
-            f"El vaciado rehizo el {parte:.0%} de la fotografía, así que se usa "
-            "entera: el decorado cambia de encuadre. Revise el fondo y la posición "
-            "del producto antes de producir."
-        )
+    limpia = _clear_hole(plate, emptied, hueco, workdir)
+    emptied.unlink(missing_ok=True)
+    avisos.append(
+        "El fondo solo cambia donde estaba el producto; el resto del arte queda "
+        "idéntico. Revíselo en «Ver qué se retira de cada KV»: si el modelo dejó "
+        "algo, «Rehacer este recorte» parte otra vez de la foto intacta."
+    )
 
-    isolated = Path(scene.isolate(str(plate), output_path=str(workdir / "aislado.png")))
-    try:
-        alpha, rgba = _cut(cutter, isolated, size, workdir)
-    finally:
-        isolated.unlink(missing_ok=True)
-
-    # Con la mezcla, el hueco está en las coordenadas del arte original y ahí es
-    # donde el producto pisaba el suelo. Si se adoptó el vaciado entero, ese hueco
-    # ya no describe la escena nueva: se respeta la posición que el propio recorte
-    # trae, que al menos viene de una vista regenerada como la del fondo.
-    if fiel:
-        alpha, rgba = _fit_into_hole(rgba, hueco, size)
+    alpha, rgba = _place_product(rgba, alpha, hueco, size)
     return alpha, rgba, limpia, avisos
 
 
@@ -306,20 +328,28 @@ def _scene_pass(
 SCENE_DIFF_THRESHOLD = 40
 #: Bloques más pequeños que esto son ruido del regenerado, no el mueble.
 SCENE_MIN_BLOB = 0.005
-#: Hasta aquí se cambia solo el hueco; por encima el vaciado se desvió demasiado.
-SCENE_BLEND_MAX = 0.45
+#: Solapamiento mínimo con el hueco para fiarse de dónde puso el modelo el recorte.
+SCENE_ALIGNED_MIN = 0.6
 
 
 def _subject_mask(
-    plate: Path, emptied: Path, photo_alpha: np.ndarray
+    plate: Path,
+    emptied: Path,
+    photo_alpha: np.ndarray,
+    subject_alpha: np.ndarray | None = None,
 ) -> np.ndarray | None:
     """Dónde estaba el producto, en las coordenadas del arte original.
 
-    Sale de comparar la foto con su versión vaciada. Dos cuidados aprendidos a
-    base de fantasmas: una apertura grande se come las patas metálicas y luego
-    reaparecen en el fondo, así que la apertura es mínima y cada bloque se cierra
-    por su envolvente convexa —un sofá es un cuerpo, no un encaje—; y todo se
-    limita a la zona de fotografía, para que el panel del titular nunca entre.
+    Se combinan dos pistas: lo que cambió al vaciar el cuarto y la silueta del
+    producto ya aislado. Ninguna basta sola —la primera se contamina si el modelo
+    reencuadra, la segunda se descoloca si lo redibuja—, pero la unión cubre el
+    mueble aunque una de las dos falle.
+
+    Dos cuidados aprendidos a base de fantasmas: una apertura grande se come las
+    patas metálicas y luego reaparecen en el fondo, así que la apertura es mínima
+    y cada bloque se cierra por su envolvente convexa —un sofá es un cuerpo, no un
+    encaje—; y todo se limita a la zona de fotografía, para que el panel del
+    titular nunca entre.
     """
     with Image.open(plate) as opened:
         original = np.asarray(opened.convert("RGB"), dtype=np.int16)
@@ -331,6 +361,8 @@ def _subject_mask(
 
     diff = np.abs(original - vacia).sum(axis=2)
     raw = ((diff > SCENE_DIFF_THRESHOLD) * 255).astype(np.uint8)
+    if subject_alpha is not None and subject_alpha.shape == raw.shape:
+        raw = np.maximum(raw, ((subject_alpha > 24) * 255).astype(np.uint8))
     raw[photo_alpha <= 24] = 0
     raw = cv2.morphologyEx(raw, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
     raw = cv2.morphologyEx(
@@ -357,49 +389,43 @@ def _subject_mask(
     return mask if mask.any() else None
 
 
-def _restore_graphics(plate: Path, generated: Path, photo_alpha: np.ndarray) -> None:
-    """Devuelve al decorado regenerado los gráficos del KV que no son foto.
+def _clear_hole(plate: Path, emptied: Path, hole: np.ndarray, workdir: Path) -> Path:
+    """Plancha sin el producto: el cuarto vaciado, pegado solo dentro del hueco.
 
-    Solo hace falta cuando se adopta el vaciado entero: el modelo rehace la
-    imagen y se lleva por delante el panel del titular, la franja de color o el
-    degradado. El primer recorte ya dijo dónde está la fotografía; fuera de ahí
-    mandan los píxeles originales.
+    Fuera del hueco no cambia un píxel, así que la perspectiva, la línea del piso
+    y el gráfico del KV siguen intactos. Se probó a verificar el resultado y a
+    rellenar con OpenCV cuando parecía sucio, pero la comprobación saltaba con
+    cualquier alfombra que el modelo conservara a propósito, y el relleno de una
+    zona de este tamaño dejaba un borrón mucho peor que el problema. El resultado
+    se le enseña al usuario y puede rehacerlo: cada intento es distinto.
     """
-    with Image.open(plate) as opened:
-        original = opened.convert("RGB")
-    with Image.open(generated) as opened:
-        nueva = opened.convert("RGB")
-    if nueva.size != original.size:
-        nueva = nueva.resize(original.size, Image.Resampling.LANCZOS)
-    dentro = Image.fromarray(((photo_alpha > 24) * 255).astype(np.uint8), mode="L")
-    if dentro.size != original.size:
-        dentro = dentro.resize(original.size, Image.Resampling.NEAREST)
-    dentro = dentro.filter(ImageFilter.GaussianBlur(2))
-    Image.composite(nueva, original, dentro).save(generated, format="PNG", optimize=True)
-
-
-def _blend_hole(plate: Path, emptied: Path, hole: np.ndarray, workdir: Path) -> Path:
-    """Plancha limpia: el cuarto vacío solo dentro del hueco, el resto intacto."""
     with Image.open(plate) as opened:
         original = opened.convert("RGB")
     with Image.open(emptied) as opened:
         vacia = opened.convert("RGB")
         if vacia.size != original.size:
             vacia = vacia.resize(original.size, Image.Resampling.LANCZOS)
+
     borde = Image.fromarray(hole, mode="L").filter(ImageFilter.GaussianBlur(9))
     target = workdir / "plancha_limpia.png"
     Image.composite(vacia, original, borde).save(target, format="PNG", optimize=True)
     return target
 
 
-def _fit_into_hole(
-    cut: Image.Image, hole: np.ndarray, size: tuple[int, int]
+def _place_product(
+    cut: Image.Image, alpha: np.ndarray, hole: np.ndarray, size: tuple[int, int]
 ) -> tuple[np.ndarray, Image.Image]:
-    """Coloca el recorte regenerado en el hueco que ocupaba el producto.
+    """Deja el recorte donde estaba el producto.
 
-    Se apoya en el borde inferior del hueco: un mueble tiene que pisar el suelo,
-    y centrarlo verticalmente lo dejaría flotando.
+    Si el modelo lo redibujó en su sitio —se comprueba contra el hueco— se respeta
+    tal cual. Si lo movió, se encaja en el hueco apoyado abajo: un mueble tiene que
+    pisar el suelo, y centrarlo verticalmente lo dejaría flotando.
     """
+    dentro = (alpha > 24) & (hole > 24)
+    total = max(int((alpha > 24).sum()), 1)
+    if dentro.sum() / total >= SCENE_ALIGNED_MIN:
+        return alpha, cut
+
     ys, xs = np.nonzero(hole > 24)
     hx0, hx1 = int(xs.min()), int(xs.max())
     hy0, hy1 = int(ys.min()), int(ys.max())

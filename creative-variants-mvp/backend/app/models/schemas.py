@@ -325,6 +325,13 @@ class DetectProductRequest(BaseModel):
     dilate: int = Field(
         default=4, ge=0, le=32, description="Expansión del borde al borrar el producto."
     )
+    force: bool = Field(
+        default=False,
+        description=(
+            "Repetir el recorte aunque la pieza ya tenga producto detectado. "
+            "Se parte siempre de la foto original, no del fondo ya modificado."
+        ),
+    )
 
 
 class DetectProductResponse(BaseModel):

@@ -248,9 +248,9 @@ def test_the_hole_left_by_the_product_is_filled(
 def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
     client: TestClient, flat_project: dict, monkeypatch
 ):
-    """Si al vaciar la escena no cambia nada, no hay producto que separar."""
+    """Si separar la escena devuelve otra vez la escena, no se crea la capa."""
     project_id = flat_project["project_id"]
-    # El modelo devuelve la misma foto: no encontró nada que quitar.
+    # Ni el vaciado quitó nada ni el aislado dejó un sujeto: todo sigue siendo foto.
     _mock_magnific(
         monkeypatch, [_cutout_png(box=(0, 0, 400, 400))] * 2, vacio=_room_photo()
     )
@@ -261,7 +261,7 @@ def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
 
     assert payload["detected"] is False
     assert payload["layer"] is None
-    assert any("no cambió nada" in w for w in payload["warnings"])
+    assert any("escena completa" in w for w in payload["warnings"])
 
 
 def test_an_ambience_photo_is_separated_instead_of_rejected(
@@ -310,38 +310,54 @@ def test_an_ambience_product_is_pinned_so_it_keeps_touching_the_floor(
     assert layer["movable"] is False
 
 
-def test_a_wildly_different_empty_scene_is_used_whole_and_warned(
+def test_repeating_the_cutout_starts_from_the_untouched_photo(
     client: TestClient, flat_project: dict, monkeypatch
 ):
-    """Si el vaciado rehace casi toda la foto, mezclar dejaría costuras.
+    """Cada intento parte de la foto original, no del fondo del intento anterior.
 
-    Se adopta entero —el KV sigue siendo utilizable— pero se dice que el encuadre
-    cambió, porque el producto puede quedar descolocado.
+    Sin esto, repetir el recorte encadenaba vaciados sobre vaciados y el fondo
+    empeoraba en cada pulsación.
     """
     project_id = flat_project["project_id"]
-    # Sin el mueble, pero además con la pared repintada: el modelo se desvió.
-    otra = Image.new("RGB", CANVAS, (120, 150, 190))
-    otra.paste(Image.new("RGB", (400, 150), (150, 130, 110)), (0, 250))
-    otra_escena = io.BytesIO()
-    otra.save(otra_escena, format="PNG")
-    _mock_magnific(
-        monkeypatch,
-        [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()],
-        vacio=otra_escena.getvalue(),
-    )
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()])
+    client.post(f"/projects/{project_id}/layers/detect-product", json={})
+
+    guardada = storage.abs_path(project_id, product_cutout.ORIGINAL_REL)
+    assert guardada.exists(), "no se guardó la foto de partida"
+    intacta = guardada.read_bytes()
+
+    # Sin force no se toca nada; con force se rehace y sigue habiendo un producto.
+    sin_forzar = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+    assert sin_forzar["detected"] is False
+    assert any("ya tiene una capa Producto" in w for w in sin_forzar["warnings"])
+
+    de_nuevo = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={"force": True}
+    ).json()
+    assert de_nuevo["detected"] is True, de_nuevo["warnings"]
+    assert guardada.read_bytes() == intacta
+
+    capas = client.get(f"/projects/{project_id}").json()["layers"]
+    productos = [c for c in capas if c["category"] == "product"]
+    assert len(productos) == 1, "repetir no puede acumular capas Producto"
+
+
+def test_a_good_emptying_is_kept_and_says_so(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """Cuando el vaciado sí quitó el mueble, se conserva tal cual."""
+    project_id = flat_project["project_id"]
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()])
 
     payload = client.post(
         f"/projects/{project_id}/layers/detect-product", json={}
     ).json()
 
     assert payload["detected"] is True, payload["warnings"]
-    assert any("cambia de encuadre" in w for w in payload["warnings"])
-    # Sin mezcla el hueco no describe la escena nueva: manda el propio recorte.
-    layer = payload["layer"]
-    x0, y0, x1, y1 = SUBJECT_BOX
-    assert (layer["x"], layer["y"], layer["width"], layer["height"]) == (
-        x0, y0, x1 - x0, y1 - y0
-    )
+    assert any("queda idéntico" in w for w in payload["warnings"])
+    assert any("Rehacer este recorte" in w for w in payload["warnings"])
 
 
 def test_the_product_keeps_standing_on_the_floor(

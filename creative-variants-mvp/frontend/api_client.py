@@ -327,12 +327,18 @@ def detect_product(
     provider: str | None = None,
     model: str | None = None,
     prompt: str | None = None,
+    force: bool = False,
 ) -> dict:
     """Recorta el producto de la foto cuando el PSD no lo trae como capa."""
     return _handle(
         requests.post(
             _url(f"/projects/{project_id}/layers/detect-product"),
-            json={"provider": provider, "model": model, "prompt": prompt},
+            json={
+                "provider": provider,
+                "model": model,
+                "prompt": prompt,
+                "force": force,
+            },
             timeout=TIMEOUT,
         )
     )

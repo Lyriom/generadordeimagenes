@@ -1041,11 +1041,15 @@ def detect_product(
     project = load_project_or_404(project_id)
     payload = request or DetectProductRequest()
     if product_cutout.has_product(project):
-        return DetectProductResponse(
-            project_id=project.project_id,
-            detected=False,
-            warnings=["La pieza ya tiene una capa Producto: no se recortó nada."],
-        )
+        if not payload.force:
+            return DetectProductResponse(
+                project_id=project.project_id,
+                detected=False,
+                warnings=["La pieza ya tiene una capa Producto: no se recortó nada."],
+            )
+        # Repetir: se retira lo que puso el detector y se vuelve a partir de la
+        # foto original, nunca del fondo que dejó el intento anterior.
+        product_cutout.drop_detected(project)
     try:
         layer, warnings = product_cutout.detect_product(
             project,

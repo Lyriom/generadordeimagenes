@@ -544,6 +544,29 @@ def _show_what_is_removed(projects: list[dict], targets: dict[str, str]) -> None
                 None,
             )
             st.markdown(f"**{project['name']}**")
+            if st.button(
+                "Rehacer este recorte",
+                key=f"rehacer-{project['project_id']}",
+                help=(
+                    "Vuelve a separar el producto partiendo de la foto original. "
+                    "Útil cuando el modelo dejó parte del decorado; cada intento "
+                    "es distinto. Consume créditos."
+                ),
+            ):
+                try:
+                    with st.spinner("Rehaciendo el recorte…"):
+                        resultado = api.detect_product(
+                            project["project_id"], force=True
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    show_error(exc)
+                else:
+                    st.session_state.cache_token += 1
+                    if resultado.get("detected"):
+                        st.session_state["flash"] = f"Recorte rehecho en {project['name']}."
+                    else:
+                        st.warning(" ".join(resultado.get("warnings") or []))
+                    st.rerun()
             producto, fondo = st.columns(2)
             _thumb(producto, project, capa.get("src") if capa else None, "producto que se retira")
             _thumb(

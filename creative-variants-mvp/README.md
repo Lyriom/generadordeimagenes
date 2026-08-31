@@ -133,23 +133,35 @@ caminos según la foto:
 | Foto | Qué pasa | Llamadas |
 | --- | --- | --- |
 | Producto sobre fondo liso | `remove-background` recorta el sujeto y se rellena el hueco. | 2 |
-| Ambiente (una sala en una habitación) | `remove-background` devuelve el cuarto entero, así que un modelo de edición deja el producto sobre fondo plano —y ahí sí se recorta— y en paralelo vacía el decorado, que pasa a ser la plancha. | 4 |
+| Ambiente (una sala en una habitación) | `remove-background` devuelve el cuarto entero, así que un modelo de edición deja el producto sobre fondo plano —y ahí sí se recorta— y además vacía el decorado. Lo vaciado se pega **solo donde estaba el mueble**: fuera de ahí no cambia un píxel. | 4 |
 
 Medido con un KV real de Marcimex: la mesa de centro sale al 12 % del arte por el
 camino corto; la sala en ambiente devolvía el 75 % —piso y alfombra incluidos— y
 solo se separa por el segundo camino, quedando en el 13 %.
 
-Dos cosas que conviene saber:
+Tres cosas que conviene saber:
 
-- ⚠️ En el camino de ambiente **la imagen se regenera**: producto y decorado son
-  fieles al original en estilo, color y encuadre, pero no idénticos píxel a píxel.
-- ✅ Lo que no es fotografía —el panel del titular, una franja, un degradado— se
-  repone tal cual del arte original: el modelo no puede borrarlo.
+- ⚠️ En el camino de ambiente **el producto se regenera**: es fiel al original en
+  estilo y color, pero no idéntico píxel a píxel.
+- ✅ El fondo solo cambia dentro del hueco que ocupaba el producto. Perspectiva,
+  línea del piso y gráficos del KV quedan intactos.
+- 🔁 Ningún modelo generativo acierta siempre: de dos vaciados del mismo cuarto,
+  uno salió impecable y el otro dejó un sofá puesto. Por eso la foto de partida se
+  guarda intacta en `backgrounds/plancha_original.png` y **«Rehacer este recorte»**
+  vuelve a empezar desde ella —no desde el intento anterior—, así que reintentar
+  nunca empeora la pieza.
+
+El modelo por defecto es `flux-kontext-max`, elegido midiéndolo con un KV real:
+conserva la puerta, la planta, la repisa, el cuadro y la alfombra en su sitio,
+donde `seedream-v4-5-edit` reencuadraba el cuarto entero.
 
 ```bash
 POST /projects/{id}/layers/detect-product
-{"provider": "auto", "scene_model": "seedream-v4-5-edit"}
+{"provider": "auto", "scene_model": "flux-kontext-max", "force": false}
 ```
+
+`force: true` repite el recorte en una pieza que ya lo tiene: retira la capa que
+puso el detector y arranca otra vez desde la foto guardada.
 
 ## 2.c Tres reglas para obtener buenos resultados
 
@@ -507,7 +519,7 @@ interfaz**, pieza por pieza. Pegue la clave y reinicie:
 INPAINTING_PROVIDER=auto        # usa Magnific en cuanto haya clave
 MAGNIFIC_API_KEY=...            # https://www.magnific.com/user/organization/api-keys
 MAGNIFIC_MODEL=ideogram-image-edit   # modelo por defecto
-MAGNIFIC_SCENE_MODEL=seedream-v4-5-edit  # separa producto y decorado en fotos de ambiente
+MAGNIFIC_SCENE_MODEL=flux-kontext-max   # separa producto y decorado en fotos de ambiente
 ```
 
 ```bash
