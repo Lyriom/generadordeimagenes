@@ -523,6 +523,51 @@ def _rescue_products(missing: list[tuple[str, str]]) -> None:
         st.rerun()
 
 
+def _show_what_is_removed(projects: list[dict], targets: dict[str, str]) -> None:
+    """Enseña, KV por KV, qué producto se retira y con qué fondo se queda.
+
+    Sin esto hay que fiarse de una frase: "se retirarán 4 productos". Verlo antes
+    de gastar en generar es la diferencia entre corregir una capa mal marcada y
+    descubrirlo en las artes finales.
+    """
+    with st.expander("Ver qué se retira de cada KV", expanded=False):
+        st.caption(
+            "Izquierda: el producto que sale del arte. Derecha: el fondo que queda "
+            "detrás, sobre el que se compondrán los productos nuevos."
+        )
+        for project in projects:
+            layer_id = targets.get(project["project_id"])
+            if not layer_id:
+                continue
+            capa = next(
+                (item for item in project.get("layers", []) if item["id"] == layer_id),
+                None,
+            )
+            st.markdown(f"**{project['name']}**")
+            producto, fondo = st.columns(2)
+            _thumb(producto, project, capa.get("src") if capa else None, "producto que se retira")
+            _thumb(
+                fondo,
+                project,
+                (project.get("background") or {}).get("path"),
+                "fondo que queda",
+            )
+
+
+def _thumb(column, project: dict, relative: str | None, caption: str) -> None:
+    if not relative:
+        column.caption(f"Sin {caption}.")
+        return
+    try:
+        column.image(
+            cached_file(project["project_id"], relative, token()),
+            caption=caption,
+            width="stretch",
+        )
+    except Exception as exc:  # noqa: BLE001 - una miniatura no debe frenar el paso
+        column.caption(f"No se pudo mostrar el {caption}: {exc}")
+
+
 def _product_batch(projects: list[dict]):
     """Recoge productos para reconstruir piezas desde la plantilla del KV."""
     st.subheader("3 · Carga los productos")
@@ -557,6 +602,7 @@ def _product_batch(projects: list[dict]):
             f"{len(target_by_project)} KV listos: se retirarán {original_count} "
             "producto(s) original(es)."
         )
+        _show_what_is_removed(projects, target_by_project)
         uploads = st.file_uploader(
             "Catálogo de productos recortados (PNG)",
             type=["png"],
@@ -701,12 +747,40 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
     background_provider = "opencv"
     background_model = None
     background_prompt = None
+    # Un KV importado de PSD ya trae su fondo limpio, y el recorte del producto
+    # deja otro. Rehacerlo con IA no lo mejora: lo destruye. Se pregunta antes.
+    sin_fondo = [
+        project["name"]
+        for project in projects
+        if not (project.get("background") or {}).get("path")
+    ]
+    rehacer_fondo = bool(sin_fondo)
 
     with st.expander("Reconstrucción del fondo y variación"):
-        st.caption(
-            "La IA reconstruye únicamente los huecos del fondo. La ubicación de los "
-            "productos se toma de la zona diseñada en el PSD y no se delega a la IA."
-        )
+        if sin_fondo:
+            st.caption(
+                "La IA reconstruye únicamente los huecos del fondo. La ubicación de "
+                "los productos se toma de la zona diseñada en el PSD y no se delega "
+                "a la IA."
+            )
+            st.warning(
+                f"{len(sin_fondo)} KV no tienen fondo limpio todavía: se reconstruirá."
+            )
+        else:
+            st.success(
+                "Los KV ya tienen su fondo limpio —del PSD o del recorte del "
+                "producto—, así que **no se toca**. Los productos nuevos se componen "
+                "encima."
+            )
+            rehacer_fondo = st.checkbox(
+                "Rehacer el fondo con IA de todas formas",
+                value=False,
+                help=(
+                    "Solo si quiere un fondo distinto al del KV. En una plantilla de "
+                    "marca el fondo se borra entero —titular, precio y legales "
+                    "incluidos— y la IA tiene que inventarlo: suele salir peor."
+                ),
+            )
         engines = []
         if magnific_ready:
             engines.append("magnific")
@@ -749,9 +823,11 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                     "idéntico al original."
                 )
             else:
-                st.info(
-                    "Este modelo regenera la imagen completa. El resultado se recompone "
-                    "solo dentro de la zona borrada, así el resto del KV no se altera."
+                st.warning(
+                    "Este modelo no usa máscara: regenera la imagen entera y solo se "
+                    "conserva lo de fuera de la zona borrada. En un KV de marca esa "
+                    "zona es casi todo el arte, así que suele devolver tipografía "
+                    "inventada. Para reconstruir fondos use un modelo con máscara."
                 )
         elif background_mode == "openai":
             background_provider = "openai"
@@ -823,10 +899,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             background_provider=background_provider,
                             background_model=background_model,
                             background_prompt=background_prompt,
-                            regenerate_background=(
-                                background_provider in {"magnific", "openai"}
-                                and first_batch
-                            ),
+                            regenerate_background=rehacer_fondo and first_batch,
                         )
                         result = _poll_task(project["project_id"], task["task_id"], f"Generando {product.name}...")
                         first_batch = False
@@ -861,10 +934,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             background_provider=background_provider,
                             background_model=background_model,
                             background_prompt=background_prompt,
-                            regenerate_background=(
-                                background_provider in {"magnific", "openai"}
-                                and first_batch
-                            ),
+                            regenerate_background=rehacer_fondo and first_batch,
                         )
                         result = _poll_task(project["project_id"], task["task_id"], f"Generando {group_label}...")
                         first_batch = False

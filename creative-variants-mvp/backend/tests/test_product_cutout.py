@@ -36,6 +36,25 @@ def _room_photo() -> bytes:
     return buffer.getvalue()
 
 
+def _empty_room() -> bytes:
+    """La misma foto sin el mueble: lo que devuelve la edición que vacía."""
+    image = Image.new("RGB", CANVAS, (208, 196, 180))
+    image.paste(Image.new("RGB", (400, 150), (150, 130, 110)), (0, 250))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def _subject_on_white() -> bytes:
+    """El mueble sobre fondo plano: lo que devuelve la edición que aísla."""
+    image = Image.new("RGB", CANVAS, (255, 255, 255))
+    x0, y0, x1, y1 = SUBJECT_BOX
+    image.paste(Image.new("RGB", (x1 - x0, y1 - y0), (90, 60, 40)), (x0, y0))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 def _cutout_png(box=SUBJECT_BOX, size=CANVAS) -> bytes:
     """Lo que devolvería Magnific: el sujeto opaco y el resto transparente."""
     cut = Image.new("RGBA", size, (0, 0, 0, 0))
@@ -46,7 +65,7 @@ def _cutout_png(box=SUBJECT_BOX, size=CANVAS) -> bytes:
     return buffer.getvalue()
 
 
-def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None):
+def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None, vacio: bytes | None = None):
     """Simula subida → remove-background → descarga, y las ediciones de escena.
 
     `cutout_bytes` puede ser una lista: cada llamada a remove-background consume
@@ -55,6 +74,7 @@ def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None):
     """
     real_client = httpx.Client
     recortes = list(cutout_bytes) if isinstance(cutout_bytes, list) else [cutout_bytes]
+    escena_vacia = _empty_room() if vacio is None else vacio
     pedidos = {"cut": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -83,15 +103,19 @@ def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None):
             return httpx.Response(200, content=recortes[int(path[4:-4])])
         # Edición por instrucción: aislar el producto o vaciar el decorado.
         if path.startswith("/v1/ai/text-to-image/") or path.startswith("/v1/ai/gemini"):
+            cuerpo = request.content.decode()
             if calls is not None:
-                calls.append(request.content.decode())
+                calls.append(cuerpo)
+            cual = "vacio" if "Remove every product" in cuerpo else "aislado"
             return httpx.Response(200, json={"data": {
                 "task_id": "tsk_1",
                 "status": "COMPLETED",
-                "generated": ["https://cdn.test/editada.png"],
+                "generated": [f"https://cdn.test/{cual}.png"],
             }})
-        if str(request.url) == "https://cdn.test/editada.png":
-            return httpx.Response(200, content=_room_photo())
+        if str(request.url) == "https://cdn.test/vacio.png":
+            return httpx.Response(200, content=escena_vacia)
+        if str(request.url) == "https://cdn.test/aislado.png":
+            return httpx.Response(200, content=_subject_on_white())
         return httpx.Response(404, json={"message": f"sin ruta {request.url}"})
 
     def factory(*args, **kwargs):
@@ -224,9 +248,12 @@ def test_the_hole_left_by_the_product_is_filled(
 def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
     client: TestClient, flat_project: dict, monkeypatch
 ):
-    """Si ni siquiera separando la escena sale un producto, no se crea la capa."""
+    """Si al vaciar la escena no cambia nada, no hay producto que separar."""
     project_id = flat_project["project_id"]
-    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 0, 400, 400))] * 2)
+    # El modelo devuelve la misma foto: no encontró nada que quitar.
+    _mock_magnific(
+        monkeypatch, [_cutout_png(box=(0, 0, 400, 400))] * 2, vacio=_room_photo()
+    )
 
     payload = client.post(
         f"/projects/{project_id}/layers/detect-product", json={}
@@ -234,7 +261,7 @@ def test_a_photo_without_a_separable_subject_is_reported_not_crashed(
 
     assert payload["detected"] is False
     assert payload["layer"] is None
-    assert any("escena completa" in w for w in payload["warnings"])
+    assert any("no cambió nada" in w for w in payload["warnings"])
 
 
 def test_an_ambience_photo_is_separated_instead_of_rejected(
@@ -260,12 +287,77 @@ def test_an_ambience_photo_is_separated_instead_of_rejected(
     assert payload["detected"] is True, payload["warnings"]
     layer = payload["layer"]
     assert layer["category"] == LayerCategory.PRODUCT.value
+    assert layer["meta"]["detected_by"] == "magnific-scene"
+    assert any("ambiente" in w for w in payload["warnings"])
+    # El producto ocupa el hueco que dejó el mueble original, no otro sitio.
+    x0, y0, x1, y1 = SUBJECT_BOX
+    assert abs(layer["x"] - x0) <= 30 and abs(layer["y"] - y0) <= 30
+    assert abs(layer["width"] - (x1 - x0)) <= 60
+    assert abs(layer["height"] - (y1 - y0)) <= 60
+
+
+def test_an_ambience_product_is_pinned_so_it_keeps_touching_the_floor(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """El motor recoloca las capas en cada variante; un mueble no puede volar."""
+    project_id = flat_project["project_id"]
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()])
+
+    layer = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()["layer"]
+
+    assert layer["movable"] is False
+
+
+def test_a_wildly_different_empty_scene_is_used_whole_and_warned(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """Si el vaciado rehace casi toda la foto, mezclar dejaría costuras.
+
+    Se adopta entero —el KV sigue siendo utilizable— pero se dice que el encuadre
+    cambió, porque el producto puede quedar descolocado.
+    """
+    project_id = flat_project["project_id"]
+    # Sin el mueble, pero además con la pared repintada: el modelo se desvió.
+    otra = Image.new("RGB", CANVAS, (120, 150, 190))
+    otra.paste(Image.new("RGB", (400, 150), (150, 130, 110)), (0, 250))
+    otra_escena = io.BytesIO()
+    otra.save(otra_escena, format="PNG")
+    _mock_magnific(
+        monkeypatch,
+        [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()],
+        vacio=otra_escena.getvalue(),
+    )
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+
+    assert payload["detected"] is True, payload["warnings"]
+    assert any("cambia de encuadre" in w for w in payload["warnings"])
+    # Sin mezcla el hueco no describe la escena nueva: manda el propio recorte.
+    layer = payload["layer"]
     x0, y0, x1, y1 = SUBJECT_BOX
     assert (layer["x"], layer["y"], layer["width"], layer["height"]) == (
         x0, y0, x1 - x0, y1 - y0
     )
-    assert layer["meta"]["detected_by"] == "magnific-scene"
-    assert any("ambiente" in w for w in payload["warnings"])
+
+
+def test_the_product_keeps_standing_on_the_floor(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """El recorte se apoya abajo del hueco: un mueble no puede quedar flotando."""
+    project_id = flat_project["project_id"]
+    _mock_magnific(monkeypatch, [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()])
+
+    layer = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()["layer"]
+
+    # El suelo del mueble original estaba en SUBJECT_BOX[3]; el nuevo no puede
+    # quedar por encima de esa línea.
+    assert layer["y"] + layer["height"] >= SUBJECT_BOX[3] - 5
 
 
 def test_the_emptied_scene_becomes_the_plate_without_inpainting(
@@ -290,14 +382,14 @@ def test_the_emptied_scene_becomes_the_plate_without_inpainting(
     assert "magnific-scene" in project["background"]["provider"]
 
 
-def test_the_kv_graphics_survive_the_regenerated_plate(
+def test_the_kv_graphics_are_never_touched(
     client: TestClient, flat_project: dict, monkeypatch
 ):
     """El modelo rehace la foto entera; el panel del titular no puede perderse.
 
     Caso real: la plancha traía un recuadro blanco donde va "Días WOW · 70 %".
-    Al vaciar la sala el modelo lo borró. Fuera de la foto mandan los píxeles
-    originales.
+    Al adoptar el cuarto regenerado entero, el modelo se lo llevaba. Ahora solo
+    se sustituye el hueco del mueble, así que fuera de ahí no cambia un píxel.
     """
     project_id = flat_project["project_id"]
     # La foto ocupa de y=100 abajo: de ahí para arriba es gráfico del KV.
