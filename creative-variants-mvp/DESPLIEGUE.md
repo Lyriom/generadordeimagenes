@@ -209,8 +209,23 @@ Si no tienes una llave dedicada, se genera en el servidor:
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/deploy_generador -N ''
 cat ~/.ssh/deploy_generador.pub >> ~/.ssh/authorized_keys
-cat ~/.ssh/deploy_generador          # esto es lo que va en DEPLOY_SSH_KEY
+chmod 600 ~/.ssh/authorized_keys
 ```
+
+**No copies la clave privada del terminal al portapapeles.** Basta que se pierda
+un salto de línea para que el despliegue falle con `error in libcrypto:
+Permission denied`, que no dice nada de lo que pasa de verdad. Pásala por
+archivo, desde tu máquina:
+
+```bash
+scp root@SERVIDOR:~/.ssh/deploy_generador /tmp/deploy_generador
+gh secret set DEPLOY_SSH_KEY --repo Lyriom/generadordeimagenes < /tmp/deploy_generador
+rm /tmp/deploy_generador
+```
+
+Un aviso sobre ese `scp`: pide contraseña, así que **no pegues los tres comandos
+de golpe** —el prompt de la contraseña se traga las líneas siguientes y parece
+que se ejecutaron—. Uno a uno.
 
 ## Paso 7 · A partir de aquí, solo `git push`
 
@@ -268,4 +283,5 @@ aplanado, los recortes de cada capa y cada variante generada.
 | Plesk rechaza las directivas con «directive is duplicate» | `client_max_body_size` fuera del `location`: Plesk ya la pone en el vhost |
 | La tanda muere a los 60 s | Falta `proxy_read_timeout 600s` |
 | `cv-proxy` en crash-loop | El `security_opt` comentado del Paso 4 |
+| El deploy falla con «error in libcrypto» | `DEPLOY_SSH_KEY` mal pegado: súbelo con `gh secret set` desde el archivo |
 | «could not find an available, non-overlapping IPv4 address pool» | El pool de Docker está lleno (unos 31 huecos y este servidor tiene 39 redes). Ya está resuelto con la subred fija de `docker-compose.prod.yml`; si esa chocara con algo, `CV_SUBNET=10.x.y.0/24` en el `.env`. **No** reinicie el demonio: reiniciaría todos los proyectos del servidor |
