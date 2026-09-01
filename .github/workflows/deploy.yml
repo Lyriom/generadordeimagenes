@@ -54,7 +54,12 @@ jobs:
         env:
           CV_PASSWORD_HASH: hash-de-prueba
         run: |
+          # Los servicios leen sus variables de un .env que solo vive en el
+          # servidor. Aquí se usa el ejemplo, que de paso comprueba que sigue
+          # sirviendo para levantar el proyecto.
+          cp .env.example .env
           docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+          rm -f .env
           docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
             -e CV_PASSWORD_HASH='$2a$14$abc' \
             caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
