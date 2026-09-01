@@ -1,0 +1,62 @@
+# Despliegue al servidor. Solo corre si las pruebas pasaron y solo desde main.
+#
+# Necesita cuatro secretos en el repositorio
+# (Settings → Secrets and variables → Actions):
+#
+#   DEPLOY_HOST   dirección del servidor           ej. 203.0.113.10
+#   DEPLOY_USER   usuario con acceso a docker      ej. deploy
+#   DEPLOY_KEY    clave SSH privada de ese usuario
+#   DEPLOY_PATH   carpeta del repo en el servidor  ej. /srv/generadordeimagenes
+#
+# El `.env` con las claves de Magnific y la contraseña de acceso vive **solo en
+# el servidor**: no pasa por GitHub ni por el repositorio.
+name: desplegar
+
+on:
+  workflow_run:
+    workflows: ["pruebas"]
+    branches: [main]
+    types: [completed]
+  workflow_dispatch:
+
+jobs:
+  desplegar:
+    runs-on: ubuntu-latest
+    # Con las pruebas en rojo no se despliega, ni aunque el empujón sea urgente.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Comprobar que hay servidor configurado
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          if [ -z "$HOST" ]; then
+            echo "Falta el secreto DEPLOY_HOST: no hay a dónde desplegar." >&2
+            exit 1
+          fi
+
+      - name: Preparar la clave SSH
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_KEY }}" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          ssh-keyscan -H "${{ secrets.DEPLOY_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Actualizar y reiniciar
+        run: |
+          ssh -i ~/.ssh/id_deploy "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" bash -euo pipefail <<'REMOTO'
+          cd "${{ secrets.DEPLOY_PATH }}"
+          git fetch --all
+          git reset --hard origin/main
+          cd creative-variants-mvp
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+          # Las imágenes viejas se acumulan y llenan el disco de un VPS pequeño.
+          docker image prune -f
+          REMOTO
+
+      - name: Comprobar que responde
+        run: |
+          ssh -i ~/.ssh/id_deploy "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            'curl -fsS -o /dev/null -w "proxy %{http_code}\n" http://localhost:8014/ || true'

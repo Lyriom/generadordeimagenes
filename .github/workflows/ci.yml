@@ -1,0 +1,72 @@
+# Pruebas en cada empujón y en cada PR. Se ejecutan dentro de la misma imagen
+# que corre en producción: si pasan aquí, pasan allí.
+name: pruebas
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: creative-variants-mvp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construir la imagen del backend
+        run: docker build -t cv-backend-ci ./backend
+
+      - name: Ejecutar la suite
+        # Sin claves: las pruebas simulan el transporte HTTP y no salen a
+        # internet. Si alguna intentara llamar a Magnific, fallaría aquí, que es
+        # justo lo que se quiere.
+        run: |
+          docker run --rm \
+            -e CELERY_TASK_ALWAYS_EAGER=1 \
+            -e MAGNIFIC_API_KEY= \
+            -e OPENAI_API_KEY= \
+            cv-backend-ci \
+            python -m pytest tests/ -p no:cacheprovider --tb=short
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: creative-variants-mvp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Construir la imagen de la interfaz
+        run: docker build -t cv-frontend-ci ./frontend
+
+      - name: Comprobar que la aplicación arranca e importa
+        # No hay backend al que llamar, así que solo se comprueba que el módulo
+        # carga: coge errores de sintaxis e importaciones rotas antes de desplegar.
+        run: |
+          docker run --rm cv-frontend-ci python -c "
+          import ast, pathlib
+          for f in pathlib.Path('.').rglob('*.py'):
+              ast.parse(f.read_text())
+          import api_client, app  # noqa: F401
+          print('la interfaz carga')
+          "
+
+  compose:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: creative-variants-mvp
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validar el compose de producción
+        # Un error de YAML aquí tumba el despliegue entero; sale gratis cazarlo.
+        env:
+          CV_PASSWORD_HASH: hash-de-prueba
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null

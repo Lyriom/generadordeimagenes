@@ -185,6 +185,25 @@ puso el detector y arranca otra vez desde la foto guardada.
 3. **Bloquee logo y producto.** Se renderizan desde su PNG con escala uniforme: no se
    deforman ni se regeneran nunca.
 
+## 2.d Ponerlo en la web
+
+En local se levantan los puertos sueltos (8501 la interfaz, 8000 la API). Para
+servirlo a otras personas hay un compose aparte que cierra todo eso y deja una
+sola puerta, el **8014**, detrás de un proxy con contraseña:
+
+```bash
+# hash de la contraseña → al .env, con los $ DOBLES
+docker run --rm caddy:2-alpine caddy hash-password --plaintext 'su-clave'
+
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+No es una precaución de manual: cada generación gasta créditos de Magnific de la
+cuenta del servidor, así que una URL sin contraseña es una factura abierta.
+
+El paso a paso —servidor, HTTPS, despliegue automático y copias— está en
+[DESPLIEGUE.md](DESPLIEGUE.md).
+
 ## 3. Ejecución local sin Docker
 
 ```bash

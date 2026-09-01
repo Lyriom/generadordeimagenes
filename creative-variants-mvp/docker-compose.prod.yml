@@ -1,0 +1,45 @@
+# Despliegue: se añade sobre docker-compose.yml y cierra lo que en local está
+# abierto. Se usa así:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Solo el proxy publica puerto (8014). Backend, worker y Redis quedan en la red
+# interna: la API no se expone y el navegador nunca habla con ella —Streamlit la
+# consulta desde el servidor—.
+services:
+  proxy:
+    image: caddy:2-alpine
+    container_name: cv-proxy
+    depends_on:
+      frontend:
+        condition: service_healthy
+    # Por env_file y no por `environment`: el hash de bcrypt lleva `$`, y compose
+    # lo tomaría por una variable y lo dejaría a medias. En env_file va tal cual.
+    # Se genera con:
+    #   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'su-clave'
+    env_file:
+      - .env
+    ports:
+      - "8014:8014"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: unless-stopped
+
+  backend:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  frontend:
+    ports: !override []
+    environment:
+      # Detrás del proxy, Streamlit necesita saber que no sirve en la raíz de un
+      # dominio propio; sin esto el websocket se cae al recargar.
+      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "false"
+      STREAMLIT_SERVER_ENABLE_CORS: "false"
+      BACKEND_URL: http://backend:8000
+
+volumes:
+  caddy-data:
