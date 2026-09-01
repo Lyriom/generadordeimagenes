@@ -104,6 +104,22 @@ Este `.env` **no está en el repositorio y no debe estarlo**, y el rsync lo
 excluye: se queda en el servidor pase lo que pase. El flujo aborta el despliegue
 si no lo encuentra, para no levantar nunca el sitio sin contraseña.
 
+Para comprobar que el hash llega entero antes de arrancar nada:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  run --rm --no-deps --entrypoint sh proxy \
+  -c 'case "$CV_PASSWORD_HASH" in "\$2"*) echo "hash OK";; *) echo "hash MAL: revise los \$ dobles";; esac'
+```
+
+> No sirve mirarlo con `docker compose config`: ese comando vuelve a duplicar los
+> `$` en su salida —para que lo que imprime siga siendo un compose válido—, así
+> que un hash correcto ahí se ve igual que uno mal escrito. Hay que preguntárselo
+> al contenedor, que es quien lo recibe de verdad.
+
+Y `chmod 600 .env`: lleva la clave de Magnific en texto plano y los permisos por
+defecto de Plesk dejan que la lea cualquier otro usuario del servidor.
+
 ## Paso 4 · Levantarlo a mano una vez
 
 ```bash
