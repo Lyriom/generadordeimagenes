@@ -9,10 +9,12 @@ on:
   pull_request:
   workflow_dispatch:
 
-# Evita despliegues solapados: un push nuevo cancela el deploy en curso.
+# Los despliegues a main se encolan, NO se cancelan: un rsync cortado a la mitad
+# deja el servidor con medio repositorio. En las ramas sí se cancela el run
+# viejo, que ahí solo son pruebas.
 concurrency:
-  group: deploy-production
-  cancel-in-progress: true
+  group: cv-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   # ---------------------------------------------------------------------------
@@ -60,18 +62,21 @@ jobs:
   # ---------------------------------------------------------------------------
   # CD: solo si pasan las pruebas y solo desde main. Sincroniza el repo al
   # build-context del servidor (preservando .env y data/) y reconstruye con
-  # compose. El sitio lo sirve el contenedor `cv-proxy` en :8014, al que Plesk
-  # hace proxy.
+  # compose. El sitio lo sirve el contenedor `cv-proxy` en 127.0.0.1:8014, al que
+  # el nginx de Plesk hace proxy desde generador.misiva.com.ec.
   # ---------------------------------------------------------------------------
   deploy:
     needs: test
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
-      # Ruta del build-context en el servidor. No es secreta (es una ruta del
-      # filesystem). Hardcodeada a propósito para no depender de un secret que
-      # se pueda escribir mal. ← ESTA ES LA LÍNEA A AJUSTAR.
-      DEPLOY_PATH: /var/www/vhosts/misiva.com.ec/httpdocs/GENERADOR
+      # Build-context en el servidor. No es secreta (es una ruta), y va aquí y no
+      # en un secret para que se vea en el diff si alguien la cambia.
+      #
+      # Fuera de httpdocs A PROPÓSITO: lo que cuelga de httpdocs lo sirve nginx,
+      # y ahí dentro esta carpeta significaría que cualquiera puede descargar
+      # .env con la clave de Magnific escribiendo la URL.
+      DEPLOY_PATH: /var/www/vhosts/misiva.com.ec/GENERADOR
     steps:
       - uses: actions/checkout@v5
 
@@ -81,15 +86,22 @@ jobs:
           printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
 
-      # Red de seguridad: aborta si DEPLOY_PATH no es el build-context. Evita
-      # que un rsync --delete borre la carpeta equivocada si el secret o la ruta
-      # estuvieran mal.
+      # Red de seguridad antes de tocar nada: el rsync de abajo lleva --delete,
+      # así que si DEPLOY_PATH apuntara a la carpeta equivocada la vaciaría.
       - name: Verificar build-context
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
             "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
-            "test -f '${{ env.DEPLOY_PATH }}/docker-compose.yml'" \
-            || { echo 'ERROR: DEPLOY_PATH no contiene docker-compose.yml. Aborto para no borrar nada.'; exit 1; }
+            bash -s -- "$DEPLOY_PATH" <<'REMOTO'
+          set -eu
+          P="$1"
+          [ -d "$P" ] || { echo "ERROR: $P no existe. Créala antes del primer despliegue (Paso 2 de DESPLIEGUE.md)."; exit 1; }
+          [ -f "$P/docker-compose.yml" ] || [ -z "$(ls -A "$P")" ] || {
+            echo "ERROR: $P tiene archivos que no son de este proyecto."
+            echo "Aborto: rsync --delete los borraría."; exit 1; }
+          [ -f "$P/.env" ] || { echo "ERROR: falta $P/.env (Paso 3 de DESPLIEGUE.md). Sin él el proxy arrancaría sin contraseña."; exit 1; }
+          echo "build-context correcto: $P"
+          REMOTO
 
       # --delete deja la carpeta espejo del repo, así que hay dos exclusiones
       # que NO se pueden quitar:
@@ -104,7 +116,7 @@ jobs:
             --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.DS_Store' \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new" \
             ./creative-variants-mvp/ \
-            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:${{ env.DEPLOY_PATH }}/"
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:$DEPLOY_PATH/"
 
       # Reconstruye y recrea los contenedores. Se pasan los dos archivos porque
       # este proyecto tiene dos modos: en local cada servicio publica su puerto
@@ -113,10 +125,30 @@ jobs:
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
             "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
-            "cd '${{ env.DEPLOY_PATH }}' && docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans && docker image prune -f"
+            bash -s -- "$DEPLOY_PATH" <<'REMOTO'
+          set -eu
+          cd "$1"
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+          docker image prune -f
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+          REMOTO
 
+      # 401 es la respuesta buena: significa que el proxy está de pie Y que está
+      # pidiendo contraseña. Un 200 aquí sería el sitio abierto a internet.
       - name: Comprobar que responde
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
             "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
-            'code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8014/); echo "proxy responde $code"; [ "$code" = "401" ] || { echo "Se esperaba 401 (pide contraseña). Revise CV_PASSWORD_HASH en el .env del servidor."; exit 1; }'
+            bash -s <<'REMOTO'
+          for intento in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8014/ || true)
+            [ "$code" = "000" ] || break
+            echo "el proxy aún no acepta conexiones (intento $intento)"; sleep 5
+          done
+          echo "el proxy responde $code"
+          case "$code" in
+            401) echo "correcto: de pie y pidiendo contraseña" ;;
+            200) echo "ERROR: responde sin pedir contraseña. Revise CV_PASSWORD_HASH en el .env del servidor."; exit 1 ;;
+            *)   echo "ERROR: se esperaba 401. Revise: docker compose logs proxy"; exit 1 ;;
+          esac
+          REMOTO

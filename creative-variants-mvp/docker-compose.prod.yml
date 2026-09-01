@@ -19,8 +19,13 @@ services:
     #   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'su-clave'
     env_file:
       - .env
+    # Solo a la loopback del servidor: quien sirve el subdominio es el nginx de
+    # Plesk, que está en la misma máquina. Publicarlo en 0.0.0.0 dejaría el
+    # puerto 8014 alcanzable desde internet saltándose el certificado (y Docker
+    # abre el puerto en iptables por debajo del firewall del panel).
+    # En local se abre a todas las interfaces con CV_BIND=0.0.0.0 en el .env.
     ports:
-      - "8014:8014"
+      - "${CV_BIND:-127.0.0.1}:8014:8014"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
