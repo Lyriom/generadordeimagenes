@@ -132,7 +132,7 @@ caminos según la foto:
 
 | Foto | Qué pasa | Llamadas |
 | --- | --- | --- |
-| Producto sobre fondo liso | `remove-background` recorta el sujeto y el hueco se **continúa por cálculo**, sin IA: en un ciclorama no hay nada que inventar, solo degradado que seguir. | 1 |
+| Producto sobre fondo liso | `remove-background` recorta el sujeto y el **barrido de estudio se rehace entero** a partir de la propia foto, sin IA: no hay nada que inventar, solo una superficie continua que modelar. | 1 |
 | Ambiente (una sala en una habitación) | `remove-background` devuelve el cuarto entero, así que un modelo de edición deja el producto sobre fondo plano —y ahí sí se recorta— y además vacía el decorado. Lo vaciado se pega **solo donde estaba el mueble**: fuera de ahí no cambia un píxel. | 4 |
 
 Medido con un KV real de Marcimex: la mesa de centro sale al 12 % del arte por el
@@ -145,11 +145,17 @@ Tres cosas que conviene saber:
   estilo y color, pero no idéntico píxel a píxel.
 - ✅ El fondo solo cambia dentro del hueco que ocupaba el producto. Perspectiva,
   línea del piso y gráficos del KV quedan intactos.
-- 🧮 El relleno del hueco lo decide la textura de alrededor, no una preferencia:
-  si el fondo es liso se resuelve la membrana armónica —la superficie más suave
-  que encaja con el borde— y si tiene textura se llama al modelo. Pedirle a un
-  modelo que rellene un ciclorama termina mal: en un KV real devolvió un rollo de
-  cartón con tipografía inventada donde solo faltaba continuar la sombra.
+- 🧮 Quién limpia el fondo lo decide la plancha, no una preferencia. Si no tiene
+  ningún borde marcado —un barrido de estudio— se modela entera desde sus píxeles
+  limpios, descartando el producto y el margen donde cae su sombra, y se le
+  devuelve el grano. Si tiene diseño encima —un panel de titular, una franja— se
+  llama al modelo, que sí sabe reconstruir.
+
+  Parchear solo el hueco fue el primer intento y no vale: cualquier método
+  interpola desde un borde que incluye la sombra proyectada, así que la hereda y
+  deja un bulto con la silueta del producto. Y pedirle a un modelo generativo que
+  rellene un ciclorama termina siempre igual: mete un objeto donde no hay nada
+  —en un KV real, un rollo de cartón con tipografía inventada—.
 - 🔁 Ningún modelo generativo acierta siempre: de dos vaciados del mismo cuarto,
   uno salió impecable y el otro dejó un sofá puesto. Por eso la foto de partida se
   guarda intacta en `backgrounds/plancha_original.png` y **«Rehacer este recorte»**

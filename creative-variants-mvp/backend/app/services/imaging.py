@@ -305,6 +305,13 @@ def bgr_to_pil(image: np.ndarray) -> Image.Image:
 #: habitación, con muebles, cuadros y textura de piso, está un orden por encima.
 PLAIN_BACKDROP_DETAIL = 2.5
 
+#: Proporción de bordes duros por debajo de la cual la plancha no tiene nada
+#: dibujado y se puede rehacer entera.
+#:
+#: Separa con holgura los dos casos reales: un ciclorama de estudio da 0,000 y
+#: una plancha con panel de titular, cuadro y rodapié da 0,028.
+PLAIN_BACKDROP_EDGES = 0.005
+
 
 def surrounding_detail(image: np.ndarray, mask: np.ndarray) -> float:
     """Cuánta textura hay alrededor del hueco. Bajo = ciclorama o pared lisa.
@@ -325,35 +332,41 @@ def surrounding_detail(image: np.ndarray, mask: np.ndarray) -> float:
 
 
 def flat_backdrop_fill(
-    image: np.ndarray, mask: np.ndarray, grid: int = 40, iterations: int = 4000
+    image: np.ndarray, mask: np.ndarray, grid: int = 28, iterations: int = 6000
 ) -> np.ndarray:
-    """Reconstruye un fondo de estudio detrás del producto.
+    """Rehace el barrido de estudio completo, en vez de parchear el hueco.
 
-    Un ciclorama es un degradado suave, así que se estima **desde toda la foto**,
-    no desde el borde del hueco: se promedia en una rejilla gruesa descartando las
-    celdas que el producto tapa, se rellenan esas celdas interpolando desde las
-    limpias y se amplía. Sale el degradado y la caída de luz, nada más.
+    Un ciclorama es una superficie continua: degradado de la pared al piso más la
+    caída de luz. Se modela a partir de los píxeles limpios —descartando el
+    producto y el margen donde cae su sombra— y se aplica a **toda** la foto. Al
+    no haber parche no hay costura, y la sombra proyectada, que no cabe en un
+    modelo suave, desaparece sola.
 
-    Interpolar desde el borde —una membrana armónica— parecía lo natural y no lo
-    es: el borde incluye la sombra proyectada del producto, así que el relleno la
-    hereda y deja un bulto con su silueta. Probado también `cv2.inpaint`, que deja
-    facetas poligonales, y un promediado por pirámide, que deja una meseta clara.
+    Rellenar solo el hueco fue el primer intento y no vale: cualquier método
+    —`cv2.inpaint`, promediado por pirámide, membrana armónica, ajuste
+    polinómico— interpola desde un borde que incluye la sombra, así que la
+    hereda y deja un bulto con la silueta del producto.
+
+    Se le devuelve el grano de la foto original: un degradado perfectamente liso
+    canta al lado de una fotografía.
     """
     alto, ancho = image.shape[:2]
-    hole = mask > 24
-    if not hole.any():
+    sucio = mask > 24
+    if not sucio.any():
         return image.copy()
 
-    valido = (~hole).astype(np.float32)
-    color = image.astype(np.float32) * valido[..., None]
-    celdas = cv2.resize(color, (grid, grid), interpolation=cv2.INTER_AREA)
+    valido = (~sucio).astype(np.float32)
+    acumulado = cv2.resize(
+        image.astype(np.float32) * valido[..., None], (grid, grid),
+        interpolation=cv2.INTER_AREA,
+    )
     cobertura = cv2.resize(valido, (grid, grid), interpolation=cv2.INTER_AREA)
-    libre = cobertura > 0.55
+    libre = cobertura > 0.6
     if not libre.any():
         return image.copy()
 
-    rejilla = np.zeros_like(celdas)
-    rejilla[libre] = celdas[libre] / cobertura[libre][..., None]
+    rejilla = np.zeros_like(acumulado)
+    rejilla[libre] = acumulado[libre] / cobertura[libre][..., None]
     rejilla[~libre] = rejilla[libre].mean(axis=0)
     for _ in range(iterations):
         vecinos = (
@@ -363,7 +376,37 @@ def flat_backdrop_fill(
         rejilla[~libre] = vecinos[~libre]
 
     fondo = cv2.resize(rejilla, (ancho, alto), interpolation=cv2.INTER_CUBIC)
-    peso = cv2.GaussianBlur((hole * 255).astype(np.uint8), (0, 0), 12)
-    peso = (peso.astype(np.float32) / 255.0)[..., None]
-    mezcla = image.astype(np.float32) * (1 - peso) + np.clip(fondo, 0, 255) * peso
-    return mezcla.astype(np.uint8)
+    gris = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY).astype(np.float32)
+    sigma = float((gris - cv2.GaussianBlur(gris, (0, 0), 2))[~sucio].std())
+    grano = np.random.default_rng(7).normal(0, max(sigma, 0.0), (alto, ancho))
+    return np.clip(fondo + grano.astype(np.float32)[..., None], 0, 255).astype(np.uint8)
+
+
+def overall_detail(image: np.ndarray, mask: np.ndarray) -> float:
+    """Textura de la plancha entera, sin contar el producto.
+
+    Decide si se puede rehacer el fondo completo o solo el hueco: una plancha con
+    una franja de color o un panel de titular no es un barrido de estudio, y
+    modelarla entera se la llevaría por delante.
+    """
+    fuera = mask <= 24
+    if not fuera.any():
+        return float("inf")
+    gris = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    bordes = cv2.Laplacian(cv2.GaussianBlur(gris, (5, 5), 0), cv2.CV_32F)
+    return float(np.abs(bordes)[fuera].mean())
+
+
+def hard_edge_ratio(image: np.ndarray, mask: np.ndarray, threshold: float = 8.0) -> float:
+    """Qué parte de la plancha tiene bordes marcados, sin contar el producto.
+
+    Un barrido de estudio no tiene ninguno; un panel de titular, un marco o un
+    rodapié sí. Es lo que distingue "aquí no hay nada dibujado, se puede rehacer
+    entero" de "aquí hay diseño que no se puede tocar".
+    """
+    fuera = mask <= 24
+    if not fuera.any():
+        return float("inf")
+    gris = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    bordes = np.abs(cv2.Laplacian(cv2.GaussianBlur(gris, (5, 5), 0), cv2.CV_32F))
+    return float((bordes[fuera] > threshold).mean())

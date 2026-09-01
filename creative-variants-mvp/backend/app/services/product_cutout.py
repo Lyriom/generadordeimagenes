@@ -497,12 +497,18 @@ def _clean_plate(
     # un rollo de cartón con tipografía falsa donde estaba la mesa.
     with Image.open(plate) as opened:
         pixeles = np.asarray(opened.convert("RGB"))
-    detalle = imaging.surrounding_detail(pixeles, mask)
-    if detalle <= imaging.PLAIN_BACKDROP_DETAIL:
-        # Con mucho margen: el contorno del producto, sus patas finas y parte de
-        # la sombra se salen de la máscara ajustada, y en un fondo liso borrar de
-        # más no cuesta nada. Lo que sobre lo tapa el producto nuevo.
-        ancho = dilate_mask(mask, 60)
+    # El margen es amplio a propósito: la sombra que proyecta el producto se
+    # extiende bastante más allá de su silueta, y si entra en el modelo lo
+    # ensucia. Proporcional al arte, no en píxeles fijos: 170 px son medio lienzo
+    # en una miniatura y un margen justo en un KV de 1080.
+    corto = min(pixeles.shape[0], pixeles.shape[1])
+    ancho = dilate_mask(mask, max(16, min(260, round(corto * 0.16))))
+    detalle = imaging.surrounding_detail(pixeles, ancho)
+    bordes = imaging.hard_edge_ratio(pixeles, ancho)
+    if detalle <= imaging.PLAIN_BACKDROP_DETAIL and bordes <= imaging.PLAIN_BACKDROP_EDGES:
+        # Plancha sin nada dibujado: se rehace el barrido entero. Parchear solo
+        # el hueco deja costura y arrastra la sombra; rehacerlo no tiene bordes
+        # donde notarse.
         Image.fromarray(imaging.flat_backdrop_fill(pixeles, ancho)).save(
             staged, format="PNG", optimize=True
         )
@@ -515,14 +521,16 @@ def _clean_plate(
                 else "fondo-liso"
             ),
             generated_at=utcnow(),
-            warnings=["Se continuó el degradado del fondo donde estaba el producto."],
+            warnings=["Barrido de estudio rehecho sin el producto ni su sombra."],
         )
         logger.info(
-            "%s: fondo liso (detalle %.2f), relleno sin IA", project.project_id, detalle
+            "%s: barrido rehecho (detalle %.2f, bordes %.3f)",
+            project.project_id, detalle, bordes,
         )
         warnings.append(
-            "El fondo era liso, así que el hueco se continuó por cálculo en vez de "
-            "con IA: no hay nada inventado detrás del producto."
+            "El fondo era un barrido de estudio: se rehizo entero a partir de la "
+            "propia foto, sin el producto ni su sombra. No hay costura ni nada "
+            "inventado."
         )
         return warnings
 

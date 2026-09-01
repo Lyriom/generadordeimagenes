@@ -267,7 +267,7 @@ def test_a_plain_backdrop_is_filled_without_ai(
     ).json()
 
     assert payload["detected"] is True, payload["warnings"]
-    assert any("nada inventado" in w for w in payload["warnings"])
+    assert any("barrido de estudio" in w for w in payload["warnings"])
 
     # Y el mueble ya no está: el degradado siguió su curso.
     plate = storage.abs_path(project_id, "backgrounds/background.png")
@@ -294,6 +294,43 @@ def test_the_template_preview_shows_the_kv_without_the_product(
     datos = client.get(f"/projects/{project_id}").json()
     with Image.open(io.BytesIO(response.content)) as vista:
         assert vista.size == (datos["canvas"]["width"], datos["canvas"]["height"])
+
+
+def test_a_plate_with_artwork_is_never_rebuilt_whole(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """Rehacer el barrido entero solo vale si no hay nada dibujado en la plancha.
+
+    Con un panel de titular o una franja de color, modelar la plancha entera se
+    los llevaría por delante: ahí manda el modelo, que sí sabe reconstruir.
+    """
+    project_id = flat_project["project_id"]
+    # Se le pinta a la foto un panel con bordes duros, como el de "30% OFF".
+    plate = storage.abs_path(project_id, flat_project["source"]["path"])
+    with Image.open(plate) as opened:
+        arte = opened.convert("RGB")
+    arte.paste(Image.new("RGB", (300, 90), (250, 250, 250)), (40, 10))
+    arte.save(plate)
+
+    _mock_magnific(monkeypatch, _cutout_png())
+    llamadas: list = []
+
+    class Falso:
+        name = "falso"
+
+        def fill(self, image_path, mask_path, prompt=None, output_path=None):
+            llamadas.append(output_path)
+            Image.open(image_path).convert("RGB").save(output_path)
+            return output_path
+
+    monkeypatch.setattr(product_cutout, "get_inpainting_provider", lambda *a, **k: Falso())
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+
+    assert payload["detected"] is True, payload["warnings"]
+    assert llamadas, "con diseño en la plancha hay que llamar al proveedor"
 
 
 def test_a_textured_background_still_goes_to_the_model(
