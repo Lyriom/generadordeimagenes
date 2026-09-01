@@ -150,9 +150,9 @@ En `generador.misiva.com.ec` → **Apache & nginx Settings**:
 2. En **Additional nginx directives**, pega:
 
 ```nginx
-client_max_body_size 300M;
-
 location / {
+    client_max_body_size 300M;
+
     proxy_pass http://127.0.0.1:8014;
     proxy_http_version 1.1;
 
@@ -173,7 +173,9 @@ Tres cosas de ahí no son opcionales:
 - **`Upgrade` y `Connection`**: Streamlit habla por websocket. Sin ellas la
   página carga y se queda colgada al primer clic.
 - **`client_max_body_size 300M`**: los PSD llegan a 200 MB y el límite por
-  defecto los corta.
+  defecto los corta. Va **dentro** del `location`: Plesk ya escribe esa misma
+  directiva en el vhost, y declararla otra vez arriba hace que nginx rechace
+  toda la configuración con «directive is duplicate».
 - **`proxy_read_timeout 600s`**: una tanda de generación tarda minutos.
 
 Después, el certificado: SSL/TLS Certificates → **Let's Encrypt**.
@@ -251,6 +253,7 @@ aplanado, los recortes de cada capa y cada variante generada.
 | Pide contraseña y la buena no entra | Los `$` del hash sin duplicar en el `.env` |
 | La página carga y se cuelga al primer clic | Faltan `Upgrade`/`Connection` en las directivas de nginx |
 | «413» al subir un PSD | Falta `client_max_body_size 300M` |
+| Plesk rechaza las directivas con «directive is duplicate» | `client_max_body_size` fuera del `location`: Plesk ya la pone en el vhost |
 | La tanda muere a los 60 s | Falta `proxy_read_timeout 600s` |
 | `cv-proxy` en crash-loop | El `security_opt` comentado del Paso 4 |
 | «could not find an available, non-overlapping IPv4 address pool» | El pool de Docker está lleno (unos 31 huecos y este servidor tiene 39 redes). Ya está resuelto con la subred fija de `docker-compose.prod.yml`; si esa chocara con algo, `CV_SUBNET=10.x.y.0/24` en el `.env`. **No** reinicie el demonio: reiniciaría todos los proyectos del servidor |
