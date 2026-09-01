@@ -472,4 +472,34 @@ def render_template_preview(project: Project) -> Image.Image:
             if pieza.size != (layer.width, layer.height):
                 pieza = pieza.resize((layer.width, layer.height), Image.Resampling.LANCZOS)
             canvas.alpha_composite(pieza, (layer.x, layer.y))
+
+    hueco = next(
+        (item for item in project.layers if item.category == LayerCategory.PRODUCT),
+        None,
+    )
+    if hueco is not None:
+        _draw_product_slot(canvas, hueco)
     return canvas.convert("RGB")
+
+
+def _draw_product_slot(canvas: Image.Image, layer) -> None:
+    """Marca con trazo discontinuo dónde irá el producto.
+
+    Sin la marca, el hueco del producto —un degradado liso donde antes había un
+    mueble— se lee como una foto rota. Con ella se lee como lo que es: el espacio
+    reservado.
+    """
+    trazo = max(2, round(min(canvas.width, canvas.height) / 360))
+    guion = trazo * 6
+    color = (255, 255, 255, 150)
+    capa = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    pincel = ImageDraw.Draw(capa)
+    x0, y0 = layer.x, layer.y
+    x1, y1 = layer.x + layer.width, layer.y + layer.height
+    for x in range(x0, x1, guion * 2):
+        pincel.line([(x, y0), (min(x + guion, x1), y0)], fill=color, width=trazo)
+        pincel.line([(x, y1), (min(x + guion, x1), y1)], fill=color, width=trazo)
+    for y in range(y0, y1, guion * 2):
+        pincel.line([(x0, y), (x0, min(y + guion, y1))], fill=color, width=trazo)
+        pincel.line([(x1, y), (x1, min(y + guion, y1))], fill=color, width=trazo)
+    canvas.alpha_composite(capa)

@@ -539,8 +539,9 @@ def _show_what_is_removed(projects: list[dict], targets: dict[str, str]) -> None
     """
     with st.expander("Ver qué se retira de cada KV", expanded=False):
         st.caption(
-            "Izquierda: el producto que sale del arte. Derecha: el fondo que queda "
-            "detrás, sobre el que se compondrán los productos nuevos."
+            "Izquierda: el producto que sale del arte. Derecha: el KV ya sin él, "
+            "con el hueco marcado. Ese hueco queda tapado por el producto nuevo, "
+            "así que lo que se vea difuso ahí dentro no llega al arte final."
         )
         for project in projects:
             layer_id = targets.get(project["project_id"])
