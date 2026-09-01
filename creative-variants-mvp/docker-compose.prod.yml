@@ -25,6 +25,11 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
     restart: unless-stopped
+    # Si el contenedor entra en crash-loop nada más arrancar, es el kernel viejo
+    # del host: el seccomp por defecto de Docker devuelve EPERM en syscalls que
+    # usan las imágenes alpine nuevas. Le pasó a mkpone con nginx:alpine.
+    # security_opt:
+    #   - seccomp:unconfined
 
   backend:
     ports: !override []

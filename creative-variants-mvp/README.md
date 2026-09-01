@@ -201,8 +201,8 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 No es una precaución de manual: cada generación gasta créditos de Magnific de la
 cuenta del servidor, así que una URL sin contraseña es una factura abierta.
 
-El paso a paso —servidor, HTTPS, despliegue automático y copias— está en
-[DESPLIEGUE.md](DESPLIEGUE.md).
+El paso a paso para el servidor —subdominio en Plesk, secretos de GitHub y
+despliegue automático en cada push— está en [DESPLIEGUE.md](DESPLIEGUE.md).
 
 ## 3. Ejecución local sin Docker
 
