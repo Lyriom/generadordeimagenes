@@ -53,3 +53,21 @@ services:
 
 volumes:
   caddy-data:
+
+# Subred propia en vez de pedirle una al pool por defecto de Docker. Ese pool
+# tiene unos 31 huecos y en este servidor ya están todos ocupados por los otros
+# proyectos, así que compose falla al crear la red con "could not find an
+# available, non-overlapping IPv4 address pool".
+#
+# La solución que sale en todas partes —ampliar default-address-pools en
+# /etc/docker/daemon.json— obliga a reiniciar el demonio, y eso reinicia TODOS
+# los contenedores del servidor. Declarando la subred aquí no se le pide nada al
+# pool y no hay que tocar nada compartido.
+#
+# Si el rango chocara con algo, se cambia sin tocar el repositorio: basta poner
+# CV_SUBNET=10.x.y.0/24 en el .env del servidor.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${CV_SUBNET:-10.87.14.0/24}

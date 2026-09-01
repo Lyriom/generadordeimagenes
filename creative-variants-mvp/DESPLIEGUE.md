@@ -253,3 +253,4 @@ aplanado, los recortes de cada capa y cada variante generada.
 | «413» al subir un PSD | Falta `client_max_body_size 300M` |
 | La tanda muere a los 60 s | Falta `proxy_read_timeout 600s` |
 | `cv-proxy` en crash-loop | El `security_opt` comentado del Paso 4 |
+| «could not find an available, non-overlapping IPv4 address pool» | El pool de Docker está lleno (unos 31 huecos y este servidor tiene 39 redes). Ya está resuelto con la subred fija de `docker-compose.prod.yml`; si esa chocara con algo, `CV_SUBNET=10.x.y.0/24` en el `.env`. **No** reinicie el demonio: reiniciaría todos los proyectos del servidor |
