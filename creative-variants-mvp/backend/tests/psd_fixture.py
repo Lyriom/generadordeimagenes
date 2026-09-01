@@ -141,3 +141,45 @@ def sample_kv(path: Path, width: int = 900, height: int = 660) -> Path:
         },
     ]
     return write_psd(path, (width, height), layers)
+
+
+def sample_sheet(
+    path: Path,
+    pieces: list[tuple[int, int, int, int]],
+    canvas: tuple[int, int],
+) -> Path:
+    """Pliego de prueba: varias piezas sobre un mismo lienzo, separadas por espacio.
+
+    Reproduce los PSD que llegan de agencia con 4 avisos en un solo archivo. Como
+    el escritor de PSD de las pruebas no sabe crear artboards, esto ejercita la
+    detección geométrica, que es el camino de respaldo.
+    """
+    layers: list[dict] = []
+    for index, (x, y, width, height) in enumerate(pieces):
+        tone = 40 + index * 30
+        layers.append(
+            {
+                "name": f"fondo pieza {index + 1}",
+                "image": solid((width, height), (tone, 60, 90, 255)),
+                "position": (x, y),
+            }
+        )
+        layers.append(
+            {
+                "name": f"LOGO {index + 1}",
+                "image": rounded(
+                    (int(width * 0.3), int(height * 0.1)), (20, 90, 200, 255)
+                ),
+                "position": (x + int(width * 0.06), y + int(height * 0.05)),
+            }
+        )
+        layers.append(
+            {
+                "name": f"Capa {index + 1}",
+                "image": rounded(
+                    (int(width * 0.4), int(height * 0.35)), (200, 40, 40, 255)
+                ),
+                "position": (x + int(width * 0.3), y + int(height * 0.4)),
+            }
+        )
+    return write_psd(path, canvas, layers)

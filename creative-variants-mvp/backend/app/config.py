@@ -53,8 +53,43 @@ class Settings:
         self.sam_model_type: str = os.getenv("SAM_MODEL_TYPE", "vit_b")
         self.sam_variant: str = os.getenv("SAM_VARIANT", "sam2")  # sam2 | sam
 
-        # auto | opencv | openai | flux | adobe
+        # auto | opencv | magnific | openai | flux | adobe
         self.inpainting_provider: str = os.getenv("INPAINTING_PROVIDER", "auto").lower()
+
+        # --- Magnific (Mystic, Flux, Seedream, Ideogram…) ---
+        # Una sola clave da acceso a todo el catálogo; el modelo se elige por
+        # petición desde la interfaz y este valor es solo el predeterminado.
+        self.magnific_api_key: str | None = os.getenv("MAGNIFIC_API_KEY") or None
+        self.magnific_base_url: str = os.getenv(
+            "MAGNIFIC_BASE_URL", "https://api.magnific.com"
+        )
+        self.magnific_model: str = os.getenv("MAGNIFIC_MODEL", "ideogram-image-edit")
+        self.magnific_resolution: str = os.getenv("MAGNIFIC_RESOLUTION", "2k")
+        # Ideogram: TURBO | DEFAULT | QUALITY
+        self.magnific_rendering_speed: str = os.getenv(
+            "MAGNIFIC_RENDERING_SPEED", "QUALITY"
+        ).upper()
+        # Mystic: realism | fluid | zen | flexible | super_real | editorial_portraits
+        self.magnific_mystic_model: str = os.getenv("MAGNIFIC_MYSTIC_MODEL", "realism")
+        # Mystic: automatic | magnific_illusio | magnific_sharpy | magnific_sparkle
+        self.magnific_engine: str = os.getenv("MAGNIFIC_ENGINE", "automatic")
+        self.magnific_structure_strength: int = _env_int("MAGNIFIC_STRUCTURE_STRENGTH", 70)
+        self.magnific_adherence: int = _env_int("MAGNIFIC_ADHERENCE", 60)
+        self.magnific_hdr: int = _env_int("MAGNIFIC_HDR", 40)
+        self.magnific_creative_detailing: int = _env_int("MAGNIFIC_CREATIVE_DETAILING", 20)
+        # Bajo este tamaño la imagen viaja en base64; por encima se sube primero.
+        # Modelo de edición por instrucción para las fotos de ambiente: aísla el
+        # producto sobre fondo plano y vacía la escena. Necesita entender la orden,
+        # así que no puede ser el de máscara (ideogram-image-edit). Kontext está
+        # hecho para editar conservando el resto: medido con un KV real, deja la
+        # puerta, la planta, la repisa, el cuadro y la alfombra en su sitio, donde
+        # Seedream reencuadraba el cuarto entero.
+        self.magnific_scene_model: str = os.getenv(
+            "MAGNIFIC_SCENE_MODEL", "flux-kontext-max"
+        )
+        self.magnific_inline_max_mb: int = _env_int("MAGNIFIC_INLINE_MAX_MB", 6)
+        # Suavizado del borde al recomponer lo generado sobre el arte original.
+        self.magnific_feather: int = _env_int("MAGNIFIC_FEATHER", 6)
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
         self.openai_image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
         self.openai_image_quality: str = os.getenv("OPENAI_IMAGE_QUALITY", "medium")

@@ -1,0 +1,73 @@
+# Despliegue: se añade sobre docker-compose.yml y cierra lo que en local está
+# abierto. Se usa así:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# Solo el proxy publica puerto (8014). Backend, worker y Redis quedan en la red
+# interna: la API no se expone y el navegador nunca habla con ella —Streamlit la
+# consulta desde el servidor—.
+services:
+  proxy:
+    image: caddy:2-alpine
+    container_name: cv-proxy
+    depends_on:
+      frontend:
+        condition: service_healthy
+    # Por env_file y no por `environment`: el hash de bcrypt lleva `$`, y compose
+    # lo tomaría por una variable y lo dejaría a medias. En env_file va tal cual.
+    # Se genera con:
+    #   docker run --rm caddy:2-alpine caddy hash-password --plaintext 'su-clave'
+    env_file:
+      - .env
+    # Solo a la loopback del servidor: quien sirve el subdominio es el nginx de
+    # Plesk, que está en la misma máquina. Publicarlo en 0.0.0.0 dejaría el
+    # puerto 8014 alcanzable desde internet saltándose el certificado (y Docker
+    # abre el puerto en iptables por debajo del firewall del panel).
+    # En local se abre a todas las interfaces con CV_BIND=0.0.0.0 en el .env.
+    ports:
+      - "${CV_BIND:-127.0.0.1}:8014:8014"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    restart: unless-stopped
+    # Si el contenedor entra en crash-loop nada más arrancar, es el kernel viejo
+    # del host: el seccomp por defecto de Docker devuelve EPERM en syscalls que
+    # usan las imágenes alpine nuevas. Le pasó a mkpone con nginx:alpine.
+    # security_opt:
+    #   - seccomp:unconfined
+
+  backend:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  frontend:
+    ports: !override []
+    environment:
+      # Detrás del proxy, Streamlit necesita saber que no sirve en la raíz de un
+      # dominio propio; sin esto el websocket se cae al recargar.
+      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "false"
+      STREAMLIT_SERVER_ENABLE_CORS: "false"
+      BACKEND_URL: http://backend:8000
+
+volumes:
+  caddy-data:
+
+# Subred propia en vez de pedirle una al pool por defecto de Docker. Ese pool
+# tiene unos 31 huecos y en este servidor ya están todos ocupados por los otros
+# proyectos, así que compose falla al crear la red con "could not find an
+# available, non-overlapping IPv4 address pool".
+#
+# La solución que sale en todas partes —ampliar default-address-pools en
+# /etc/docker/daemon.json— obliga a reiniciar el demonio, y eso reinicia TODOS
+# los contenedores del servidor. Declarando la subred aquí no se le pide nada al
+# pool y no hay que tocar nada compartido.
+#
+# Si el rango chocara con algo, se cambia sin tocar el repositorio: basta poner
+# CV_SUBNET=10.x.y.0/24 en el .env del servidor.
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${CV_SUBNET:-10.87.14.0/24}

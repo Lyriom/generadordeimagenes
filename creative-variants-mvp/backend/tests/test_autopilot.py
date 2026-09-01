@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 from app.models import Canvas, Project, SourceImage
 from app.services import autopilot
 
-from .conftest import create_manual_layers
+from .conftest import await_task, create_manual_layers
 
 
 def _project_with_canvas(width: int, height: int) -> Project:
@@ -42,8 +42,7 @@ def test_auto_generates_from_scratch(client: TestClient, project: dict):
     response = client.post(
         f"/projects/{project['project_id']}/auto", json={"count": 4}
     )
-    assert response.status_code == 200, response.text
-    payload = response.json()
+    payload = await_task(client, project["project_id"], response)
 
     names = [step["name"] for step in payload["steps"]]
     assert names == [
@@ -71,8 +70,7 @@ def test_auto_respects_explicit_formats_and_reuses_layers(
         f"/projects/{project['project_id']}/auto",
         json={"count": 6, "formats": ["1080x1350"], "intensity": "conservative"},
     )
-    assert response.status_code == 200, response.text
-    payload = response.json()
+    payload = await_task(client, project["project_id"], response)
 
     detect = next(step for step in payload["steps"] if step["name"] == "Detectar elementos")
     assert "ya estaban listos" in detect["detail"]

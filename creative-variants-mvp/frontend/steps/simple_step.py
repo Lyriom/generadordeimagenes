@@ -11,7 +11,15 @@ import streamlit as st
 import api_client as api
 
 from . import results_step
-from .common import cached_file, refresh_project, show_error, token
+from .common import (
+    cached_file,
+    cached_template,
+    cached_piece_preview,
+    cached_pieces,
+    refresh_project,
+    show_error,
+    token,
+)
 
 ALLOWED_ARTWORK = ["psd"]
 
@@ -64,6 +72,57 @@ def _open_many(projects: list[dict], message: str) -> None:
     st.rerun()
 
 
+def _choose_pieces(sources: list[str]) -> dict[str, list[int] | None]:
+    """Detecta las piezas de cada PSD y deja marcar cuáles importar.
+
+    Devuelve {ruta: índices} y `None` cuando el PSD trae una sola pieza, que es
+    la forma de decirle al backend "todas". Los archivos sin ninguna pieza
+    marcada se quedan fuera del diccionario.
+    """
+    selection: dict[str, list[int] | None] = {}
+    for source in sources:
+        try:
+            with st.spinner(f"Analizando {source}…"):
+                info = cached_pieces(source)
+        except Exception as exc:  # noqa: BLE001 - un archivo ilegible no bloquea el resto
+            st.warning(f"{source}: no se pudieron detectar las piezas ({exc}).")
+            selection[source] = None
+            continue
+
+        pieces = info.get("pieces") or []
+        if len(pieces) <= 1:
+            selection[source] = None
+            continue
+
+        with st.expander(f"📐 {source} · {len(pieces)} piezas detectadas", expanded=True):
+            st.caption(
+                "El PSD trae varias piezas en el mismo lienzo. Cada una marcada se "
+                "convierte en una plantilla independiente con sus capas reales."
+            )
+            chosen: list[int] = []
+            columns = st.columns(min(4, len(pieces)))
+            for position, piece in enumerate(pieces):
+                column = columns[position % len(columns)]
+                with column:
+                    try:
+                        st.image(
+                            cached_piece_preview(source, piece["index"]),
+                            width="stretch",
+                        )
+                    except Exception:  # noqa: BLE001 - la miniatura es un extra
+                        st.caption("(sin vista previa)")
+                    marked = st.checkbox(
+                        f"{piece['name'][:22]} · {piece['width']}×{piece['height']}",
+                        value=True,
+                        key=f"pieza-{source}-{piece['index']}",
+                    )
+                    if marked:
+                        chosen.append(piece["index"])
+            if chosen:
+                selection[source] = chosen
+    return selection
+
+
 # ------------------------------------------------------------------- 1 · el arte
 def _pick_artwork() -> None:
     st.subheader("1 · Carga los KV de la campaña")
@@ -90,19 +149,32 @@ def _pick_artwork() -> None:
                 "no un enlace ni un .rtf. Y solo se usa si hay que volver a dibujar los "
                 "textos — si vienen del PSD se conservan tal cual y no hace falta."
             )
+        st.caption(
+            "Si un PSD trae varias piezas (varios avisos en el mismo lienzo), se "
+            "detectan solas y cada una se convierte en una plantilla independiente."
+        )
         if st.button("Crear campaña con estos KV", type="primary", disabled=not uploaded):
             try:
                 projects = []
                 with st.status(f"Importando {len(uploaded)} KV…", expanded=True):
                     for index, artwork in enumerate(uploaded):
                         st.write(f"{index + 1}/{len(uploaded)} · {artwork.name}")
-                        projects.append(api.create_project(
+                        result = api.create_projects_split(
                             name=artwork.name.rsplit(".", 1)[0][:120],
-                            artwork=_file_tuple(artwork), kv=None,
+                            artwork=_file_tuple(artwork),
                             logo=_file_tuple(logo),
                             font=_file_tuple(font, "font/ttf"),
-                        ))
-                _open_many(projects, f"{len(projects)} KV listos. Continúa en el punto 2.")
+                        )
+                        detected = result.get("pieces_detected", 1)
+                        if detected > 1:
+                            st.write(f"　　↳ {detected} piezas detectadas en el pliego")
+                        projects.extend(result.get("projects", []))
+                        for warning in result.get("warnings", []):
+                            st.caption(f"⚠️ {warning}")
+                _open_many(
+                    projects,
+                    f"{len(projects)} plantilla(s) lista(s). Continúa en el punto 2.",
+                )
             except Exception as exc:  # noqa: BLE001
                 show_error(exc)
 
@@ -129,19 +201,29 @@ def _pick_artwork() -> None:
                 "Archivos PSD", list(labels), default=list(labels),
                 format_func=lambda key: labels[key]
             )
+            selection = _choose_pieces(sources)
+            total = sum(
+                len(chosen) if chosen is not None else 1 for chosen in selection.values()
+            )
             if st.button(
-                "Crear campaña con estos KV", type="primary", key="use-ingest",
-                disabled=not sources,
+                f"Crear campaña con {total} plantilla(s)", type="primary", key="use-ingest",
+                disabled=not selection,
             ):
                 try:
                     projects = []
-                    with st.status(f"Importando {len(sources)} KV…", expanded=True):
-                        for index, source in enumerate(sources):
-                            st.write(f"{index + 1}/{len(sources)} · {source}")
-                            projects.append(api.create_project_from_ingest(
-                                source=source, kv=None,
-                            ))
-                    _open_many(projects, f"{len(projects)} KV listos. Continúa en el punto 2.")
+                    with st.status(f"Importando {total} plantilla(s)…", expanded=True):
+                        for index, source in enumerate(selection):
+                            st.write(f"{index + 1}/{len(selection)} · {source}")
+                            result = api.create_projects_from_ingest_split(
+                                source=source, kv=None, pieces=selection[source],
+                            )
+                            projects.extend(result.get("projects", []))
+                            for warning in result.get("warnings", []):
+                                st.caption(f"⚠️ {warning}")
+                    _open_many(
+                        projects,
+                        f"{len(projects)} plantilla(s) lista(s). Continúa en el punto 2.",
+                    )
                 except Exception as exc:  # noqa: BLE001
                     show_error(exc)
 
@@ -382,6 +464,147 @@ def _review_layers(projects: list[dict]) -> tuple[list[dict], bool]:
     return projects, done == len(project_ids)
 
 
+def _rescue_products(missing: list[tuple[str, str]]) -> None:
+    """Los KV cuyo producto viene aplanado dentro de la foto, no como capa.
+
+    Es lo normal en fotos de ambiente: la sala o el mueble están dentro de una
+    sola imagen que el importador tomó como fondo. Se recorta con IA para que la
+    pieza tenga algo que reemplazar.
+    """
+    st.info(
+        "Estos KV no tienen una capa identificada como Producto: "
+        + ", ".join(name for _id, name in missing)
+        + ". Suele pasar cuando el producto viene dentro de la fotografía y no "
+        "como capa aparte."
+    )
+    st.caption(
+        "Magnific recorta el producto de la foto y deja el fondo limpio detrás. "
+        "En las fotos de ambiente —una sala montada en un cuarto— hace falta "
+        "además separar el mueble del decorado, así que esos KV tardan más y "
+        "gastan alguna llamada extra."
+    )
+    if not st.button(
+        f"🔍 Detectar el producto con IA en {len(missing)} KV",
+        key="rescue-products",
+    ):
+        st.caption("También puedes marcarlo a mano en **Ajustes finos**.")
+        return
+
+    logrados, fallidos = 0, []
+    with st.status(f"Recortando el producto en {len(missing)} KV…", expanded=True):
+        for index, (project_id, name) in enumerate(missing, start=1):
+            st.write(f"{index}/{len(missing)} · {name}")
+            try:
+                result = api.detect_product(project_id)
+            except Exception as exc:  # noqa: BLE001 - un KV no debe frenar al resto
+                fallidos.append(f"{name}: {exc}")
+                continue
+            if result.get("detected"):
+                logrados += 1
+                layer = result["layer"]
+                como = (
+                    " (foto de ambiente: se separó del decorado)"
+                    if layer.get("meta", {}).get("detected_by") == "magnific-scene"
+                    else ""
+                )
+                st.write(
+                    f"　　↳ producto de {layer['width']}×{layer['height']} px "
+                    f"recortado{como}"
+                )
+                for aviso in result.get("warnings") or []:
+                    st.caption(f"　　　{aviso}")
+            else:
+                fallidos.append(f"{name}: " + " ".join(result.get("warnings") or []))
+    if logrados:
+        st.session_state.cache_token += 1
+        # Sin volver a leer los proyectos, la vista de "qué se retira" sigue
+        # mirando las capas de antes y no encuentra el producto recién creado.
+        st.session_state.campaign_projects = [
+            api.get_project(item["project_id"])
+            for item in (st.session_state.get("campaign_projects") or [])
+        ]
+        st.success(f"Producto detectado en {logrados} KV.")
+    for detalle in fallidos:
+        st.warning(detalle)
+    if logrados:
+        st.rerun()
+
+
+def _show_what_is_removed(projects: list[dict], targets: dict[str, str]) -> None:
+    """Enseña, KV por KV, qué producto se retira y con qué fondo se queda.
+
+    Sin esto hay que fiarse de una frase: "se retirarán 4 productos". Verlo antes
+    de gastar en generar es la diferencia entre corregir una capa mal marcada y
+    descubrirlo en las artes finales.
+    """
+    with st.expander("Ver qué se retira de cada KV", expanded=False):
+        st.caption(
+            "Izquierda: el producto que sale del arte. Derecha: el KV ya sin él, "
+            "con el hueco marcado. Ese hueco queda tapado por el producto nuevo, "
+            "así que lo que se vea difuso ahí dentro no llega al arte final."
+        )
+        for project in projects:
+            layer_id = targets.get(project["project_id"])
+            if not layer_id:
+                continue
+            capa = next(
+                (item for item in project.get("layers", []) if item["id"] == layer_id),
+                None,
+            )
+            st.markdown(f"**{project['name']}**")
+            if st.button(
+                "Rehacer este recorte",
+                key=f"rehacer-{project['project_id']}",
+                help=(
+                    "Vuelve a separar el producto partiendo de la foto original. "
+                    "Útil cuando el modelo dejó parte del decorado; cada intento "
+                    "es distinto. Consume créditos."
+                ),
+            ):
+                try:
+                    with st.spinner("Rehaciendo el recorte…"):
+                        resultado = api.detect_product(
+                            project["project_id"], force=True
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    show_error(exc)
+                else:
+                    st.session_state.cache_token += 1
+                    st.session_state.campaign_projects = [
+                        api.get_project(item["project_id"])
+                        for item in (st.session_state.get("campaign_projects") or [])
+                    ]
+                    if resultado.get("detected"):
+                        st.session_state["flash"] = f"Recorte rehecho en {project['name']}."
+                    else:
+                        st.warning(" ".join(resultado.get("warnings") or []))
+                    st.rerun()
+            producto, plantilla = st.columns(2)
+            _thumb(producto, project, capa.get("src") if capa else None, "producto que se retira")
+            try:
+                plantilla.image(
+                    cached_template(project["project_id"], token()),
+                    caption="el KV sin el producto, listo para el nuevo",
+                    width="stretch",
+                )
+            except Exception as exc:  # noqa: BLE001 - una miniatura no frena el paso
+                plantilla.caption(f"No se pudo componer la plantilla: {exc}")
+
+
+def _thumb(column, project: dict, relative: str | None, caption: str) -> None:
+    if not relative:
+        column.caption(f"Sin {caption}.")
+        return
+    try:
+        column.image(
+            cached_file(project["project_id"], relative, token()),
+            caption=caption,
+            width="stretch",
+        )
+    except Exception as exc:  # noqa: BLE001 - una miniatura no debe frenar el paso
+        column.caption(f"No se pudo mostrar el {caption}: {exc}")
+
+
 def _product_batch(projects: list[dict]):
     """Recoge productos para reconstruir piezas desde la plantilla del KV."""
     st.subheader("3 · Carga los productos")
@@ -400,7 +623,7 @@ def _product_batch(projects: list[dict]):
                     item for item in candidates if item.get("category") == "product"
                 ]
                 if not product_candidates:
-                    missing.append(project["name"])
+                    missing.append((project["project_id"], project["name"]))
                     continue
                 target_by_project[project["project_id"]] = product_candidates[0]["id"]
                 original_count += len(product_candidates)
@@ -408,11 +631,7 @@ def _product_batch(projects: list[dict]):
             show_error(exc)
             return {"individual": [], "groups": [], "valid": False}, {}
         if missing:
-            st.info(
-                "Estos KV no tienen una capa identificada como Producto: "
-                + ", ".join(missing)
-                + ". Selecciónalos arriba y corrígelos en **Ajustes finos**."
-            )
+            _rescue_products(missing)
         if not target_by_project:
             return {"individual": [], "groups": [], "valid": False}, {}
 
@@ -420,6 +639,7 @@ def _product_batch(projects: list[dict]):
             f"{len(target_by_project)} KV listos: se retirarán {original_count} "
             "producto(s) original(es)."
         )
+        _show_what_is_removed(projects, target_by_project)
         uploads = st.file_uploader(
             "Catálogo de productos recortados (PNG)",
             type=["png"],
@@ -530,7 +750,8 @@ def _poll_task(project_id: str, task_id: str, progress_text: str):
             return status["result"]
         elif status["state"] == "FAILED":
             progress_bar.empty()
-            raise Exception("La tarea asíncrona falló.")
+            # El detalle viene del worker: sin él no hay forma de saber qué pasó.
+            raise Exception(status.get("error") or "La tarea asíncrona falló.")
         elif status["state"] == "PROGRESS":
             meta = status["meta"] or {}
             progress_bar.progress(meta.get("progress", 0) / 100.0, text=meta.get("status", progress_text))
@@ -558,34 +779,99 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
     except Exception:  # noqa: BLE001
         provider_status = {}
     openai_ready = bool(provider_status.get("openai_available"))
+    magnific_ready = bool(provider_status.get("magnific_available"))
+    magnific_models = provider_status.get("magnific_models") or []
     background_provider = "opencv"
+    background_model = None
     background_prompt = None
+    # Un KV importado de PSD ya trae su fondo limpio, y el recorte del producto
+    # deja otro. Rehacerlo con IA no lo mejora: lo destruye. Se pregunta antes.
+    sin_fondo = [
+        project["name"]
+        for project in projects
+        if not (project.get("background") or {}).get("path")
+    ]
+    rehacer_fondo = bool(sin_fondo)
 
     with st.expander("Reconstrucción del fondo y variación"):
-        st.caption(
-            "OpenAI reconstruye únicamente los huecos del fondo. La ubicación de los "
-            "productos se toma de la zona diseñada en el PSD y no se delega a la IA."
-        )
-        background_mode = st.radio(
-            "Calidad del fondo",
-            ["openai", "local"] if openai_ready else ["local"],
-            format_func=lambda value: {
-                "local": "Local · gratis",
-                "openai": "OpenAI · IA de mayor calidad (con costo)",
-            }[value],
-            horizontal=True,
-        )
-        if not openai_ready:
+        if sin_fondo:
             st.caption(
-                "Para habilitar OpenAI, pega la clave en `OPENAI_API_KEY=` dentro de "
-                "`.env` y reinicia los contenedores."
+                "La IA reconstruye únicamente los huecos del fondo. La ubicación de "
+                "los productos se toma de la zona diseñada en el PSD y no se delega "
+                "a la IA."
+            )
+            st.warning(
+                f"{len(sin_fondo)} KV no tienen fondo limpio todavía: se reconstruirá."
             )
         else:
             st.success(
+                "Los KV ya tienen su fondo limpio —del PSD o del recorte del "
+                "producto—, así que **no se toca**. Los productos nuevos se componen "
+                "encima."
+            )
+            rehacer_fondo = st.checkbox(
+                "Rehacer el fondo con IA de todas formas",
+                value=False,
+                help=(
+                    "Solo si quiere un fondo distinto al del KV. En una plantilla de "
+                    "marca el fondo se borra entero —titular, precio y legales "
+                    "incluidos— y la IA tiene que inventarlo: suele salir peor."
+                ),
+            )
+        engines = []
+        if magnific_ready:
+            engines.append("magnific")
+        if openai_ready:
+            engines.append("openai")
+        engines.append("local")
+        background_mode = st.radio(
+            "Motor del fondo",
+            engines,
+            format_func=lambda value: {
+                "local": "Local · gratis",
+                "magnific": "Magnific · eliges el modelo de IA (con costo)",
+                "openai": "OpenAI · IA de imagen (con costo)",
+            }[value],
+            horizontal=True,
+        )
+        if not magnific_ready:
+            st.caption(
+                "Para habilitar Magnific, pega la clave en `MAGNIFIC_API_KEY=` dentro "
+                "de `.env` y reinicia los contenedores."
+            )
+        if background_mode == "magnific":
+            background_provider = "magnific"
+            by_id = {model["id"]: model for model in magnific_models}
+            options = list(by_id)
+            preferred = provider_status.get("magnific_model")
+            index = options.index(preferred) if preferred in options else 0
+            background_model = st.selectbox(
+                "Modelo de IA",
+                options,
+                index=index,
+                format_func=lambda key: by_id[key]["label"],
+                help="Todos usan la misma clave de Magnific; cambia el costo y el estilo.",
+            )
+            chosen = by_id.get(background_model, {})
+            st.caption(chosen.get("description", ""))
+            if chosen.get("supports_mask"):
+                st.success(
+                    "Repinta solo el hueco de los productos: el resto del arte queda "
+                    "idéntico al original."
+                )
+            else:
+                st.warning(
+                    "Este modelo no usa máscara: regenera la imagen entera y solo se "
+                    "conserva lo de fuera de la zona borrada. En un KV de marca esa "
+                    "zona es casi todo el arte, así que suele devolver tipografía "
+                    "inventada. Para reconstruir fondos use un modelo con máscara."
+                )
+        elif background_mode == "openai":
+            background_provider = "openai"
+            st.success(
                 f"OpenAI listo · modelo {provider_status.get('openai_model', 'gpt-image-2')}"
             )
-        if background_mode == "openai":
-            background_provider = "openai"
+        if background_mode in {"magnific", "openai"}:
             background_prompt = st.text_area(
                 "Dirección visual para el fondo",
                 placeholder=(
@@ -593,8 +879,8 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                     "sin texto, sin logos y con espacio para el producto"
                 ),
                 help=(
-                    "OpenAI genera solamente el fondo una vez por lote. Producto, logo y "
-                    "copy se componen después con sus archivos reales."
+                    "El fondo se genera una sola vez por lote. Producto, logo y copy se "
+                    "componen después con sus archivos reales."
                 ),
             ) or None
         intensity = st.radio(
@@ -648,10 +934,9 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             product_label=product.name.rsplit(".", 1)[0],
                             template_mode=True,
                             background_provider=background_provider,
+                            background_model=background_model,
                             background_prompt=background_prompt,
-                            regenerate_background=(
-                                background_provider == "openai" and first_batch
-                            ),
+                            regenerate_background=rehacer_fondo and first_batch,
                         )
                         result = _poll_task(project["project_id"], task["task_id"], f"Generando {product.name}...")
                         first_batch = False
@@ -684,10 +969,9 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             product_label=group_label,
                             template_mode=True,
                             background_provider=background_provider,
+                            background_model=background_model,
                             background_prompt=background_prompt,
-                            regenerate_background=(
-                                background_provider == "openai" and first_batch
-                            ),
+                            regenerate_background=rehacer_fondo and first_batch,
                         )
                         result = _poll_task(project["project_id"], task["task_id"], f"Generando {group_label}...")
                         first_batch = False

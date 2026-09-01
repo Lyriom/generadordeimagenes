@@ -1,0 +1,15 @@
+# Solo si este servidor NO tiene ya un proxy en los puertos 80 y 443. En ese
+# caso Caddy los toma y saca el certificado él mismo:
+#
+#   CV_SITE_ADDRESS=generador.misiva.com   (en el .env)
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+#                  -f docker-compose.dominio.yml up -d --build
+#
+# Si el servidor ya sirve otros proyectos, casi seguro tiene algo ahí: no use
+# este archivo y deje que ese proxy reenvíe el subdominio al 8014.
+services:
+  proxy:
+    ports: !override
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"

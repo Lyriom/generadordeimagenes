@@ -301,15 +301,39 @@ def _extract_and_background(project: dict) -> None:
         "Expansión de la máscara al reconstruir el fondo", 0, 40, 8,
         help="Más expansión borra mejor los bordes, pero reconstruye más superficie.",
     )
+    models = api.image_models()
+    by_id = {model["id"]: model for model in models}
+    engine_options = ["auto"] + (["magnific"] if models else []) + ["opencv"]
+    engine = st.selectbox(
+        "Motor de reconstrucción",
+        engine_options,
+        format_func=lambda key: {
+            "auto": "Automático (el mejor disponible)",
+            "magnific": "Magnific · elegir modelo",
+            "opencv": "Local · OpenCV (gratis)",
+        }[key],
+    )
+    model_id = None
+    if engine == "magnific" and by_id:
+        model_id = st.selectbox(
+            "Modelo de IA",
+            list(by_id),
+            format_func=lambda key: by_id[key]["label"],
+        )
+        st.caption(by_id[model_id].get("description", ""))
     prompt = st.text_input(
-        "Instrucción para el inpainting (solo si usa FLUX o Adobe)",
+        "Instrucción para el inpainting (solo con IA)",
         placeholder="fondo limpio de estudio, sin objetos ni texto",
     )
     if st.button("🩹 Reconstruir fondo"):
         try:
             with st.spinner("Reconstruyendo el fondo…"):
                 result = api.reconstruct_background(
-                    project["project_id"], prompt=prompt or None, dilate=dilate
+                    project["project_id"],
+                    prompt=prompt or None,
+                    dilate=dilate,
+                    provider=engine,
+                    model=model_id,
                 )
             refresh_project()
             st.success(f"Fondo reconstruido con `{result['provider']}`.")

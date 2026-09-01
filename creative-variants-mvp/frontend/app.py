@@ -53,10 +53,18 @@ def _status_note() -> None:
         )
         st.write(f"Relleno de fondo: `{providers.get('inpainting', {}).get('active')}`")
         image_provider = providers.get("inpainting", {})
-        if image_provider.get("openai_available"):
-            st.write(f"IA de imagen: `{image_provider.get('openai_model', 'gpt-image-2')}` ✅")
+        if image_provider.get("magnific_available"):
+            catalogue = image_provider.get("magnific_models") or []
+            st.write(
+                f"Magnific: `{image_provider.get('magnific_model')}` ✅ "
+                f"({len(catalogue)} modelos disponibles)"
+            )
         else:
-            st.write("IA de imagen: sin clave (modo local)")
+            st.write("Magnific: sin clave (`MAGNIFIC_API_KEY`)")
+        if image_provider.get("openai_available"):
+            st.write(f"OpenAI: `{image_provider.get('openai_model', 'gpt-image-2')}` ✅")
+        else:
+            st.write("OpenAI: sin clave")
         if not ocr.get("available"):
             st.caption(
                 "Sin lector de texto los titulares no se detectan solos: puede "

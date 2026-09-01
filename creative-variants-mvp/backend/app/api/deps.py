@@ -1,11 +1,14 @@
 """Dependencias y utilidades compartidas de la API."""
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import HTTPException, status
 
+from ..config import settings
 from ..models import Project
 from ..services import storage
-from ..services.security import FileValidationError, PathTraversalError
+from ..services.security import FileValidationError, PathTraversalError, resolve_inside
 
 
 def load_project_or_404(project_id: str) -> Project:
@@ -19,6 +22,14 @@ def load_project_or_404(project_id: str) -> Project:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
+
+
+def resolve_ingest(relative: str) -> Path:
+    """Ruta absoluta dentro de la carpeta de ingesta (bloquea path traversal)."""
+    path = resolve_inside(settings.ingest_dir, relative)
+    if not path.exists() or not path.is_file():
+        raise bad_request(f"No existe el archivo en la carpeta de ingesta: {relative}")
+    return path
 
 
 def bad_request(detail: str) -> HTTPException:

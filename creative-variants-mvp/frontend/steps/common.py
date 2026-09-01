@@ -39,6 +39,22 @@ def cached_zip(
     return api.export_zip(project_id, list(variant_ids) or None, include_layers)
 
 
+@st.cache_data(show_spinner=False, ttl=900, max_entries=60)
+def cached_pieces(source: str) -> dict:
+    """Piezas de un PSD de la carpeta compartida. Se cachea: analizarlo cuesta."""
+    return api.ingest_pieces(source)
+
+
+@st.cache_data(show_spinner=False, ttl=900, max_entries=120)
+def cached_piece_preview(source: str, index: int) -> bytes:
+    return api.ingest_piece_preview(source, index)
+
+
+@st.cache_data(show_spinner=False, ttl=900, max_entries=40)
+def cached_template(project_id: str, token: int) -> bytes:
+    return api.preview_template(project_id)
+
+
 @st.cache_data(show_spinner=False, ttl=900, max_entries=40)
 def cached_detections(project_id: str, token: int) -> bytes:
     return api.preview_detections(project_id)

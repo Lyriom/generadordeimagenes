@@ -7,7 +7,7 @@ from app.models import Canvas, Layer, LayerCategory, LayerType, Project, SourceI
 from app.services.layout_engine import Placement, VariantPlan
 from app.services.quality import evaluate_variant
 
-from .conftest import create_manual_layers
+from .conftest import await_task, create_manual_layers
 
 
 def _project() -> Project:
@@ -181,8 +181,8 @@ def test_faithful_reproduction_is_not_penalised(client: TestClient, project: dic
             "seed": 11,
         },
     )
-    assert response.status_code == 200, response.text
-    variant = response.json()["variants"][0]
+    result = await_task(client, project["project_id"], response)
+    variant = result["variants"][0]
     metrics = variant["quality"]["metrics"]
 
     assert metrics["tight_margins"] == 0.0
