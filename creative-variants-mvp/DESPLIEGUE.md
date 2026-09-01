@@ -63,18 +63,79 @@ curl -o /dev/null -w '%{http_code}\n' -u equipo:la-clave http://localhost:8014/ 
 curl -m 3 http://localhost:8000/health                                # sin respuesta
 ```
 
-## 4. Abrirlo al exterior
+## 4. El subdominio
 
-El proxy escucha en HTTP. Para exponerlo a internet hay que ponerle HTTPS
-delante: sin cifrado, la contraseña de acceso viaja en claro.
+Casi seguro el servidor ya tiene un proxy sirviendo los otros proyectos. Por eso
+lo normal aquí es **no tocar los puertos 80 y 443**: el generador se queda
+escuchando en el 8014 y ese proxy le manda el subdominio.
 
-- **Con dominio propio**: apuntar el DNS al servidor y dejar que Caddy pida el
-  certificado. Cambiar `:8014` por el dominio en el `Caddyfile`, publicar los
-  puertos 80 y 443 en vez del 8014, y quitar `auto_https off`.
-- **Sin dominio**: un túnel (Cloudflare Tunnel o Tailscale) hacia
-  `localhost:8014`. No hay que abrir ningún puerto en el cortafuegos y el
-  certificado lo pone el túnel.
-- **Solo red interna**: dejarlo como está y llegar por la IP del servidor.
+### Si el servidor ya tiene proxy (lo habitual)
+
+Se deja el `.env` sin `CV_SITE_ADDRESS` y se añade el sitio al proxy existente.
+
+Con **nginx**:
+
+```nginx
+server {
+    server_name generador.misiva.com;
+
+    # Los PSD pesan; sin esto nginx corta la subida.
+    client_max_body_size 300M;
+
+    location / {
+        proxy_pass http://127.0.0.1:8014;
+        proxy_http_version 1.1;
+
+        # Streamlit va por websocket: sin estas dos, la página carga y se queda
+        # colgada al primer clic.
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Una generación puede tardar minutos.
+        proxy_read_timeout 600s;
+    }
+}
+```
+
+Después, el certificado: `sudo certbot --nginx -d generador.misiva.com`.
+
+Con **Caddy** ya instalado en el servidor, son dos líneas:
+
+```caddyfile
+generador.misiva.com {
+    reverse_proxy 127.0.0.1:8014
+}
+```
+
+### Si los puertos 80 y 443 están libres
+
+Entonces sobra el proxy de fuera. En el `.env`:
+
+```env
+CV_SITE_ADDRESS=generador.misiva.com
+```
+
+Y se levanta añadiendo un tercer archivo:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+               -f docker-compose.dominio.yml up -d --build
+```
+
+Caddy pide el certificado a Let's Encrypt solo. Antes hay que apuntar el DNS del
+subdominio a la IP del servidor y abrir el 80 y el 443 en el cortafuegos.
+
+### La contraseña se queda
+
+Aunque el subdominio sea público, el acceso sigue pidiendo usuario y contraseña.
+No es paranoia: cada generación gasta créditos de Magnific de la cuenta del
+servidor, así que una URL abierta es una factura abierta. Para dar acceso a
+varias personas con claves distintas, se añade una línea por persona en el
+bloque `basic_auth` del `Caddyfile`.
 
 ## 5. Despliegue automático
 

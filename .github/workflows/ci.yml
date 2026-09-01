@@ -69,4 +69,18 @@ jobs:
         # Un error de YAML aquí tumba el despliegue entero; sale gratis cazarlo.
         env:
           CV_PASSWORD_HASH: hash-de-prueba
-        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml config >/dev/null
+          docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+                         -f docker-compose.dominio.yml config >/dev/null
+
+      - name: Validar el Caddyfile
+        # Con dominio y sin dominio: son las dos formas de servirlo y un error
+        # aquí deja el sitio caído sin que nada más lo avise.
+        run: |
+          for direccion in ":8014" "generador.ejemplo.com"; do
+            docker run --rm -v "$PWD/Caddyfile:/etc/caddy/Caddyfile:ro" \
+              -e CV_SITE_ADDRESS="$direccion" \
+              -e CV_PASSWORD_HASH='$2a$14$abc' \
+              caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
+          done

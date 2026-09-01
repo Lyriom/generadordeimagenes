@@ -1,11 +1,18 @@
 # Puerta de entrada única. Detrás quedan Streamlit, la API y Redis, ninguno
 # publicado: al exterior solo se llega por aquí, y solo con contraseña.
+#
+# La dirección se elige con CV_SITE_ADDRESS en el .env:
+#
+#   sin definir              → :8014, HTTP. Para poner detrás del proxy que ya
+#                              tenga el servidor (nginx, Traefik, otro Caddy).
+#   generador.misiva.com     → ese dominio, con HTTPS y certificado automático.
+#                              Requiere publicar los puertos 80 y 443:
+#                              docker-compose.dominio.yml hace eso.
 {
 	admin off
-	auto_https off
 }
 
-:8014 {
+{$CV_SITE_ADDRESS::8014} {
 	# Sin esto, cualquiera con la URL gasta los créditos de Magnific.
 	basic_auth {
 		{$CV_USER:equipo} {$CV_PASSWORD_HASH}
