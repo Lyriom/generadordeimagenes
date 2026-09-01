@@ -456,6 +456,11 @@ def test_repeating_the_cutout_starts_from_the_untouched_photo(
     productos = [c for c in capas if c["category"] == "product"]
     assert len(productos) == 1, "repetir no puede acumular capas Producto"
 
+    # Ni acumular eslabones en el nombre del proveedor.
+    proveedor = client.get(f"/projects/{project_id}").json()["background"]["provider"]
+    trozos = proveedor.split("+")
+    assert len(trozos) == len(set(trozos)), proveedor
+
 
 def test_a_good_emptying_is_kept_and_says_so(
     client: TestClient, flat_project: dict, monkeypatch

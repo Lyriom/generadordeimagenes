@@ -66,6 +66,21 @@ BACKGROUND_REL = "backgrounds/background.png"
 ORIGINAL_REL = "backgrounds/plancha_original.png"
 
 
+def _provider_label(project: Project, used: str) -> str:
+    """Encadena de dónde viene la plancha, sin repetir el mismo paso.
+
+    Repetir el recorte volvía a añadir el eslabón y dejaba cosas como
+    "psd+fondo-liso+fondo-liso", que no dice nada nuevo.
+    """
+    previo = project.background.provider if project.background.path else ""
+    if not previo:
+        return used
+    eslabones = [parte for parte in previo.split("+") if parte]
+    if eslabones and eslabones[-1] == used:
+        return previo
+    return f"{previo}+{used}"
+
+
 def drop_detected(project: Project) -> int:
     """Quita las capas Producto que puso el detector, para poder repetirlo.
 
@@ -453,7 +468,7 @@ def _adopt_plate(project: Project, generated: Path, used: str) -> list[str]:
     generated.replace(target)
     project.background = BackgroundInfo(
         path=BACKGROUND_REL,
-        provider=f"{project.background.provider}+{used}" if project.background.path else used,
+        provider=_provider_label(project, used),
         generated_at=utcnow(),
         warnings=["Decorado regenerado sin el producto."],
     )
@@ -515,11 +530,7 @@ def _clean_plate(
         staged.replace(target)
         project.background = BackgroundInfo(
             path=BACKGROUND_REL,
-            provider=(
-                f"{project.background.provider}+fondo-liso"
-                if project.background.path
-                else "fondo-liso"
-            ),
+            provider=_provider_label(project, "fondo-liso"),
             generated_at=utcnow(),
             warnings=["Barrido de estudio rehecho sin el producto ni su sombra."],
         )
@@ -549,7 +560,7 @@ def _clean_plate(
     staged.replace(target)
     project.background = BackgroundInfo(
         path=BACKGROUND_REL,
-        provider=f"{project.background.provider}+{used}" if project.background.path else used,
+        provider=_provider_label(project, used),
         generated_at=utcnow(),
         warnings=[f"Se borró de la foto el producto recortado, con {used}."],
     )
