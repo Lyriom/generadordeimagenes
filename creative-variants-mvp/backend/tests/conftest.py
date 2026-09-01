@@ -16,6 +16,12 @@ os.environ["DATA_DIR"] = _TMP_DATA
 os.environ["ENABLE_OCR"] = "false"
 os.environ["SEGMENTATION_PROVIDER"] = "local"
 os.environ["INPAINTING_PROVIDER"] = "opencv"
+# Clave falsa, a propósito y sin condicionar. Las pruebas parchean el transporte
+# HTTP de Magnific, así que nunca sale una petición; esto arregla dos cosas:
+# que la suite dependa de que quien la corra tenga la clave real en el entorno
+# —en CI no existe y el recorte de producto fallaba entero—, y que un descuido
+# en un mock pueda llegar a gastar créditos de verdad.
+os.environ["MAGNIFIC_API_KEY"] = "clave-de-prueba"
 os.environ["MIN_IMAGE_SIDE"] = "64"
 os.environ["INGEST_DIR"] = str(pathlib.Path(_TMP_DATA) / "ingest")
 # Celery en memoria: las pruebas no dependen de Redis ni de un worker aparte.
