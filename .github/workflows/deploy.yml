@@ -133,8 +133,9 @@ jobs:
           docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
           REMOTO
 
-      # 401 es la respuesta buena: significa que el proxy está de pie Y que está
-      # pidiendo contraseña. Un 200 aquí sería el sitio abierto a internet.
+      # El sitio va sin contraseña desde el 01/09/2026, así que la respuesta
+      # buena es 200. Si algún día se vuelve a poner el basic_auth en el
+      # Caddyfile, aquí habrá que esperar 401 otra vez o el deploy fallará.
       - name: Comprobar que responde
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
@@ -147,8 +148,8 @@ jobs:
           done
           echo "el proxy responde $code"
           case "$code" in
-            401) echo "correcto: de pie y pidiendo contraseña" ;;
-            200) echo "ERROR: responde sin pedir contraseña. Revise CV_PASSWORD_HASH en el .env del servidor."; exit 1 ;;
-            *)   echo "ERROR: se esperaba 401. Revise: docker compose logs proxy"; exit 1 ;;
+            200) echo "correcto: el sitio responde" ;;
+            401) echo "ERROR: pide contraseña y el Caddyfile ya no la lleva. Revise CV_PASSWORD_HASH en el .env del servidor."; exit 1 ;;
+            *)   echo "ERROR: se esperaba 200. Revise: docker compose logs proxy"; exit 1 ;;
           esac
           REMOTO
