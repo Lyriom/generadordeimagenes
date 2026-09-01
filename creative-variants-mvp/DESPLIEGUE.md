@@ -130,13 +130,17 @@ La primera construcción tarda unos minutos. Comprobar que hay una sola puerta:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
-curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8014/                      # 401
-curl -o /dev/null -w '%{http_code}\n' -u equipo:la-clave http://127.0.0.1:8014/   # 200
-curl -m 3 http://127.0.0.1:8000/health                                            # sin respuesta
+curl -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8014/   # 200
 ```
 
-Ese **401 es la señal buena**: el proxy está de pie y pidiendo contraseña. Un
-200 sin credenciales sería el sitio abierto, y el flujo lo trata como error.
+El sitio va **sin contraseña** desde el 01/09/2026, a petición del equipo: el
+bloque `basic_auth` está comentado en el `Caddyfile`. Para volver a ponerla basta
+descomentar esas tres líneas, comprobar que `CV_PASSWORD_HASH` está en el `.env`
+y reiniciar el proxy —y cambiar el 200 por 401 en la última comprobación del
+flujo de GitHub—.
+
+No compruebes el `:8000` de este servidor: ese puerto ya lo ocupa otro proyecto
+y responde su propio `/health`. El backend nuestro no publica puerto ninguno.
 
 Si el proxy entra en crash-loop nada más arrancar, es el kernel viejo del host
 —lo mismo que le pasó a mkpone con `nginx:alpine`—: descomenta el bloque
@@ -150,7 +154,7 @@ En `generador.misiva.com.ec` → **Apache & nginx Settings**:
 2. En **Additional nginx directives**, pega:
 
 ```nginx
-location / {
+location ~ ^/ {
     client_max_body_size 300M;
 
     proxy_pass http://127.0.0.1:8014;
@@ -175,7 +179,14 @@ Tres cosas de ahí no son opcionales:
 - **`client_max_body_size 300M`**: los PSD llegan a 200 MB y el límite por
   defecto los corta. Va **dentro** del `location`: Plesk ya escribe esa misma
   directiva en el vhost, y declararla otra vez arriba hace que nginx rechace
-  toda la configuración con «directive is duplicate».
+  toda la configuración con «directive is duplicate». Conviene subir además el
+  campo *Maximum allowed HTTP request body size* de esa pantalla a 300 MB.
+- **`location ~ ^/` y no `location /`**: Plesk ya define un `location /` en cada
+  uno de sus dos bloques de servidor (el que reenvía a Apache), así que el
+  nuestro daría «duplicate location». Los `location` de expresión regular van en
+  otra lista, no chocan, y ganan sobre el prefijo `/`. El
+  `^~ /.well-known/acme-challenge/` de Plesk sigue teniendo prioridad sobre el
+  regex, así que Let's Encrypt puede seguir emitiendo el certificado.
 - **`proxy_read_timeout 600s`**: una tanda de generación tarda minutos.
 
 Después, el certificado: SSL/TLS Certificates → **Let's Encrypt**.
@@ -209,7 +220,7 @@ Cada push a `main`:
 2. Comprueba que el build-context es el correcto y que el `.env` está.
 3. Sincroniza el código, respetando `.env` y `data/`.
 4. Reconstruye los contenedores y limpia imágenes viejas.
-5. Comprueba que el proxy responde 401 (es decir: está pidiendo contraseña).
+5. Comprueba que el proxy responde 200.
 
 Los despliegues a `main` **se encolan, no se cancelan**: un rsync cortado a la
 mitad dejaría el servidor con medio repositorio.
@@ -250,7 +261,8 @@ aplanado, los recortes de cada capa y cada variante generada.
 | Síntoma | Casi siempre es |
 | --- | --- |
 | El flujo aborta en *Verificar build-context* | La carpeta del Paso 2 no existe, o falta el `.env` del Paso 3 |
-| Pide contraseña y la buena no entra | Los `$` del hash sin duplicar en el `.env` |
+| Pide contraseña y la buena no entra | Los `$` del hash sin duplicar en el `.env` (solo aplica si se ha vuelto a activar el `basic_auth`) |
+| Plesk rechaza las directivas con «duplicate location "/"» | Hay que usar `location ~ ^/`, no `location /` |
 | La página carga y se cuelga al primer clic | Faltan `Upgrade`/`Connection` en las directivas de nginx |
 | «413» al subir un PSD | Falta `client_max_body_size 300M` |
 | Plesk rechaza las directivas con «directive is duplicate» | `client_max_body_size` fuera del `location`: Plesk ya la pone en el vhost |
