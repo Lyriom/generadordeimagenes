@@ -1,8 +1,10 @@
 """Generación de variantes, formatos, determinismo, render y ZIP."""
 from __future__ import annotations
 
+import json
 import unicodedata
 import zipfile
+from xml.etree import ElementTree as ET
 
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -216,6 +218,7 @@ def test_export_zip_contains_selected_variants(client: TestClient, project: dict
         assert "manifest.json" in names
         assert sum(1 for name in names if name.endswith(".png")) == 4
         assert sum(1 for name in names if name.endswith(".psd")) == 4
+        assert sum(1 for name in names if name.endswith(".svg")) == 4
         from psd_tools import PSDImage
 
         psd_name = next(name for name in names if name.endswith(".psd"))
@@ -223,6 +226,21 @@ def test_export_zip_contains_selected_variants(client: TestClient, project: dict
             layered = PSDImage.open(stream)
             assert layered.size == (1080, 1080)
             assert len(layered) >= 2
+
+        svg_name = next(name for name in names if name.endswith(".svg"))
+        root = ET.fromstring(archive.read(svg_name))
+        assert root.attrib["viewBox"] == "0 0 1080 1080"
+        namespace = {"svg": "http://www.w3.org/2000/svg"}
+        assert root.findall(".//svg:g", namespace)
+        legal_text = root.findall(".//svg:text[@data-editable='true']", namespace)
+        assert legal_text
+        images = root.findall(".//svg:image", namespace)
+        href_key = "{http://www.w3.org/1999/xlink}href"
+        assert images and all(item.attrib[href_key].startswith("data:image/png;base64,") for item in images)
+
+        manifest = json.loads(archive.read("manifest.json"))
+        assert all(item["svg_illustrator"].endswith(".svg") for item in manifest["variants"])
+        assert any(item["editable_legal_layers"] for item in manifest["variants"])
 
     selected = [variants[0]["id"], variants[2]["id"]]
     partial = client.get(
@@ -233,6 +251,7 @@ def test_export_zip_contains_selected_variants(client: TestClient, project: dict
     with zipfile.ZipFile(zips[0]) as archive:
         names = archive.namelist()
         assert sum(1 for name in names if name.endswith(".png") and not name.startswith("capas/")) == 2
+        assert sum(1 for name in names if name.endswith(".svg")) == 2
         assert any(name.startswith("capas/") for name in names)
 
 

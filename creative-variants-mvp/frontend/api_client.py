@@ -293,6 +293,7 @@ def auto_generate(
     seed: int = 42,
     replace_existing: bool = True,
     product_label: str | None = None,
+    product_arrangement: str = "auto",
     template_mode: bool = False,
     background_provider: str | None = None,
     background_model: str | None = None,
@@ -311,6 +312,7 @@ def auto_generate(
                 "seed": seed,
                 "replace_existing": replace_existing,
                 "product_label": product_label,
+                "product_arrangement": product_arrangement,
                 "template_mode": template_mode,
                 "background_provider": background_provider,
                 "background_model": background_model,
@@ -363,6 +365,9 @@ def replace_product(
     layer_id: str | None = None,
     hide_others: bool = False,
     append: bool = False,
+    group_id: str | None = None,
+    group_name: str | None = None,
+    arrangement: str = "auto",
 ) -> dict:
     """Cambia el producto de una capa del KV por el recorte subido."""
     data: dict[str, str] = {
@@ -371,6 +376,11 @@ def replace_product(
     }
     if layer_id:
         data["layer_id"] = layer_id
+    if group_id:
+        data["group_id"] = group_id
+    if group_name:
+        data["group_name"] = group_name
+    data["arrangement"] = arrangement
     return _handle(
         requests.post(
             _url(f"/projects/{project_id}/layers/replace"),

@@ -107,6 +107,11 @@ class Layer(BaseModel):
     text_align: Literal["left", "center", "right"] = "left"
     line_height: float = 1.15
     auto_contrast: bool = True
+    # El PSD puede conservar la apariencia como imagen y, a la vez, aportar el
+    # texto real para la salida SVG/Illustrator. Solo se activa automáticamente
+    # cuando el contenido procede de una TypeLayer, no de OCR.
+    export_as_text: bool = False
+    text_verified: bool = False
 
     # Metadatos
     confidence: float = 1.0
@@ -199,6 +204,15 @@ class VariantLayerPlacement(BaseModel):
     color: str | None = None
     text_align: str | None = None
     content: str | None = None
+    valign: str = "center"
+    pinned: bool = False
+    stretch: bool = False
+    rotation: float = 0.0
+    font_family: str | None = None
+    font_weight: str | None = None
+    line_height: float | None = None
+    export_as_text: bool = False
+    text_verified: bool = False
 
 
 class Variant(BaseModel):

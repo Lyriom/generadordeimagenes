@@ -82,6 +82,13 @@ def test_psd_layers_are_imported_with_exact_crops(client: TestClient, psd_bytes:
         layer["z_index"] for layer in layers
     )
     assert any("importaron 3 capas" in warning for warning in project["warnings"])
+    scan = project["meta"]["psd_layer_scan"]
+    assert scan["total"] == 4
+    assert scan["summary"]["imported"] == 3
+    assert scan["summary"]["background_plate"] == 1
+    assert {item["name"] for item in scan["items"]} >= {
+        "Relleno de color 1", "LOGO MARATHON", "Capa 5", "legales"
+    }
 
 
 def test_psd_background_layer_becomes_the_plate(client: TestClient, psd_bytes: bytes):

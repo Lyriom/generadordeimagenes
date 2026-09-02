@@ -604,16 +604,53 @@ def import_psd_layers(
             )
 
     if root is psd:
-        leaves = _leaf_layers(psd)
+        all_leaves = _leaf_layers(psd)
     else:
         board_opacity = max(0.0, min(1.0, float(getattr(root, "opacity", 255) or 255) / 255.0))
-        leaves = _leaf_layers(root, str(root.name or ""), board_opacity)
-    if len(leaves) > max_layers:
-        warnings.append(
-            f"El PSD tiene {len(leaves)} capas; se importan las {max_layers} superiores "
-            "para mantener el proyecto manejable."
+        all_leaves = _leaf_layers(root, str(root.name or ""), board_opacity)
+
+    # Inventario liviano de TODO el árbol antes de rasterizar. Permite auditar
+    # capas ocultas, fuera de la pieza o excedentes sin cargar cientos de bitmaps.
+    inventory: list[dict[str, Any]] = []
+    for leaf_index, (name, group_path, psd_layer, _opacity) in enumerate(all_leaves):
+        kind = str(getattr(psd_layer, "kind", "") or "")
+        bbox = [int(value) for value in getattr(psd_layer, "bbox", (0, 0, 0, 0))]
+        suggested, confidence = classify_layer_name(name, group_path)
+        text_value = _text_content(psd_layer) if kind == "type" else None
+        inventory.append(
+            {
+                "index": leaf_index,
+                "name": name or f"Capa {leaf_index + 1}",
+                "group_path": group_path,
+                "depth": len([part for part in group_path.split("/") if part]),
+                "kind": kind or "pixel",
+                "visible": bool(getattr(psd_layer, "visible", True)),
+                "bbox": bbox,
+                "text_available": bool(text_value),
+                "text": text_value,
+                "suggested_category": suggested.value if suggested else None,
+                "confidence": round(confidence, 3),
+                "status": "pending",
+                "layer_id": None,
+            }
         )
-        leaves = leaves[-max_layers:]
+
+    leaves_with_index = list(enumerate(all_leaves))
+    if len(all_leaves) > max_layers:
+        warnings.append(
+            f"El PSD tiene {len(all_leaves)} capas; se escanearon todas y se rasterizan "
+            f"las {max_layers} superiores para mantener el proyecto manejable."
+        )
+        omitted = len(all_leaves) - max_layers
+        for record in inventory[:omitted]:
+            record["status"] = "catalog_only_limit"
+        leaves_with_index = leaves_with_index[-max_layers:]
+
+    project.meta["psd_layer_scan"] = {
+        "total": len(inventory),
+        "max_rasterized": max_layers,
+        "items": inventory,
+    }
 
     layers: list[Layer] = []
     assigned: dict[LayerCategory, int] = {}
@@ -622,13 +659,16 @@ def import_psd_layers(
     hidden = 0
     empty = 0
 
-    for index, (name, group_path, psd_layer, opacity) in enumerate(leaves):
+    for index, (name, group_path, psd_layer, opacity) in leaves_with_index:
+        record = inventory[index]
         if not psd_layer.visible:
             hidden += 1
+            record["status"] = "hidden"
             continue
         clipped = _clip_box(psd_layer.bbox, view)
         if clipped is None:
             empty += 1
+            record["status"] = "outside"
             continue
         (x, y, width, height), render_view = clipped
 
@@ -636,9 +676,11 @@ def import_psd_layers(
             rendered = psd_layer.composite(viewport=render_view)
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"No se pudo renderizar la capa '{name}': {exc}")
+            record["status"] = "render_error"
             continue
         if rendered is None:
             empty += 1
+            record["status"] = "empty"
             continue
 
         rgba = _apply_opacity(rendered.convert("RGBA"), opacity)
@@ -650,6 +692,7 @@ def import_psd_layers(
         opaque_ratio = float((alpha > 8).mean()) if alpha.size else 0.0
         if opaque_ratio < settings.psd_min_opaque_ratio:
             empty += 1
+            record["status"] = "empty"
             continue
 
         category, confidence = classify_layer_name(name, group_path)
@@ -670,6 +713,13 @@ def import_psd_layers(
         # El fondo no es una capa movible: se acumula en la plancha limpia.
         if category == LayerCategory.BACKGROUND:
             background_parts.append((rgba, (x, y)))
+            record.update(
+                {
+                    "status": "background_plate",
+                    "suggested_category": category.value,
+                    "confidence": round(confidence, 3),
+                }
+            )
             continue
 
         assigned[category] = assigned.get(category, 0) + 1
@@ -697,6 +747,8 @@ def import_psd_layers(
             source="upload",
             content=text,
             extracted=True,
+            export_as_text=bool(text and category == LayerCategory.LEGAL),
+            text_verified=bool(text and category == LayerCategory.LEGAL),
         )
         layer.meta.update(
             {
@@ -707,6 +759,14 @@ def import_psd_layers(
                 "opaque_ratio": round(opaque_ratio, 4),
                 "mandatory_art": preserve_as_art,
                 "editable_content": text if preserve_as_art and text else None,
+            }
+        )
+        record.update(
+            {
+                "status": "imported",
+                "layer_id": layer.id,
+                "suggested_category": category.value,
+                "confidence": layer.confidence,
             }
         )
         if text and not preserve_as_art:
@@ -763,4 +823,8 @@ def import_psd_layers(
             f"Se importaron {len(layers)} capas del PSD con recortes exactos. Revise las "
             "categorías en Ajustes finos: los nombres de capa de Photoshop suelen ser genéricos."
         )
+    project.meta["psd_layer_scan"]["summary"] = {
+        status: sum(1 for item in inventory if item["status"] == status)
+        for status in sorted({item["status"] for item in inventory})
+    }
     return layers, warnings

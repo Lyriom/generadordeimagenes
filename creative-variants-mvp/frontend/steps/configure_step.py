@@ -5,17 +5,9 @@ import streamlit as st
 
 import api_client as api
 
-from .common import layer_label, refresh_project, require_project, show_error
+from .common import layer_label, poll_task, refresh_project, require_project, show_error
+from .format_selector import select_formats
 
-FORMATS = [
-    "1080x1080",
-    "1080x1350",
-    "1080x1920",
-    "1920x1080",
-    "900x660",
-    "900x1350",
-    "1200x400",
-]
 INTENSITY_LABELS = {
     "conservative": "Conservadora (respeta el arte original)",
     "moderate": "Moderada (recomendada)",
@@ -67,9 +59,11 @@ def render() -> None:
             format_func=lambda key: INTENSITY_LABELS[key],
         )
     with col2:
-        formats = st.multiselect(
-            "Formatos", FORMATS, default=["1080x1080", "1080x1350", "1080x1920"]
-        )
+        formats = select_formats(
+            key_prefix="advanced",
+            allow_auto=False,
+            default_ids=["meta_feed_4_5", "meta_stories", "meta_reels"],
+        ) or []
         instruction = st.text_area(
             "Instrucción opcional",
             placeholder="Ej.: producto grande y titular arriba",
@@ -91,6 +85,16 @@ def render() -> None:
             format_func=lambda key: next(
                 (item["label"] for item in catalog if item["key"] == key), key
             ),
+        )
+        product_arrangement = st.selectbox(
+            "Disposición cuando hay varios productos",
+            ["auto", "horizontal", "vertical", "overlap"],
+            format_func=lambda value: {
+                "auto": "Automática según el formato",
+                "horizontal": "En fila",
+                "vertical": "Apilados",
+                "overlap": "Superpuestos",
+            }[value],
         )
 
     st.divider()
@@ -136,18 +140,28 @@ def render() -> None:
             "hidden_layers": hidden,
             "instruction": instruction or None,
             "layouts": chosen_layouts or None,
+            "product_arrangement": product_arrangement,
             "replace_existing": True,
         }
         try:
-            with st.spinner(f"Generando {count} variantes…"):
-                result = api.generate(project["project_id"], config)
+            task = api.generate(project["project_id"], config)
+            result = poll_task(
+                project["project_id"], task["task_id"], f"Generando {count} variantes…"
+            )
             refresh_project()
             st.session_state.selected_variants = []
-            scores = [variant["quality"]["score"] for variant in result["variants"]]
-            st.success(
-                f"{len(result['variants'])} variantes generadas · "
-                f"puntaje promedio {sum(scores) / len(scores):.0f}/100"
-            )
+            generated = result.get("variants", [])
+            scores = [variant["quality"]["score"] for variant in generated]
+            if scores:
+                st.success(
+                    f"{len(generated)} variantes generadas · "
+                    f"puntaje promedio {sum(scores) / len(scores):.0f}/100"
+                )
+            else:
+                st.warning(
+                    "La generación terminó sin variantes. Revise las capas y las "
+                    "advertencias antes de volver a intentar."
+                )
             for warning in result.get("warnings", []):
                 st.warning(warning)
             st.info("Vuelva a la pantalla Generar para ver la galería y descargar.")

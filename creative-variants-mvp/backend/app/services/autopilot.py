@@ -10,10 +10,10 @@ import logging
 
 from ..models import (
     GenerateRequest,
+    LEGACY_FORMATS,
     LayerCategory,
     LayerType,
     Project,
-    SUPPORTED_FORMATS,
     Variant,
 )
 from . import analysis, inpainting, layer_extraction, storage, variants as variants_service
@@ -51,8 +51,8 @@ def auto_formats(project: Project) -> list[str]:
     """Formato nativo del arte (el más cercano por proporción) más los de redes."""
     aspect = project.canvas.width / max(1, project.canvas.height)
     native = min(
-        SUPPORTED_FORMATS,
-        key=lambda key: abs(SUPPORTED_FORMATS[key][0] / SUPPORTED_FORMATS[key][1] - aspect),
+        LEGACY_FORMATS,
+        key=lambda key: abs(LEGACY_FORMATS[key][0] / LEGACY_FORMATS[key][1] - aspect),
     )
     formats = [native]
     formats.extend(fmt for fmt in SOCIAL_DEFAULTS if fmt != native)
@@ -136,13 +136,16 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
     requested_count = request.count
     # Se exploran varias composiciones y se entregan pocas: calidad sobre volumen.
     generate = GenerateRequest(
-        count=min(30, max(requested_count * 3, requested_count)),
+        # Debe existir al menos un candidato por formato. Antes, seleccionar más
+        # formatos que el valor del slider dejaba algunos sin producir.
+        count=min(30, max(requested_count * 3, len(formats) * 2, requested_count)),
         seed=request.seed,
         formats=formats,
         intensity=request.intensity,
         instruction=request.instruction,
         replace_existing=request.replace_existing,
         product_label=request.product_label,
+        product_arrangement=request.product_arrangement,
         layouts=TEMPLATE_LAYOUTS if request.template_mode else None,
     )
     variants, generate_warnings = variants_service.generate_variants(project, generate)
@@ -164,19 +167,47 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
             ranked_by_format.setdefault(variant.format, []).append(variant)
         selected: list[Variant] = []
         formats_in_order = list(dict.fromkeys(formats))
-        while len(selected) < requested_count:
+        # Primero una salida por cada preset solicitado. Si ninguna supera el
+        # umbral se conserva la mejor de ese formato con una advertencia: pedir
+        # una medida y no recibirla es peor que verla marcada para revisión.
+        all_by_format: dict[str, list[Variant]] = {}
+        for variant in sorted(variants, key=lambda item: item.quality.score, reverse=True):
+            all_by_format.setdefault(variant.format, []).append(variant)
+        for fmt in formats_in_order:
+            bucket = ranked_by_format.get(fmt) or []
+            fallback = all_by_format.get(fmt) or []
+            if bucket:
+                selected.append(bucket.pop(0))
+            elif fallback:
+                selected.append(fallback[0])
+                warnings.append(
+                    f"La mejor propuesta de {fmt} no superó el control de "
+                    f"{minimum_score}/100; se incluye para no omitir el formato."
+                )
+
+        target_total = max(requested_count, len(formats_in_order))
+        while len(selected) < target_total:
             added = False
             for fmt in formats_in_order:
                 bucket = ranked_by_format.get(fmt) or []
-                if bucket and len(selected) < requested_count:
-                    selected.append(bucket.pop(0))
+                while bucket and bucket[0] in selected:
+                    bucket.pop(0)
+                if bucket and len(selected) < target_total:
+                    candidate = bucket.pop(0)
+                    if candidate not in selected:
+                        selected.append(candidate)
                     added = True
             if not added:
                 break
         keep = {variant.id for variant in selected}
         rejected = [variant for variant in variants if variant.id not in keep]
         for variant in rejected:
-            for relative in (variant.image, variant.thumbnail, variant.meta.get("psd")):
+            for relative in (
+                variant.image,
+                variant.thumbnail,
+                variant.meta.get("psd"),
+                variant.meta.get("svg"),
+            ):
                 if relative:
                     storage.abs_path(project.project_id, relative).unlink(missing_ok=True)
         project.variants = [

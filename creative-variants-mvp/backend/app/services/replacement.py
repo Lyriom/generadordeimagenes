@@ -150,7 +150,14 @@ def _target_box(layer: Layer, doomed: list[Layer]) -> tuple[int, int, int, int]:
 
 
 def replace_layer_image(
-    project: Project, layer: Layer, source: Path, *, hide_others: bool = False
+    project: Project,
+    layer: Layer,
+    source: Path,
+    *,
+    hide_others: bool = False,
+    group_id: str | None = None,
+    group_name: str | None = None,
+    arrangement: str = "auto",
 ) -> list[str]:
     """Sustituye el PNG de `layer` por `source`, ajustado a su caja original.
 
@@ -198,6 +205,16 @@ def replace_layer_image(
 
     layer.meta.setdefault("original_src", layer.src)
     layer.meta["replaced_from"] = source.name[:120]
+    for key in ("product_group_id", "product_group_name", "product_arrangement"):
+        layer.meta.pop(key, None)
+    if group_id:
+        layer.meta.update(
+            {
+                "product_group_id": group_id[:80],
+                "product_group_name": (group_name or "Productos juntos")[:120],
+                "product_arrangement": arrangement,
+            }
+        )
     # La máscara ya no debe seguir a la caja: describe el hueco del producto viejo.
     layer.meta["mask_edited"] = True
     layer.src = rel
@@ -229,7 +246,15 @@ def replace_layer_image(
     return warnings
 
 
-def append_product_image(project: Project, anchor: Layer, source: Path) -> tuple[Layer, list[str]]:
+def append_product_image(
+    project: Project,
+    anchor: Layer,
+    source: Path,
+    *,
+    group_id: str | None = None,
+    group_name: str | None = None,
+    arrangement: str = "auto",
+) -> tuple[Layer, list[str]]:
     """Añade otro recorte como capa de producto independiente para una pieza grupal."""
     incoming, warnings = _trim_to_content(load_rgba(source))
     box = anchor.meta.get("replacement_box") or [
@@ -264,5 +289,13 @@ def append_product_image(project: Project, anchor: Layer, source: Path) -> tuple
             "replacement_box": [box_x, box_y, box_w, box_h],
         }
     )
+    if group_id:
+        layer.meta.update(
+            {
+                "product_group_id": group_id[:80],
+                "product_group_name": (group_name or "Productos juntos")[:120],
+                "product_arrangement": arrangement,
+            }
+        )
     project.layers.append(layer)
     return layer, warnings

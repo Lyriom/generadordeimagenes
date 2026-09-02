@@ -157,6 +157,58 @@ def test_legal_layer_always_visible_at_bottom():
         assert legal.y > 1350 * 0.7
 
 
+def test_platform_safe_area_contains_all_essential_layers():
+    safe = {"left": 0.06, "top": 0.14, "right": 0.06, "bottom": 0.35}
+    placements, _ = build_placements(
+        _layers(),
+        "product_left",
+        1080,
+        1920,
+        random.Random(3),
+        "moderate",
+        safe_area=safe,
+    )
+    left, top = int(1080 * 0.06), int(1920 * 0.14)
+    right, bottom = 1080 - left, 1920 - int(1920 * 0.35)
+    for placement in placements:
+        if placement.layer.category == LayerCategory.DECORATION:
+            continue
+        assert placement.x >= left
+        assert placement.y >= top
+        assert placement.x + placement.width <= right
+        assert placement.y + placement.height <= bottom
+
+
+def test_product_arrangement_can_be_horizontal_vertical_or_overlapped():
+    products = [layer for layer in _layers() if layer.category == LayerCategory.PRODUCT]
+    second = products[0].model_copy(deep=True)
+    second.id = "p2"
+    third = products[0].model_copy(deep=True)
+    third.id = "p3"
+    layers = [*products, second, third]
+    for item in layers:
+        item.meta["replacement_box"] = [100, 100, 800, 700]
+
+    horizontal, _ = build_placements(
+        layers, "product_left", 1080, 1080, random.Random(1),
+        product_arrangement="horizontal",
+        source_canvas=(1080, 1080),
+    )
+    vertical, _ = build_placements(
+        layers, "product_left", 1080, 1080, random.Random(1),
+        product_arrangement="vertical",
+        source_canvas=(1080, 1080),
+    )
+    overlap, _ = build_placements(
+        layers, "product_left", 1080, 1080, random.Random(1),
+        product_arrangement="overlap",
+        source_canvas=(1080, 1080),
+    )
+    assert len({item.x for item in horizontal}) == 3
+    assert len({item.y for item in vertical}) == 3
+    assert max(overlap_ratio(a.box, b.box) for i, a in enumerate(overlap) for b in overlap[i + 1 :]) > 0.3
+
+
 def test_same_seed_produces_identical_placements():
     layers = _layers()
     first, _ = build_placements(layers, "product_left", 1080, 1080, random.Random(99), "creative")

@@ -2,7 +2,8 @@
 
 Generador de artes publicitarios por producto a partir de **varios KV en PSD**.
 Importa las capas reales de cada KV, recibe varios productos recortados en PNG y produce
-la matriz KV × producto × formato. JPG/PNG aplanados se mantienen
+la matriz KV × producto × formato. Exporta PNG final, PSD por capas y SVG editable
+para Illustrator. JPG/PNG aplanados se mantienen
 como flujo alternativo para ajustes finos.
 
 - **Backend:** FastAPI (toda la lógica de negocio) · Python 3.11
@@ -227,23 +228,34 @@ BACKEND_URL=http://localhost:8000 streamlit run app.py
 La interfaz tiene **dos pantallas**: *Generar* (la que se usa siempre) y *Ajustes finos*
 (solo si algo salió mal).
 
-### Pantalla “Generar” — tres decisiones
+### Pantalla “Generar” — cuatro decisiones
 
 1. **Carga el KV maestro.** Tres pestañas: subir un PSD (hasta 300 MB),
    tomarlo de la carpeta compartida (`data/ingest`, la vía para los PSD grandes) o abrir
    un trabajo anterior. Las referencias opcionales (KV, logo, tipografía) están dentro de
    un desplegable, porque casi nunca hacen falta.
-2. **Elige los tamaños.** *El tamaño del original + los de redes* (recomendado, deja que
-   el backend decida), *solo redes sociales* o *yo elijo* entre los siete formatos.
-2.b **Carga los productos.** Sube uno o varios PNG transparentes. El sistema retira
+2. **Revisa todas las capas.** El inventario recorre el árbol completo del PSD, incluidas
+   rutas de grupo, capas ocultas, capas fuera de la pieza y capas que no se rasterizan por
+   el límite de memoria. Las capas utilizables muestran miniatura y función editable.
+3. **Carga y organiza los productos.** Sube uno o varios PNG transparentes. El sistema retira
    automáticamente todos los productos originales y usa el PSD como plantilla editable.
    Logo, copy, fondo y decoraciones se conservan, mientras cada producto nuevo participa
-   en una recomposición completa del arte; no se limita a ocupar el hueco anterior.
-3. **Genera por producto.** Un botón recorre los productos y conserva juntas todas las
+   en una recomposición completa del arte. Se pueden producir separados o juntos, con
+   disposición automática, en fila, apilada o superpuesta; una vista previa confirma cada
+   combinación antes de generar.
+4. **Elige formatos y genera.** El modo automático conserva el flujo anterior. La selección
+   por plataforma ofrece presets de Meta, Google Ads y YouTube con proporción y guía de
+   área segura. Un botón recorre los productos y conserva juntas todas las
    tandas. El backend hace cada tanda en una llamada
    (`POST /projects/{id}/auto`): detectar → recortar → preparar el fondo → componer.
-   Debajo aparece la galería con descarga individual y ZIP; “Qué hizo el sistema”
+   Se garantiza al menos una propuesta por preset elegido. Debajo aparece la galería con
+   descarga individual y ZIP (PNG + PSD + SVG); “Qué hizo el sistema”
    despliega el informe paso a paso en lenguaje llano.
+
+Los porcentajes de zona segura de Stories/Reels se guardan como recomendaciones de UI
+del material de producción entregado, no como validaciones de rechazo. YouTube usa sus
+resoluciones oficiales, pero este proyecto produce el **key visual estático**, no codifica
+un archivo de video.
 
 Medido: PSD de 94 MB ya importado → 9 variantes en **1,7 s** (promedio 84/100).
 JPG plano de 1200×1200 → 6 variantes en **14 s** (incluye detección e inpainting).
@@ -476,7 +488,7 @@ data/projects/{project_id}/
 ├── masks/          máscaras en escala de grises (tamaño del lienzo)
 ├── backgrounds/    máscara de borrado + fondo reconstruido
 ├── variants/       PNG de cada variante + thumbnails
-├── exports/        ZIP generados
+├── exports/        PSD, SVG para Illustrator y ZIP generados
 ├── tmp/            temporales (se limpian de forma segura)
 └── project.json    lienzo, capas, análisis, fondo y variantes
 ```
@@ -615,13 +627,14 @@ docker compose run --rm --no-deps backend python -m pytest
 cd backend && python -m pytest
 ```
 
-88 pruebas cubren: subidas válidas e inválidas (SVG, extensión falsa, tamaño, dimensiones),
+La suite cubre: subidas válidas e inválidas (SVG, extensión falsa, tamaño, dimensiones),
 creación de proyectos, escritura y lectura de `project.json`, integridad del archivo
 original, extracción de capas por máscara, transparencia real del PNG, preservación de la
 relación de aspecto, edición de máscaras con pincel, actualización/eliminación/reorden de
 capas, reconstrucción de fondo, zonas relativas y adaptación por formato, generación
 determinista por semilla, detección de solapamientos y de elementos fuera del lienzo,
-renderizado de variantes en tres formatos, puntajes, creación del ZIP, bloqueo de path
+renderizado de variantes, presets por plataforma, zonas seguras, disposición de grupos,
+inventario completo del PSD, puntajes, creación del ZIP con PSD/SVG y bloqueo de path
 traversal, manejo de PNG con transparencia (alfa como máscara, aplanado sobre blanco) y
 penalización de composiciones vacías, importación de PSD multicapa (con un generador
 de PSD sintéticos en `tests/psd_fixture.py`), clasificación por nombre de capa y la
@@ -678,6 +691,10 @@ backend (9 variantes y 10 botones de descarga en pantalla).
 12. Reproducir el diseño original solo tiene sentido en formatos de proporción parecida
     (±18 %). Fuera de ahí, el motor reorganiza: no hay forma de "conservar" un banner
     1200×400 dentro de un 1080×1920.
+13. Illustrator se entrega como **SVG editable**, no como `.ai` nativo. Hay que abrir el
+    SVG en Illustrator, comprobar la tipografía y guardarlo como `.ai`. El legal solo se
+    convierte en texto visible cuando procede de una capa de texto real o el usuario lo
+    confirma; si no, permanece raster para evitar publicar un OCR contractual incorrecto.
 
 ## 13. Próximos pasos recomendados
 
@@ -688,6 +705,5 @@ backend (9 variantes y 10 botones de descarga en pantalla).
 5. Añadir plantillas de marca (paleta, tipografías, márgenes) reutilizables por cliente.
 6. Persistir versiones de proyecto e historial de variantes aprobadas.
 7. Mover la generación a un worker asíncrono cuando se supere el volumen del MVP.
-8. Exportar a formatos editables (PSD/SVG por capas) además de PNG.
-9. Cambio de producto por lotes: un KV y una carpeta de recortes → una pieza por producto.
-10. Leer los modos de fusión del PSD y aplicarlos al componer (multiplicar, trama, etc.).
+8. Añadir exportación `.ai` nativa si Adobe publica una API de escritura adecuada.
+9. Leer los modos de fusión del PSD y aplicarlos al componer (multiplicar, trama, etc.).

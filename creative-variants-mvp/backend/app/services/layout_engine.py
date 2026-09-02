@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from ..models import Layer, LayerCategory, LayerType, Project
+from ..models.formats import format_safe_area
 from ..models.schemas import SUPPORTED_FORMATS
 from .imaging import fit_contain
 
@@ -472,6 +473,7 @@ def _split_zone(
     gap: float = 0.012,
     canvas: tuple[int, int] = (1080, 1080),
     group_aspect: float = 1.0,
+    arrangement: str = "auto",
 ) -> list[Zone]:
     """Reparte una zona entre varias capas de la misma categoría.
 
@@ -493,7 +495,29 @@ def _split_zone(
         px_w, px_h = slot_w * canvas_w, slot_h * canvas_h
         return min(px_h, px_w / max(group_aspect, 0.01))
 
+    if arrangement == "overlap":
+        # Cada producto conserva casi toda la zona y se desplaza ligeramente. Las
+        # capas se mantienen independientes, de modo que luego siguen siendo
+        # editables en PSD/SVG.
+        slot_w = max(0.02, w * min(0.82, 1.0 - 0.04 * (count - 1)))
+        slot_h = max(0.02, h * min(0.94, 1.0 - 0.025 * (count - 1)))
+        travel_x = max(0.0, w - slot_w)
+        travel_y = max(0.0, h - slot_h)
+        return [
+            (
+                x + (travel_x * index / max(1, count - 1)),
+                y + (travel_y * (index % 2) / max(1, min(2, count - 1))),
+                slot_w,
+                slot_h,
+            )
+            for index in range(count)
+        ]
+
     horizontal = fitted_height(slot_w_h, h) >= fitted_height(w, slot_h_v)
+    if arrangement == "horizontal":
+        horizontal = True
+    elif arrangement == "vertical":
+        horizontal = False
     if horizontal:
         return [(x + i * (slot_w_h + gap), y, slot_w_h, h) for i in range(count)]
     return [(x, y + i * (slot_h_v + gap), w, slot_h_v) for i in range(count)]
@@ -516,6 +540,36 @@ def _clamp_box(
     x = max(margin, min(x, canvas_w - margin - w))
     y = max(margin, min(y, canvas_h - margin - h))
     return int(x), int(y), int(w), int(h)
+
+
+def _safe_bounds(
+    canvas_w: int, canvas_h: int, safe_area: dict[str, float] | None
+) -> tuple[int, int, int, int]:
+    """Rectángulo de contenido esencial de un preset de plataforma."""
+    safe_area = safe_area or {}
+    left = max(0, int(round(canvas_w * float(safe_area.get("left", SAFE_MARGIN)))))
+    top = max(0, int(round(canvas_h * float(safe_area.get("top", SAFE_MARGIN)))))
+    right = max(0, int(round(canvas_w * float(safe_area.get("right", SAFE_MARGIN)))))
+    bottom = max(0, int(round(canvas_h * float(safe_area.get("bottom", SAFE_MARGIN)))))
+    return left, top, max(left + 1, canvas_w - right), max(top + 1, canvas_h - bottom)
+
+
+def _constrain_to_safe_bounds(
+    placement: Placement, bounds: tuple[int, int, int, int]
+) -> None:
+    """Mueve/reduce una capa esencial para que la UI de la red no la tape."""
+    x0, y0, x1, y1 = bounds
+    available_w = max(1, x1 - x0)
+    available_h = max(1, y1 - y0)
+    old_w, old_h = placement.width, placement.height
+    scale = min(1.0, available_w / max(1, old_w), available_h / max(1, old_h))
+    if scale < 1.0:
+        placement.width = max(1, int(round(old_w * scale)))
+        placement.height = max(1, int(round(old_h * scale)))
+        if placement.font_size:
+            placement.font_size = max(8, int(round(placement.font_size * scale)))
+    placement.x = max(x0, min(placement.x, x1 - placement.width))
+    placement.y = max(y0, min(placement.y, y1 - placement.height))
 
 
 def _overlap_area(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> int:
@@ -699,6 +753,8 @@ def build_placements(
     resizable: set[str] | None = None,
     reorderable: set[str] | None = None,
     source_canvas: tuple[int, int] | None = None,
+    safe_area: dict[str, float] | None = None,
+    product_arrangement: str = "auto",
 ) -> tuple[list[Placement], list[str]]:
     """Coloca cada capa en la zona del layout con variación determinista."""
     layout = LAYOUTS.get(layout_key, LAYOUTS["product_left"])
@@ -790,6 +846,11 @@ def build_placements(
                 gap=0.012 * preset["spacing"][1],
                 canvas=(canvas_w, canvas_h),
                 group_aspect=sum(aspects) / len(aspects) if aspects else 1.0,
+                arrangement=(
+                    product_arrangement
+                    if category == LayerCategory.PRODUCT
+                    else "auto"
+                ),
             )
 
         for layer, slot in zip(group, slots):
@@ -930,6 +991,17 @@ def build_placements(
             notes.append("Orden visual de capas reorganizado.")
 
     notes.extend(_resolve_overlaps(placements, canvas_w, canvas_h, margin))
+    # Decoraciones pueden ir a sangre. Producto, marca y textos deben permanecer
+    # dentro del área que cada plataforma deja libre de controles y overlays.
+    bounds = _safe_bounds(canvas_w, canvas_h, safe_area)
+    for placement in placements:
+        if placement.layer.category != LayerCategory.DECORATION:
+            before = placement.box
+            _constrain_to_safe_bounds(placement, bounds)
+            if placement.box != before:
+                notes.append(
+                    f"'{placement.layer.name}' se ajustó al área segura del formato."
+                )
     placements.sort(key=lambda p: (p.z_index, PRIORITY.get(p.layer.category, 10)))
     return placements, notes
 
@@ -1115,6 +1187,8 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
             resizable=resizable_set,
             reorderable=reorderable_set,
             source_canvas=(project.canvas.width, project.canvas.height),
+            safe_area=format_safe_area(fmt),
+            product_arrangement=getattr(request, "product_arrangement", "auto"),
         )
         plans.append(
             VariantPlan(

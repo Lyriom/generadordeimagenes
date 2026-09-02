@@ -204,6 +204,35 @@ def test_append_keeps_multiple_uploaded_products_as_separate_layers(
     assert products[0]["src"] != products[1]["src"]
 
 
+def test_product_combination_metadata_is_kept_on_every_member(
+    client: TestClient, project: dict
+):
+    layers = create_manual_layers(client, project["project_id"])
+    endpoint = f"/projects/{project['project_id']}/layers/replace"
+    common = {
+        "layer_id": layers["product"]["id"],
+        "group_id": "looks-verano",
+        "group_name": "Looks verano",
+        "arrangement": "overlap",
+    }
+    first = client.post(
+        endpoint,
+        data={**common, "hide_others": "true"},
+        files={"image": ("uno.png", cutout(300, 500), "image/png")},
+    )
+    second = client.post(
+        endpoint,
+        data={**common, "append": "true"},
+        files={"image": ("dos.png", cutout(500, 300), "image/png")},
+    )
+    assert first.status_code == second.status_code == 200
+    stored = client.get(f"/projects/{project['project_id']}").json()
+    products = [item for item in stored["layers"] if item["category"] == "product"]
+    assert len(products) == 2
+    assert {item["meta"]["product_group_id"] for item in products} == {"looks-verano"}
+    assert {item["meta"]["product_arrangement"] for item in products} == {"overlap"}
+
+
 def test_replace_rejects_non_image(client: TestClient, project: dict):
     create_manual_layers(client, project["project_id"])
     response = client.post(

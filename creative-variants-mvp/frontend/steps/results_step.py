@@ -30,7 +30,7 @@ def _download_bar(
         try:
             archive = cached_zip(project["project_id"], tuple(selected), True, token())
             st.download_button(
-                label.replace("(ZIP)", "· PNG + PSD (ZIP)"),
+                label.replace("(ZIP)", "· PNG + PSD + SVG Illustrator (ZIP)"),
                 data=archive,
                 file_name=f"{project['name'].replace(' ', '_')}_variantes.zip",
                 mime="application/zip",
@@ -112,14 +112,22 @@ def gallery(project: dict, key_prefix: str | None = None) -> None:
                     f"**{variant['width']}×{variant['height']}** · "
                     f"{score_badge(variant['quality']['score'])}"
                 )
+                format_meta = variant.get("meta", {}).get("format") or {}
+                if format_meta:
+                    st.caption(
+                        f"{format_meta.get('platform', '')} · "
+                        f"{format_meta.get('placement', variant['format'])} · "
+                        f"{format_meta.get('ratio', '')}"
+                    )
                 product_label = variant.get("meta", {}).get("product_label")
                 if product_label:
                     st.caption(f"Producto: {product_label}")
                 st.checkbox("Elegir", key=f"pick-{variant['id']}")
 
+                png_download, svg_download = st.columns(2)
                 try:
-                    st.download_button(
-                        "⬇ Bajar esta",
+                    png_download.download_button(
+                        "⬇ PNG",
                         data=cached_variant_image(
                             project["project_id"], variant["id"], token()
                         ),
@@ -132,6 +140,24 @@ def gallery(project: dict, key_prefix: str | None = None) -> None:
                     )
                 except Exception as exc:  # noqa: BLE001
                     show_error(exc)
+                svg_path = variant.get("meta", {}).get("svg")
+                if svg_path:
+                    try:
+                        svg_download.download_button(
+                            "⬇ Illustrator",
+                            data=cached_file(project["project_id"], svg_path, token()),
+                            file_name=(
+                                f"{(product_label or 'producto')}_{variant['index']:02d}_"
+                                f"{variant['format']}.svg"
+                            ),
+                            mime="image/svg+xml",
+                            key=f"svg-{variant['id']}",
+                            width="stretch",
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        show_error(exc)
+                else:
+                    svg_download.caption("SVG disponible al regenerar")
 
                 warnings = variant["quality"]["warnings"]
                 with st.expander(

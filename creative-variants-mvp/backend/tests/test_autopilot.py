@@ -78,8 +78,39 @@ def test_auto_respects_explicit_formats_and_reuses_layers(
     assert all(variant["width"] == 1080 for variant in payload["variants"])
 
 
+def test_auto_returns_every_selected_format_even_when_count_is_lower(
+    client: TestClient, project: dict
+):
+    """Cada medida elegida debe producir al menos una salida visible."""
+    create_manual_layers(client, project["project_id"])
+    requested = [
+        "meta_feed_4_5",
+        "google_search_landscape",
+        "youtube_video_vertical",
+    ]
+    response = client.post(
+        f"/projects/{project['project_id']}/auto",
+        json={"count": 2, "formats": requested, "intensity": "conservative"},
+    )
+    payload = await_task(client, project["project_id"], response)
+
+    returned = {variant["format"] for variant in payload["variants"]}
+    assert returned == set(requested)
+    assert len(payload["variants"]) >= len(requested)
+
+
 def test_auto_rejects_unknown_format(client: TestClient, project: dict):
     response = client.post(
         f"/projects/{project['project_id']}/auto", json={"formats": ["5000x5000"]}
+    )
+    assert response.status_code == 422
+
+
+def test_auto_rejects_unknown_format_mixed_with_valid_one(
+    client: TestClient, project: dict
+):
+    response = client.post(
+        f"/projects/{project['project_id']}/auto",
+        json={"formats": ["meta_feed_4_5", "formato_inventado"]},
     )
     assert response.status_code == 422

@@ -5,6 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from .formats import SUPPORTED_FORMATS
 from .project import (
     Canvas,
     Layer,
@@ -14,18 +15,6 @@ from .project import (
     QualityReport,
     Variant,
 )
-
-SUPPORTED_FORMATS: dict[str, tuple[int, int]] = {
-    # Redes sociales
-    "1080x1080": (1080, 1080),
-    "1080x1350": (1080, 1350),
-    "1080x1920": (1080, 1920),
-    "1920x1080": (1920, 1080),
-    # Formatos de KV/banner usados en las campañas (Marathon Cyber Day)
-    "900x660": (900, 660),
-    "900x1350": (900, 1350),
-    "1200x400": (1200, 400),
-}
 
 INTENSITIES = ("conservative", "moderate", "creative")
 
@@ -158,6 +147,8 @@ class LayerPatch(BaseModel):
     color: str | None = None
     text_align: Literal["left", "center", "right"] | None = None
     auto_contrast: bool | None = None
+    export_as_text: bool | None = None
+    text_verified: bool | None = None
 
 
 class LayersUpdateRequest(BaseModel):
@@ -271,11 +262,16 @@ class GenerateRequest(BaseModel):
     layouts: list[str] | None = None
     replace_existing: bool = True
     product_label: str | None = Field(default=None, max_length=180)
+    product_arrangement: Literal["auto", "horizontal", "vertical", "overlap"] = "auto"
 
     @field_validator("formats")
     @classmethod
     def _validate_formats(cls, value: list[str]) -> list[str]:
-        cleaned = [item for item in dict.fromkeys(value) if item in SUPPORTED_FORMATS]
+        unique = list(dict.fromkeys(value))
+        unknown = [item for item in unique if item not in SUPPORTED_FORMATS]
+        if unknown:
+            raise ValueError(f"Formatos no soportados: {', '.join(unknown)}")
+        cleaned = [item for item in unique if item in SUPPORTED_FORMATS]
         if not cleaned:
             raise ValueError(
                 f"Formatos no soportados. Use: {', '.join(sorted(SUPPORTED_FORMATS))}"
@@ -360,6 +356,7 @@ class AutoRequest(BaseModel):
     seed: int = Field(default=42, ge=0, le=2**31 - 1)
     replace_existing: bool = True
     product_label: str | None = Field(default=None, max_length=180)
+    product_arrangement: Literal["auto", "horizontal", "vertical", "overlap"] = "auto"
     template_mode: bool = Field(
         default=False,
         description="Recompone el arte como plantilla y excluye la copia fiel del KV.",
@@ -380,7 +377,11 @@ class AutoRequest(BaseModel):
     def _validate_formats(cls, value: list[str] | None) -> list[str] | None:
         if not value:
             return None
-        cleaned = [item for item in dict.fromkeys(value) if item in SUPPORTED_FORMATS]
+        unique = list(dict.fromkeys(value))
+        unknown = [item for item in unique if item not in SUPPORTED_FORMATS]
+        if unknown:
+            raise ValueError(f"Formatos no soportados: {', '.join(unknown)}")
+        cleaned = [item for item in unique if item in SUPPORTED_FORMATS]
         if not cleaned:
             raise ValueError(
                 f"Formatos no soportados. Use: {', '.join(sorted(SUPPORTED_FORMATS))}"
@@ -424,5 +425,6 @@ class CapabilitiesResponse(BaseModel):
     inpainting: dict[str, Any]
     image_models: list[ImageModelInfo] = Field(default_factory=list)
     formats: dict[str, list[int]]
+    format_catalog: list[dict[str, Any]] = Field(default_factory=list)
     layouts: list[dict[str, str]]
     intensities: list[str]

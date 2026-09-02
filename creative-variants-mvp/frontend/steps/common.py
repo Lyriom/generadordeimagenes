@@ -1,6 +1,8 @@
 """Utilidades compartidas entre pasos."""
 from __future__ import annotations
 
+import time
+
 import streamlit as st
 
 import api_client as api
@@ -86,6 +88,28 @@ def refresh_project() -> dict:
 
 def show_error(exc: Exception) -> None:
     st.error(f"❌ {exc}")
+
+
+def poll_task(project_id: str, task_id: str, progress_text: str):
+    """Espera una tarea Celery mostrando el avance sin ocultar errores del worker."""
+    progress_bar = st.progress(0, text=progress_text)
+    while True:
+        status = api.get_task_status(project_id, task_id)
+        if status["state"] == "COMPLETED":
+            progress_bar.progress(1.0, text=f"{progress_text} (Completado)")
+            time.sleep(0.35)
+            progress_bar.empty()
+            return status["result"]
+        if status["state"] == "FAILED":
+            progress_bar.empty()
+            raise RuntimeError(status.get("error") or "La tarea asíncrona falló.")
+        if status["state"] == "PROGRESS":
+            meta = status.get("meta") or {}
+            progress_bar.progress(
+                min(1.0, max(0.0, meta.get("progress", 0) / 100.0)),
+                text=meta.get("status", progress_text),
+            )
+        time.sleep(2)
 
 
 def confidence_badge(confidence: float) -> str:

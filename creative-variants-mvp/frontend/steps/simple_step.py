@@ -5,40 +5,26 @@ sola llamada: POST /projects/{id}/auto. Aquí no hay lógica de imagen.
 """
 from __future__ import annotations
 
-import time
+import io
 import streamlit as st
+from PIL import Image, ImageDraw
 
 import api_client as api
 
 from . import results_step
+from .format_selector import select_formats
 from .common import (
     cached_file,
     cached_template,
     cached_piece_preview,
     cached_pieces,
+    poll_task,
     refresh_project,
     show_error,
     token,
 )
 
 ALLOWED_ARTWORK = ["psd"]
-
-FORMAT_LABELS = {
-    "1080x1080": "Cuadrado · feed (1080×1080)",
-    "1080x1350": "Vertical · feed (1080×1350)",
-    "1080x1920": "Historia / Reel (1080×1920)",
-    "1920x1080": "Horizontal · YouTube (1920×1080)",
-    "900x660": "Banner 900×660",
-    "900x1350": "Banner 900×1350",
-    "1200x400": "Banner 1200×400",
-}
-SOCIAL = ["1080x1080", "1080x1350", "1080x1920"]
-
-SIZE_CHOICES = {
-    "auto": "El tamaño del original + los de redes",
-    "social": "Solo redes sociales",
-    "custom": "Yo elijo los tamaños",
-}
 
 INTENSITY_LABELS = {
     "conservative": "Parecidas al original",
@@ -330,6 +316,80 @@ LAYER_ROLES = {
 MANDATORY_ROLES = {"logo", "headline", "subheadline", "price", "cta", "legal"}
 
 
+def _layer_inventory(project: dict) -> None:
+    """Inventario completo del árbol PSD, incluidas capas no rasterizadas."""
+    scan = (project.get("meta") or {}).get("psd_layer_scan") or {}
+    items = scan.get("items") or []
+    if not items:
+        items = [
+            {
+                "index": index,
+                "name": layer["name"],
+                "group_path": (layer.get("meta") or {}).get("psd_group", ""),
+                "kind": (layer.get("meta") or {}).get("psd_kind", layer["type"]),
+                "visible": layer.get("visible", True),
+                "bbox": [
+                    layer["x"], layer["y"], layer["x"] + layer["width"],
+                    layer["y"] + layer["height"],
+                ],
+                "suggested_category": layer.get("category"),
+                "status": "imported",
+                "text": layer.get("content"),
+            }
+            for index, layer in enumerate(project.get("layers", []))
+        ]
+    labels = {
+        "imported": "Importada y editable",
+        "background_plate": "Integrada en el fondo",
+        "hidden": "Oculta en el PSD",
+        "outside": "Fuera de esta pieza",
+        "empty": "Vacía",
+        "render_error": "Error al leer",
+        "catalog_only_limit": "Catalogada, no rasterizada",
+        "pending": "Catalogada",
+    }
+    summary = scan.get("summary") or {}
+    with st.expander(
+        f"Escaneo completo del KV · {len(items)} capas hoja", expanded=False
+    ):
+        st.caption(
+            "Se recorre todo el árbol del PSD, también grupos, capas ocultas y capas "
+            "fuera de la pieza. Solo se cargan píxeles de las capas utilizables para "
+            "evitar agotar memoria con archivos grandes."
+        )
+        if summary:
+            metrics = st.columns(min(4, max(1, len(summary))))
+            for index, (status, amount) in enumerate(summary.items()):
+                metrics[index % len(metrics)].metric(labels.get(status, status), amount)
+        statuses = sorted({item.get("status", "pending") for item in items})
+        chosen_statuses = st.multiselect(
+            "Mostrar estados",
+            statuses,
+            default=statuses,
+            format_func=lambda value: labels.get(value, value),
+            key=f"scan-status-{project['project_id']}",
+        )
+        rows = []
+        for item in items:
+            if item.get("status", "pending") not in chosen_statuses:
+                continue
+            bbox = item.get("bbox") or [0, 0, 0, 0]
+            rows.append(
+                {
+                    "#": int(item.get("index", 0)) + 1,
+                    "Grupo PSD": item.get("group_path") or "—",
+                    "Capa": item.get("name") or "Sin nombre",
+                    "Tipo": item.get("kind") or "pixel",
+                    "Visible": "Sí" if item.get("visible", True) else "No",
+                    "Caja": " × ".join(str(value) for value in bbox),
+                    "Estado": labels.get(item.get("status"), item.get("status")),
+                    "Categoría sugerida": item.get("suggested_category") or "—",
+                    "Texto recuperado": item.get("text") or "",
+                }
+            )
+        st.dataframe(rows, width="stretch", hide_index=True)
+
+
 def _review_layers(projects: list[dict]) -> tuple[list[dict], bool]:
     """Confirmación humana de las capas del PSD antes de producir el lote."""
     st.subheader("2 · Revisa las capas de cada KV")
@@ -363,6 +423,7 @@ def _review_layers(projects: list[dict]) -> tuple[list[dict], bool]:
         key="review-kv",
     )
     project = next(item for item in projects if item["project_id"] == review_id)
+    _layer_inventory(project)
     layers = [
         layer for layer in project.get("layers", [])
         if not layer.get("meta", {}).get("external")
@@ -605,6 +666,68 @@ def _thumb(column, project: dict, relative: str | None, caption: str) -> None:
         column.caption(f"No se pudo mostrar el {caption}: {exc}")
 
 
+def _product_preview(products: list, arrangement: str) -> Image.Image:
+    """Maqueta local: no persiste ni consume una generación del backend."""
+    canvas = Image.new("RGBA", (720, 440), (246, 248, 252, 255))
+    draw = ImageDraw.Draw(canvas)
+    tile = 24
+    for y in range(0, canvas.height, tile):
+        for x in range(0, canvas.width, tile):
+            if (x // tile + y // tile) % 2 == 0:
+                draw.rectangle((x, y, x + tile, y + tile), fill=(236, 240, 247, 255))
+    assets: list[Image.Image] = []
+    for uploaded in products:
+        try:
+            assets.append(Image.open(io.BytesIO(uploaded.getvalue())).convert("RGBA"))
+        except Exception:  # noqa: BLE001 - una miniatura dañada no bloquea la carga
+            continue
+    if not assets:
+        return canvas.convert("RGB")
+
+    mode = arrangement
+    if mode == "auto":
+        mode = "horizontal" if len(assets) <= 3 else "grid"
+    boxes: list[tuple[int, int, int, int]] = []
+    pad = 34
+    usable_w, usable_h = canvas.width - pad * 2, canvas.height - pad * 2
+    if mode == "horizontal":
+        slot_w = usable_w // len(assets)
+        boxes = [(pad + index * slot_w, pad, slot_w, usable_h) for index in range(len(assets))]
+    elif mode == "vertical":
+        slot_h = usable_h // len(assets)
+        boxes = [(pad, pad + index * slot_h, usable_w, slot_h) for index in range(len(assets))]
+    elif mode == "overlap":
+        item_w, item_h = int(usable_w * 0.67), int(usable_h * 0.86)
+        travel = max(0, usable_w - item_w)
+        boxes = [
+            (
+                pad + int(travel * index / max(1, len(assets) - 1)),
+                pad + (index % 2) * int(usable_h * 0.08),
+                item_w,
+                item_h,
+            )
+            for index in range(len(assets))
+        ]
+    else:
+        columns = 2
+        rows = (len(assets) + columns - 1) // columns
+        slot_w, slot_h = usable_w // columns, usable_h // rows
+        boxes = [
+            (pad + (index % columns) * slot_w, pad + (index // columns) * slot_h, slot_w, slot_h)
+            for index in range(len(assets))
+        ]
+
+    for asset, (x, y, width, height) in zip(assets, boxes):
+        copy = asset.copy()
+        copy.thumbnail((max(1, width - 16), max(1, height - 16)), Image.Resampling.LANCZOS)
+        px = x + (width - copy.width) // 2
+        py = y + (height - copy.height) // 2
+        canvas.alpha_composite(copy, (px, py))
+        copy.close()
+        asset.close()
+    return canvas.convert("RGB")
+
+
 def _product_batch(projects: list[dict]):
     """Recoge productos para reconstruir piezas desde la plantilla del KV."""
     st.subheader("3 · Carga los productos")
@@ -660,7 +783,7 @@ def _product_batch(projects: list[dict]):
         )
         individual = [by_name[name] for name in individual_names]
 
-        groups: list[tuple[str, list]] = []
+        groups: list[dict] = []
         groups_valid = True
         with st.expander("Combinar cualquier producto en una misma arte", expanded=False):
             if uploads:
@@ -678,18 +801,36 @@ def _product_batch(projects: list[dict]):
                     )
                 )
                 for group_index in range(group_count):
+                    group_name = st.text_input(
+                        f"Nombre de la combinación {group_index + 1}",
+                        value=f"Combinación {group_index + 1}",
+                        key=f"free-product-group-name-{group_index}",
+                    )
                     selected = st.multiselect(
-                        f"Combinación {group_index + 1}",
+                        "Productos que van juntos",
                         names,
                         default=[],
                         key=f"free-product-group-{group_index}",
                     )
+                    arrangement = st.selectbox(
+                        "Disposición dentro del arte",
+                        ["auto", "horizontal", "vertical", "overlap"],
+                        format_func=lambda value: {
+                            "auto": "Automática según el formato",
+                            "horizontal": "En fila",
+                            "vertical": "Apilados",
+                            "overlap": "Superpuestos",
+                        }[value],
+                        key=f"free-product-group-arrangement-{group_index}",
+                    )
                     if len(selected) >= 2:
                         groups.append(
-                            (
-                                f"Combinación {group_index + 1}",
-                                [by_name[name] for name in selected],
-                            )
+                            {
+                                "id": f"grupo-{group_index + 1}",
+                                "name": group_name.strip() or f"Combinación {group_index + 1}",
+                                "products": [by_name[name] for name in selected],
+                                "arrangement": arrangement,
+                            }
                         )
                     elif selected:
                         st.warning(
@@ -700,6 +841,32 @@ def _product_batch(projects: list[dict]):
                 st.caption(
                     f"{len(groups)} de {group_count} combinación(es) listas."
                 )
+
+        if individual or groups:
+            with st.expander("Vista previa · juntos y separados", expanded=True):
+                st.caption(
+                    "Cada tarjeta separada genera su propio arte. Las tarjetas de "
+                    "combinación conservan sus productos como capas independientes."
+                )
+                previews: list[tuple[str, list, str]] = [
+                    (item.name.rsplit(".", 1)[0], [item], "auto") for item in individual
+                ]
+                previews.extend(
+                    (group["name"], group["products"], group["arrangement"])
+                    for group in groups
+                )
+                columns = st.columns(min(4, len(previews)))
+                for index, (label, items, arrangement) in enumerate(previews):
+                    with columns[index % len(columns)]:
+                        st.image(
+                            _product_preview(items, arrangement),
+                            caption=(
+                                f"{label} · separado"
+                                if len(items) == 1
+                                else f"{label} · {arrangement}"
+                            ),
+                            width="stretch",
+                        )
 
         batch = {
             "individual": individual,
@@ -715,47 +882,9 @@ def _product_batch(projects: list[dict]):
 def _sizes() -> list[str] | None:
     """Devuelve la lista de formatos, o None para dejar que el backend elija."""
     st.markdown("**Formatos de salida**")
-    choice = st.radio(
-        "Tamaños",
-        list(SIZE_CHOICES),
-        format_func=lambda key: SIZE_CHOICES[key],
-        label_visibility="collapsed",
-        horizontal=True,
-    )
-    if choice == "auto":
-        st.caption(
-            "Recomendado: mantiene la proporción del arte y añade feed cuadrado y vertical."
-        )
-        return None
-    if choice == "social":
-        return SOCIAL
-    chosen = st.multiselect(
-        "Tamaños a generar",
-        list(FORMAT_LABELS),
-        default=SOCIAL[:2],
-        format_func=lambda key: FORMAT_LABELS[key],
-    )
-    return chosen or None
+    return select_formats(key_prefix="simple", allow_auto=True)
 
 
-
-def _poll_task(project_id: str, task_id: str, progress_text: str):
-    progress_bar = st.progress(0, text=progress_text)
-    while True:
-        status = api.get_task_status(project_id, task_id)
-        if status["state"] == "COMPLETED":
-            progress_bar.progress(1.0, text=f"{progress_text} (Completado)")
-            time.sleep(0.5)
-            progress_bar.empty()
-            return status["result"]
-        elif status["state"] == "FAILED":
-            progress_bar.empty()
-            # El detalle viene del worker: sin él no hay forma de saber qué pasó.
-            raise Exception(status.get("error") or "La tarea asíncrona falló.")
-        elif status["state"] == "PROGRESS":
-            meta = status["meta"] or {}
-            progress_bar.progress(meta.get("progress", 0) / 100.0, text=meta.get("status", progress_text))
-        time.sleep(2)
 
 def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]) -> None:
     st.subheader("4 · Elige formatos y genera")
@@ -767,11 +896,14 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
     )
     formats = _sizes()
     count = st.slider(
-        "Propuestas finales",
+        "Cantidad mínima de propuestas finales",
         2,
         6,
         3,
-        help="Se prueban más composiciones internamente y solo se conservan las mejores.",
+        help=(
+            "Se prueban más composiciones internamente y solo se conservan las "
+            "mejores. Siempre se entrega al menos una por cada formato elegido."
+        ),
     )
 
     try:
@@ -904,7 +1036,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
         "✨ Generar artes por producto",
         type="primary",
         width="stretch",
-        disabled=not product_batch.get("valid") or not targets,
+        disabled=not product_batch.get("valid") or not targets or formats == [],
     ):
         try:
             total = (len(individual) + len(groups)) * len(targets)
@@ -925,6 +1057,7 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                         replaced = api.replace_product(
                             project["project_id"], image=_file_tuple(product),
                             layer_id=target, hide_others=True,
+                            arrangement="auto",
                         )
                         task = api.auto_generate(
                             project["project_id"], count=int(count), formats=formats,
@@ -932,19 +1065,23 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             seed=int(seed) + kv_index * 100 + product_index,
                             replace_existing=first_batch,
                             product_label=product.name.rsplit(".", 1)[0],
+                            product_arrangement="auto",
                             template_mode=True,
                             background_provider=background_provider,
                             background_model=background_model,
                             background_prompt=background_prompt,
                             regenerate_background=rehacer_fondo and first_batch,
                         )
-                        result = _poll_task(project["project_id"], task["task_id"], f"Generando {product.name}...")
+                        result = poll_task(project["project_id"], task["task_id"], f"Generando {product.name}...")
                         first_batch = False
                         all_steps.extend(result.get("steps", []))
                         all_warnings.extend(replaced.get("warnings", []))
                         all_warnings.extend(result.get("warnings", []))
 
-                    for group_index, (group_name, group_products) in enumerate(groups):
+                    for group_index, group in enumerate(groups):
+                        group_name = group["name"]
+                        group_products = group["products"]
+                        arrangement = group["arrangement"]
                         completed += 1
                         st.write(
                             f"{completed}/{total} · {project['name']} · {group_name} "
@@ -956,6 +1093,9 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                                 layer_id=target,
                                 hide_others=member_index == 0,
                                 append=member_index > 0,
+                                group_id=group["id"],
+                                group_name=group_name,
+                                arrangement=arrangement,
                             )
                             all_warnings.extend(replaced.get("warnings", []))
                         group_label = " + ".join(
@@ -967,13 +1107,14 @@ def _generate(projects: list[dict], product_batch: dict, targets: dict[str, str]
                             seed=int(seed) + kv_index * 100 + len(individual) + group_index,
                             replace_existing=first_batch,
                             product_label=group_label,
+                            product_arrangement=arrangement,
                             template_mode=True,
                             background_provider=background_provider,
                             background_model=background_model,
                             background_prompt=background_prompt,
                             regenerate_background=rehacer_fondo and first_batch,
                         )
-                        result = _poll_task(project["project_id"], task["task_id"], f"Generando {group_label}...")
+                        result = poll_task(project["project_id"], task["task_id"], f"Generando {group_label}...")
                         first_batch = False
                         all_steps.extend(result.get("steps", []))
                         all_warnings.extend(result.get("warnings", []))

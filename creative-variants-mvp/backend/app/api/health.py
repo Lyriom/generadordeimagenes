@@ -5,6 +5,7 @@ from fastapi import APIRouter
 
 from ..config import settings
 from ..models import CapabilitiesResponse, HealthResponse, ImageModelInfo
+from ..models.formats import format_catalog
 from ..models.schemas import INTENSITIES, SUPPORTED_FORMATS
 from ..providers import provider_status
 from ..providers.magnific import model_catalog
@@ -43,6 +44,7 @@ def capabilities() -> CapabilitiesResponse:
         inpainting=status_info["inpainting"],
         image_models=[ImageModelInfo(**item) for item in model_catalog()],
         formats={key: list(value) for key, value in SUPPORTED_FORMATS.items()},
+        format_catalog=format_catalog(),
         layouts=layout_catalog(),
         intensities=list(INTENSITIES),
     )

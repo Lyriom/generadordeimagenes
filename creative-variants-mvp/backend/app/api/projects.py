@@ -830,6 +830,8 @@ def create_layer(project_id: str, request: LayerCreateRequest) -> Layer:
         or (CATEGORY_LABELS_ES.get(category, "Texto") if request.type == LayerType.TEXT else None),
         font_size=request.font_size or max(12, int(height * 0.7)),
         color=request.color or "#FFFFFF",
+        export_as_text=(request.type == LayerType.TEXT and category == LayerCategory.LEGAL),
+        text_verified=(request.type == LayerType.TEXT and category == LayerCategory.LEGAL),
     )
 
     try:
@@ -984,17 +986,35 @@ async def replace_product(
     append: bool = Form(
         False, description="Añadir como otra capa de producto en vez de sustituir."
     ),
+    group_id: str | None = Form(None, description="ID de la combinación de productos."),
+    group_name: str | None = Form(None, description="Nombre visible de la combinación."),
+    arrangement: str = Form("auto", description="auto | horizontal | vertical | overlap"),
 ) -> ReplaceProductResponse:
     project = load_project_or_404(project_id)
     temp_path = await _stream_upload(project.project_id, image, settings.max_upload_bytes)
     try:
         validate_image_path(temp_path, image.filename or "", allow_psd=False)
         layer = replacement.resolve_target(project, layer_id)
+        if arrangement not in {"auto", "horizontal", "vertical", "overlap"}:
+            raise bad_request("Disposición no soportada.")
         if append:
-            layer, warnings = replacement.append_product_image(project, layer, temp_path)
+            layer, warnings = replacement.append_product_image(
+                project,
+                layer,
+                temp_path,
+                group_id=group_id,
+                group_name=group_name,
+                arrangement=arrangement,
+            )
         else:
             warnings = replacement.replace_layer_image(
-                project, layer, temp_path, hide_others=hide_others
+                project,
+                layer,
+                temp_path,
+                hide_others=hide_others,
+                group_id=group_id,
+                group_name=group_name,
+                arrangement=arrangement,
             )
         storage.save_project(project)
     except Exception as exc:  # noqa: BLE001

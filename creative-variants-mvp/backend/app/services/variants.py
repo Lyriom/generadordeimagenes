@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 
-from ..models import Project, Variant, VariantLayerPlacement, new_id
+from ..models import Project, Variant, VariantLayerPlacement, format_spec, new_id
 from . import export as export_service
 from . import layout_engine, predictor, quality, renderer, storage
 
@@ -28,6 +28,15 @@ def _to_placement_model(placement: layout_engine.Placement) -> VariantLayerPlace
         color=placement.color,
         text_align=placement.align,
         content=layer.content,
+        valign=placement.valign,
+        pinned=placement.pinned,
+        stretch=placement.stretch,
+        rotation=layer.rotation,
+        font_family=layer.font_family,
+        font_weight=layer.font_weight,
+        line_height=layer.line_height,
+        export_as_text=layer.export_as_text,
+        text_verified=layer.text_verified,
     )
 
 
@@ -70,14 +79,22 @@ def generate_variants(project: Project, request) -> tuple[list[Variant], list[st
                 quality=report,
                 prediction=prediction,
                 placements=[_to_placement_model(p) for p in plan.placements],
-                meta={"product_label": request.product_label}
-                if getattr(request, "product_label", None)
-                else {},
+                meta={
+                    "format": format_spec(plan.format),
+                    "product_arrangement": getattr(request, "product_arrangement", "auto"),
+                    **(
+                        {"product_label": request.product_label}
+                        if getattr(request, "product_label", None)
+                        else {}
+                    ),
+                },
             )
         # Congela las capas ahora, antes de que la siguiente tanda sustituya los
         # productos activos del proyecto.
         psd_path = export_service.build_psd(project, variant)
         variant.meta["psd"] = str(psd_path.relative_to(storage.project_dir(project.project_id)))
+        svg_path = export_service.build_svg(project, variant)
+        variant.meta["svg"] = str(svg_path.relative_to(storage.project_dir(project.project_id)))
         variants.append(variant)
         image.close()
 

@@ -156,10 +156,18 @@ def _behaviour(project: dict, layer: dict) -> None:
         "preserve_aspect_ratio": preserve,
     }
 
-    if layer["type"] == "text":
-        st.markdown("##### Contenido de texto")
+    if layer["type"] == "text" or category == "legal":
+        st.markdown("##### Contenido editable")
+        if layer["type"] == "image":
+            st.caption(
+                "El PNG conserva el legal exactamente como llegó. Este contenido se "
+                "usa solo en el SVG para Illustrator y queda en una capa aparte."
+            )
         content = st.text_area(
-            "Texto", layer.get("content") or "", key=f"txt-{layer['id']}", height=90
+            "Texto",
+            layer.get("content") or (layer.get("meta") or {}).get("editable_content") or "",
+            key=f"txt-{layer['id']}",
+            height=90,
         )
         col1, col2, col3 = st.columns(3)
         font_size = col1.number_input(
@@ -194,6 +202,26 @@ def _behaviour(project: dict, layer: dict) -> None:
                 "auto_contrast": auto_contrast,
             }
         )
+        if category == "legal":
+            export_as_text = st.checkbox(
+                "Exportar como texto editable en SVG / Illustrator",
+                value=bool(layer.get("export_as_text") or layer["type"] == "text"),
+                disabled=not bool(content.strip()),
+                key=f"export-text-{layer['id']}",
+            )
+            text_verified = st.checkbox(
+                "Confirmo que el texto fue revisado y es exacto",
+                value=bool(layer.get("text_verified", False)),
+                disabled=not bool(content.strip()),
+                key=f"verified-text-{layer['id']}",
+                help="Los textos legales detectados por OCR deben revisarse antes de publicar.",
+            )
+            payload.update(
+                {
+                    "export_as_text": export_as_text,
+                    "text_verified": text_verified,
+                }
+            )
 
     col1, col2 = st.columns(2)
     if col1.button("💾 Guardar capa", type="primary", key=f"save-{layer['id']}"):
