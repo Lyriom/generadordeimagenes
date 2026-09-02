@@ -758,6 +758,20 @@ def delete_all_projects():
     }
 
 
+@router.delete("/session", summary="Borrar el trabajo de la sesión actual")
+def delete_current_session_projects():
+    """Termina una sesión sin afectar el trabajo de otros navegadores."""
+    session_id = storage.current_session()
+    if not session_id:
+        raise bad_request("Falta la cabecera X-Session-Id.")
+    removed = storage.delete_session_projects(session_id)
+    return {
+        "removed": removed,
+        "removed_count": len(removed),
+        "disk_usage_mb": storage.disk_usage_mb(),
+    }
+
+
 @router.get("/{project_id}", response_model=Project, summary="Obtener un proyecto")
 def get_project(project_id: str) -> Project:
     return load_project_or_404(project_id)

@@ -7,7 +7,8 @@ const API_ROOT = "/api";
  * acumularlo llena el disco. El backend etiqueta cada proyecto con esta sesión
  * y barre por antigüedad; la interfaz solo lista lo de la sesión en curso.
  *
- * Va en `sessionStorage`: sobrevive a recargar la pestaña y muere al cerrarla. */
+ * Va en `sessionStorage` únicamente para poder localizar y borrar el trabajo de
+ * esta página durante el siguiente arranque. Cada recarga crea una sesión nueva. */
 const SESSION_KEY = "creative-session";
 
 function newSessionId(): string {
@@ -26,6 +27,15 @@ export function sessionId(): string {
     // Modo privado sin almacenamiento: una sesión por carga de página.
     return newSessionId();
   }
+}
+
+export function resetSessionId(): string {
+  try {
+    sessionStorage.removeItem(SESSION_KEY);
+  } catch {
+    /* modo privado: sessionId ya genera una identidad por carga */
+  }
+  return sessionId();
 }
 
 export class ApiError extends Error {

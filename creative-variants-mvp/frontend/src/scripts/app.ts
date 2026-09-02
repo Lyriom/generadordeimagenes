@@ -6,6 +6,7 @@ import {
   pollTask,
   post,
   put,
+  resetSessionId,
   sessionId,
   thumbnailUrl,
   variantPngUrl,
@@ -29,10 +30,8 @@ const VIEW_LABELS: Record<ViewName, string> = {
   results: "Resultados",
 };
 
-/* El flujo es una secuencia, no cuatro secciones independientes: no se puede
-   elegir productos sin haber confirmado las capas, ni generar sin productos.
-   `stepState` calcula qué pasos están hechos y cuál es el siguiente, y la
-   navegación bloquea los que aún no tocan explicando por qué. */
+/* El flujo conserva un orden sugerido, pero la revisión de capas no bloquea el
+   trabajo. Solo exigimos lo imprescindible para cada acción. */
 const STEP_ORDER: ViewName[] = ["campaign", "layers", "products", "generate"];
 
 interface StepState {
@@ -76,7 +75,6 @@ function nameList(projects: Project[], max = 3): string {
 function stepState(): StepState {
   const hasCampaign = state.campaign.length > 0;
   const reviewed = hasCampaign && state.campaign.every(layersConfirmed);
-  const pending = hasCampaign ? state.campaign.filter((item) => !layersConfirmed(item)) : [];
   const hasProducts = productsReady();
 
   const done: Record<string, boolean> = {
@@ -90,22 +88,12 @@ function stepState(): StepState {
     layers: hasCampaign ? null : "Primero carga al menos un KV.",
     products: !hasCampaign
       ? "Primero carga al menos un KV."
-      : !reviewed
-        ? "Falta confirmar las capas de " + String(pending.length) + " KV."
-        : null,
+      : null,
     generate: !hasCampaign
       ? "Primero carga al menos un KV."
-      : !reviewed
-        ? "Falta confirmar las capas de " + String(pending.length) + " KV."
-        : !hasProducts
+      : !hasProducts
           ? "Elige al menos un producto o una combinación."
-          // Sin capa Producto no hay nada que reemplazar. Antes esto no
-          // bloqueaba el paso y solo se descubría al pulsar Generar.
-          : missingProductTargets().length
-            ? "Falta identificar el producto en " +
-              String(missingProductTargets().length) + " KV: " +
-              nameList(missingProductTargets()) + "."
-            : null,
+          : null,
     results: null,
   };
   const next = STEP_ORDER.find((view) => !done[view]) || "generate";
@@ -219,16 +207,10 @@ interface State {
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
-  /* Posición de los productos individuales dentro del arte. Vive en el estado y
-     no en el DOM porque se elige en el paso 3 y se usa al generar en el 4. */
+  /* Instrucción libre sobre posición y composición. Vive en el estado porque se
+     escribe en el paso 3 y se envía al motor al generar en el paso 4. */
+  productPositionInstruction: string;
   productArrangement: ProductGroup["arrangement"];
-  /* Lo que informó el barrido de retención: horas de vida y disco ocupado. */
-  retention: {
-    retention_hours?: number;
-    max_projects_kept?: number;
-    disk_usage_mb?: number;
-    removed_count?: number;
-  } | null;
 }
 
 const state: State = {
@@ -249,8 +231,8 @@ const state: State = {
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
+  productPositionInstruction: "",
   productArrangement: "auto",
-  retention: null,
 };
 
 const ARRANGEMENT_OPTIONS: Record<string, string> = {
@@ -327,9 +309,8 @@ function idle(): void {
   query<HTMLElement>("#busy-overlay")!.hidden = true;
 }
 
-/* La campaña en curso vive en `sessionStorage`, no en `localStorage`: recargar
-   la pestaña no pierde el trabajo, pero abrir el generador de cero empieza
-   limpio en el paso 1 en vez de resucitar la campaña de la semana pasada. */
+/* La campaña se conserva durante la navegación interna. Al recargar, mountApp
+   borra estas referencias y elimina del backend la sesión anterior. */
 function saveSession(): void {
   try {
     sessionStorage.setItem("creative-campaign", JSON.stringify(state.campaignIds));
@@ -337,19 +318,6 @@ function saveSession(): void {
     else sessionStorage.removeItem("creative-active");
   } catch {
     /* modo privado: la campaña solo vive en memoria */
-  }
-}
-
-function readSession(): { ids: string[]; active: string | null } {
-  try {
-    const raw = sessionStorage.getItem("creative-campaign");
-    const ids = raw ? JSON.parse(raw) : [];
-    return {
-      ids: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [],
-      active: sessionStorage.getItem("creative-active"),
-    };
-  } catch {
-    return { ids: [], active: null };
   }
 }
 
@@ -500,44 +468,6 @@ function projectCard(project: Project | ProjectSummary, full?: Project): string 
   ].join("");
 }
 
-/** Aviso permanente de que esto no es un archivo: el trabajo se borra. */
-function retentionNotice(): string {
-  const info = state.retention;
-  const hours = info?.retention_hours ?? 8;
-  const disk = info?.disk_usage_mb;
-  return [
-    '<div class="notice warning"><strong>Nada de esto se guarda.</strong> El trabajo vive solo durante tu sesión y el servidor lo borra tras ',
-    String(hours), " horas sin actividad, para no llenarse.",
-    disk !== undefined ? " Ocupado ahora: <strong>" + String(disk) + " MB</strong>." : "",
-    ' Descarga lo que quieras conservar desde <em>Resultados</em>.',
-    '<div class="button-row" style="margin-top:10px"><button class="danger-button" id="wipe-all">Borrar todo del servidor ahora</button></div></div>',
-  ].join("");
-}
-
-function bindRetention(): void {
-  query("#wipe-all")?.addEventListener("click", async () => {
-    if (!window.confirm(
-      "Se borrará TODO el trabajo del servidor, incluido el de otras sesiones abiertas. ¿Continuar?",
-    )) return;
-    busy("Liberando el servidor", "Borrando proyectos y sus archivos…", 20);
-    try {
-      const result = await del<any>("/projects");
-      state.campaignIds = [];
-      state.campaign = [];
-      state.activeId = null;
-      saveSession();
-      await refreshAll();
-      toast(String(result.removed_count || 0) + " proyecto(s) borrados. Disco: " +
-        String(result.disk_usage_mb ?? 0) + " MB.", "success");
-      await navigate("campaign");
-    } catch (error) {
-      toast(errorMessage(error), "error");
-    } finally {
-      idle();
-    }
-  });
-}
-
 /* El trabajo de esta sesión, en lista compacta con selección múltiple. No hay
    "trabajos guardados": lo de sesiones anteriores el servidor ya lo borró. */
 function savedProjectsHtml(items: ProjectSummary[]): string {
@@ -607,14 +537,11 @@ async function renderCampaign(): Promise<void> {
     state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
     '<div class="spacer"></div>',
     savedProjectsHtml(saved),
-    '<div class="spacer"></div>',
-    retentionNotice(),
   ].join("");
 
   bindStepBar();
   bindStepFooter("campaign");
   bindSavedProjects();
-  bindRetention();
   bindProjectCards();
   query("#clear-campaign")?.addEventListener("click", () => {
     state.campaignIds = [];
@@ -833,37 +760,33 @@ async function loadIngest(): Promise<void> {
 }
 
 export async function mountApp(): Promise<void> {
-  const session = readSession();
-  state.campaignIds = session.ids;
-  state.activeId = session.active;
-
-  // Barrido al abrir: libera el disco del servidor sin depender de reinicios.
-  // Borra por antigüedad, así que no toca la campaña que otro esté produciendo.
+  // Una recarga termina la sesión anterior. El backend borra únicamente los
+  // proyectos asociados a este navegador y después se crea una identidad nueva.
   try {
-    state.retention = await post<any>("/projects/purge");
+    await del("/projects/session");
   } catch {
-    /* si falla, el arranque del backend ya hace su propio barrido */
+    /* si el backend no responde, su barrido periódico eliminará los archivos */
   }
+  try {
+    sessionStorage.removeItem("creative-campaign");
+    sessionStorage.removeItem("creative-active");
+  } catch {
+    /* modo privado: el estado ya vive solo en memoria */
+  }
+  resetSessionId();
+  state.campaignIds = [];
+  state.campaign = [];
+  state.activeId = null;
 
   queryAll<HTMLButtonElement>(".nav-item").forEach((button) => {
     button.addEventListener("click", () => navigate(button.dataset.view as ViewName));
   });
   query("#mobile-menu")?.addEventListener("click", () => document.body.classList.toggle("menu-open"));
-  query("#refresh-button")?.addEventListener("click", async () => {
-    try {
-      await refreshAll();
-      await navigate(state.view);
-      toast("Información actualizada.", "success");
-    } catch (error) {
-      toast(errorMessage(error), "error");
-    }
-  });
+  query("#refresh-button")?.addEventListener("click", () => window.location.reload());
 
   try {
     await refreshAll();
-    // Se retoma donde se quedó el flujo, que con una campaña ya revisada es el
-    // paso de productos y no la pantalla de carga otra vez.
-    await navigate(state.campaign.length ? stepState().next : "campaign");
+    await navigate("campaign");
   } catch (error) {
     state.health = null;
     renderChrome();
@@ -886,7 +809,8 @@ function layerItem(project: Project, layer: Layer): string {
     : '<span class="layer-mini"></span>';
   return [
     '<button class="layer-item', state.selectedLayerId === layer.id ? " is-active" : "",
-    '" data-layer-id="', attr(layer.id), '">', preview, "<span><strong>", esc(layer.name),
+    '" data-layer-id="', attr(layer.id), '" aria-pressed="',
+    state.selectedLayerId === layer.id ? "true" : "false", '">', preview, "<span><strong>", esc(layer.name),
     "</strong><small>", esc(CATEGORY_LABELS[layer.category] || layer.category), " · ",
     String(layer.width), "×", String(layer.height), layer.visible ? "" : " · oculta",
     "</small></span></button>",
@@ -1038,7 +962,7 @@ async function renderLayers(): Promise<void> {
     // La confirmación de roles va primero: es lo único obligatorio de este paso.
     reviewRoles(project, layers),
     '<div class="spacer"></div>',
-    '<details class="card"><summary>Ajustes finos de la capa seleccionada · opcional</summary>',
+    '<details class="card" open><summary>Ajustes finos de la capa seleccionada · opcional</summary>',
     '<p class="muted tiny" style="margin-top:10px">Máscaras, geometría y permisos. Solo si algo salió mal en la importación.</p>',
     '<div class="button-row" style="margin:14px 0 16px"><label class="field" style="min-width:260px"><span>KV activo</span><select id="active-kv">', projectOptions, "</select></label>",
     '<button class="ghost-button" id="analyze-project">Detectar elementos</button>',
@@ -1157,9 +1081,9 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
     await navigate("layers");
   });
   queryAll<HTMLButtonElement>(".layer-item").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       state.selectedLayerId = button.dataset.layerId || null;
-      renderLayers();
+      await renderLayers();
     });
   });
   query("#analyze-project")?.addEventListener("click", () => runProjectAction(
@@ -1741,6 +1665,14 @@ function arrangementLabel(value: string): string {
   return ({ auto: "Automática", horizontal: "En fila", vertical: "Apilados", overlap: "Superpuestos" } as Record<string, string>)[value] || value;
 }
 
+function arrangementFromInstruction(instruction: string): ProductGroup["arrangement"] {
+  const text = instruction.toLocaleLowerCase("es");
+  if (/superpuest|encim|overlap/.test(text)) return "overlap";
+  if (/apilad|vertical|uno (sobre|encima de) otro/.test(text)) return "vertical";
+  if (/en fila|horizontal|uno (al lado|junto) (del|al) otro/.test(text)) return "horizontal";
+  return "auto";
+}
+
 function groupCard(group: ProductGroup): string {
   const members = group.members.map((key) => state.products.find((file) => productKey(file) === key)).filter(Boolean) as File[];
   return [
@@ -1760,6 +1692,7 @@ function productTarget(project: Project): Layer | null {
    El paso 4 solo decide el cómo (modelo, contexto, formatos). */
 async function renderProducts(): Promise<void> {
   const missingTargets = state.campaign.filter((project) => !productTarget(project));
+  const pendingReviews = state.campaign.filter((project) => !layersConfirmed(project));
   const productCards = state.products.map(productCard).join("");
   const groups = state.groups.map(groupCard).join("");
   const productChoices = state.products.map((file) =>
@@ -1772,7 +1705,7 @@ async function renderProducts(): Promise<void> {
         '<div class="notice error" style="margin-bottom:16px">',
         "<strong>Falta identificar el producto en ", String(missingTargets.length), " de ",
         String(state.campaign.length), " KV.</strong> Sin una capa marcada como <em>Producto</em> ",
-        "el sistema no sabe qué pieza retirar, y esos KV no pueden generar.",
+        "el sistema no sabe qué pieza retirar. Puedes continuar: al generar, esos KV se omitirán.",
         '<div style="margin:10px 0">',
         missingTargets.map((project) => '<span class="badge red" style="margin:0 6px 6px 0">' + esc(project.name) + "</span>").join(""),
         "</div>",
@@ -1800,6 +1733,10 @@ async function renderProducts(): Promise<void> {
       "Sube el catálogo una sola vez. Después eliges cuáles llevan arte propio, cuáles se combinan y en qué posición.",
     ),
     targetsNotice,
+    pendingReviews.length
+      ? '<div class="notice warning" style="margin-bottom:16px">Hay ' + String(pendingReviews.length) +
+        ' KV con capas sin confirmar. Esto ya no bloquea la generación; puedes revisarlos después si lo necesitas.</div>'
+      : "",
     '<section class="card elevated"><div class="card-head"><div><h2>Catálogo de productos</h2><p>PNG con transparencia da el mejor recorte</p></div><span class="badge green">',
     String(state.products.length), " CARGADOS</span></div>",
     '<label class="dropzone compact"><input id="product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp"><span class="drop-icon">⇧</span><strong>Sube los productos</strong><span>PNG, JPG o WEBP · puedes elegir varios a la vez</span></label>',
@@ -1823,16 +1760,13 @@ async function renderProducts(): Promise<void> {
     groups ? '<div class="stack" style="margin-top:16px">' + groups + "</div>" : "",
     "</section>",
 
-    '<section class="card"><div class="card-head"><div><h2>Posición de los productos</h2><p>Para los que van por separado</p></div></div>',
-    '<label class="field"><span>Disposición dentro del arte</span><select id="individual-arrangement">',
-    optionList(ARRANGEMENT_OPTIONS, state.productArrangement), "</select></label>",
-    '<p class="muted tiny" style="margin-top:12px">La ubicación exacta se toma de la zona que ya venía diseñada en el PSD; esto solo decide cómo se reparten cuando hay más de una pieza.</p>',
-    '<div class="divider"></div>',
-    '<span class="label">Vista previa de la disposición</span>',
-    '<div class="group-preview ', attr(state.productArrangement === "auto" ? "horizontal" : state.productArrangement), '" style="margin-top:10px">',
-    (selectedProductFiles().slice(0, 3).map((file) => '<img src="' + attr(productUrl(file)) + '" alt="">').join("")
-      || '<span class="muted tiny">Sube productos para verlo</span>'),
-    "</div></section></div>",
+    '<section class="card"><div class="card-head"><div><h2>Posición de los productos</h2><p>Descríbela con tus palabras</p></div></div>',
+    '<label class="field"><span>¿Dónde y cómo quieres el producto?</span>',
+    '<textarea id="product-position-instruction" maxlength="400" placeholder="Ej. Grande y en la parte superior derecha">',
+    esc(state.productPositionInstruction), "</textarea>",
+    '<small>Puedes indicar izquierda, derecha, arriba, abajo, centrado, tamaño, fila, apilados o superpuestos.</small></label>',
+    '<div class="notice" style="margin-top:14px">En la sustitución fiel se conserva el espacio original. Esta indicación se usa únicamente en “Ajustes finos”.</div>',
+    "</section></div>",
 
     stepFooter("products", "Elegir modelo y generar"),
   ].join("");
@@ -1858,9 +1792,9 @@ function bindProductStep(): void {
       await renderProducts();
     });
   });
-  query<HTMLSelectElement>("#individual-arrangement")?.addEventListener("change", async (event) => {
-    state.productArrangement = (event.currentTarget as HTMLSelectElement).value as ProductGroup["arrangement"];
-    await renderProducts();
+  query<HTMLTextAreaElement>("#product-position-instruction")?.addEventListener("input", (event) => {
+    state.productPositionInstruction = (event.currentTarget as HTMLTextAreaElement).value;
+    state.productArrangement = arrangementFromInstruction(state.productPositionInstruction);
   });
   query("#add-group")?.addEventListener("click", async () => {
     const members = queryAll<HTMLInputElement>(".group-member:checked").map((item) => item.value);
@@ -1949,7 +1883,7 @@ function bindProductStep(): void {
 async function renderGenerate(): Promise<void> {
   const active = activeProject()!;
   const modeTabs = [
-    '<div class="tabs"><button class="tab generation-mode', state.generationMode === "catalog" ? " is-active" : "", '" data-mode="catalog">Producir por producto</button>',
+    '<div class="tabs"><button class="tab generation-mode', state.generationMode === "catalog" ? " is-active" : "", '" data-mode="catalog">Sustituir producto · fiel</button>',
     '<button class="tab generation-mode', state.generationMode === "compose" ? " is-active" : "", '" data-mode="compose">Ajustes finos del KV activo</button></div>',
   ].join("");
 
@@ -1957,11 +1891,11 @@ async function renderGenerate(): Promise<void> {
   if (state.generationMode === "catalog") {
     const total = (selectedProductFiles().length + validGroups().length) * state.campaign.length;
     body = [
-      '<div class="notice success" style="margin-bottom:16px">Se producirán <strong>', String(total),
-      " tanda(s)</strong>: ", String(selectedProductFiles().length), " individual(es) y ",
-      String(validGroups().length), " combinación(es) por cada uno de los ", String(state.campaign.length), " KV.</div>",
-      formatSelectorHtml(true),
-      '<div class="spacer"></div>', generationOptionsHtml("catalog"),
+      '<div class="notice success" style="margin-bottom:16px"><strong>Sustitución fiel.</strong> Se crearán ', String(total),
+      " arte(s), uno por producto y KV. Se mantiene el tamaño original, el fondo, los textos, logos, personas y todas sus posiciones.</div>",
+      '<section class="card elevated"><div class="card-head"><div><h2>Solo cambiar el producto</h2><p>Sin IA, sin nuevos layouts y sin reinterpretar el diseño</p></div></div>',
+      '<div class="notice">El producto nuevo ocupará el espacio del producto original. El resto del arte no se mueve ni se vuelve a dibujar.</div>',
+      '<button class="button large full" id="run-generation" style="margin-top:20px">Sustituir productos y generar archivos</button></section>',
     ].join("");
   } else {
     body = [
@@ -1974,8 +1908,10 @@ async function renderGenerate(): Promise<void> {
     stepBar("generate"),
     pageHead(
       "Paso 4 de 4",
-      "Modelo, contexto y formatos",
-      "Elige las medidas de salida, con qué motor se rehace el fondo y qué le pides en palabras. Después, genera.",
+      state.generationMode === "catalog" ? "Reemplazo fiel del producto" : "Modelo, contexto y formatos",
+      state.generationMode === "catalog"
+        ? "Conserva el arte original y sustituye únicamente el producto."
+        : "Elige las medidas de salida, el contexto y genera variantes del KV.",
     ),
     modeTabs, body,
   ].join("");
@@ -2077,13 +2013,31 @@ function bindGenerate(project: Project): void {
 }
 
 function generationSettings(): Record<string, any> {
+  if (state.generationMode === "catalog") {
+    return {
+      count: 1,
+      formats: null,
+      intensity: "conservative",
+      instruction: null,
+      product_position_instruction: null,
+      seed: 42,
+      product_arrangement: "auto",
+      background_provider: "opencv",
+      background_model: null,
+      background_prompt: null,
+      regenerate_background: false,
+    };
+  }
+  const generalInstruction = query<HTMLTextAreaElement>("#generation-instruction")!.value.trim();
+  const positionInstruction = state.productPositionInstruction.trim();
   return {
     count: Number(query<HTMLInputElement>("#generation-count")!.value),
     formats: state.autoFormats ? null : Array.from(state.selectedFormats),
     intensity: query<HTMLSelectElement>("#generation-intensity")!.value,
-    instruction: query<HTMLTextAreaElement>("#generation-instruction")!.value.trim() || null,
+    instruction: generalInstruction || null,
+    product_position_instruction: positionInstruction || null,
     seed: Number(query<HTMLInputElement>("#generation-seed")!.value),
-    // La posición se eligió en el paso 3, no en esta pantalla.
+    // La disposición estructural se infiere del texto libre escrito en el paso 3.
     product_arrangement: state.productArrangement,
     background_provider: query<HTMLSelectElement>("#generation-provider")!.value,
     background_model: query<HTMLSelectElement>("#generation-model")!.value || null,
@@ -2114,17 +2068,17 @@ async function runCatalogGeneration(): Promise<void> {
     toast("Elige al menos un formato de salida.", "error");
     return;
   }
-  const targets = state.campaign.map((project) => ({ project, layer: productTarget(project) }));
-  const sinProducto = targets.filter((item) => !item.layer).map((item) => item.project);
+  const allTargets = state.campaign.map((project) => ({ project, layer: productTarget(project) }));
+  const sinProducto = allTargets.filter((item) => !item.layer).map((item) => item.project);
+  const targets = allTargets.filter((item) => Boolean(item.layer));
   if (sinProducto.length) {
-    // Se nombran los KV y se lleva al sitio donde se arregla: "todos los KV
-    // necesitan una capa Producto" no decía cuáles ni qué hacer.
     toast(
-      "Sin capa Producto en: " + nameList(sinProducto) +
-      ". Ve al paso 3 y usa “Detectar producto”.",
-      "error",
+      "Se omitirán los KV sin producto identificado: " + nameList(sinProducto) + ".",
+      "info",
     );
-    await navigate("products");
+  }
+  if (!targets.length) {
+    toast("No hay ningún KV con un producto identificado para reemplazar.", "error");
     return;
   }
   const settings = generationSettings();
@@ -2220,6 +2174,7 @@ async function runComposeGeneration(project: Project): Promise<void> {
     formats: Array.from(state.selectedFormats),
     intensity: settings.intensity,
     instruction: settings.instruction,
+    product_position_instruction: settings.product_position_instruction,
     layouts: layouts.length ? layouts : null,
     product_arrangement: settings.product_arrangement,
     replace_existing: true,
@@ -2255,6 +2210,7 @@ function resultCard(project: Project, variant: Variant): string {
   const key = resultKey(project.project_id, variant.id);
   const warnings = variant.quality?.warnings || [];
   const svg = variant.meta?.svg;
+  const psd = variant.meta?.psd;
   const product = variant.meta?.product_label || "Producto";
   // El backend ya renderiza un JPEG reducido por variante; pedir el PNG a
   // tamaño real para una rejilla de 280px era descargar megas por tarjeta.
@@ -2265,6 +2221,7 @@ function resultCard(project: Project, variant: Variant): string {
     esc((format.platform || "") + (format.placement ? " · " + format.placement : " · " + variant.format) + (format.ratio ? " · " + format.ratio : "")), "<br>", esc(product), "</p>",
     '<label class="check"><input class="variant-pick" type="checkbox" value="', attr(key), '"', checked(state.selectedVariants.has(key)), '> Elegir</label>',
     '<div class="button-row" style="margin-top:11px"><a class="ghost-button" href="', attr(variantPngUrl(project.project_id, variant.id)), '" download>PNG</a>',
+    psd ? '<a class="ghost-button" href="' + attr(fileUrl(project.project_id, psd)) + '" download>Photoshop PSD</a>' : '<span class="badge gray">PSD al regenerar</span>',
     svg ? '<a class="ghost-button" href="' + attr(fileUrl(project.project_id, svg)) + '" download>Illustrator SVG</a>' : '<span class="badge gray">SVG al regenerar</span>',
     '</div><details style="margin-top:12px"><summary>', warnings.length ? "⚠ " + String(warnings.length) + " avisos" : "Detalle", '</summary><div class="notice" style="margin-top:8px">Composición: ',
     esc(variant.layout_label), warnings.length ? "<br>" + warnings.map((warning) => "• " + esc(warning)).join("<br>") : "<br>Sin avisos.", "</div></details></div></article>",

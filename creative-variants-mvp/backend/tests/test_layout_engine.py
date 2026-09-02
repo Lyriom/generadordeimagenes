@@ -316,7 +316,25 @@ def test_parse_instruction_biases():
     assert bias["product_scale"] > 1.0
     assert "hero_product_overlay" in bias["preferred_layouts"]
     assert "product_center_headline_top" in bias["preferred_layouts"]
+    position = parse_instruction("Producto en la parte superior derecha")
+    assert position["product_horizontal"] == "right"
+    assert position["product_vertical"] == "top"
     assert parse_instruction(None)["product_scale"] == 1.0
+
+
+def test_written_product_position_is_applied_to_the_composition():
+    placements, notes = build_placements(
+        _layers(),
+        "product_left",
+        1080,
+        1350,
+        random.Random(7),
+        bias=parse_instruction("Producto arriba a la derecha"),
+    )
+    product = next(item for item in placements if item.layer.category == LayerCategory.PRODUCT)
+    assert product.x + product.width / 2 > 1080 * 0.65
+    assert product.y < 1350 / 3
+    assert any("indicación escrita" in note for note in notes)
 
 
 # ------------------------------------------------- fidelidad al diseño original

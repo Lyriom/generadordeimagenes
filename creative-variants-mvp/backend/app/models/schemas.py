@@ -259,6 +259,7 @@ class GenerateRequest(BaseModel):
     reorderable_layers: list[str] | None = None
     hidden_layers: list[str] = Field(default_factory=list)
     instruction: str | None = Field(default=None, max_length=400)
+    product_position_instruction: str | None = Field(default=None, max_length=400)
     layouts: list[str] | None = None
     replace_existing: bool = True
     product_label: str | None = Field(default=None, max_length=180)
@@ -353,13 +354,17 @@ class AutoRequest(BaseModel):
     )
     intensity: Literal["conservative", "moderate", "creative"] = "moderate"
     instruction: str | None = Field(default=None, max_length=400)
+    product_position_instruction: str | None = Field(default=None, max_length=400)
     seed: int = Field(default=42, ge=0, le=2**31 - 1)
     replace_existing: bool = True
     product_label: str | None = Field(default=None, max_length=180)
     product_arrangement: Literal["auto", "horizontal", "vertical", "overlap"] = "auto"
     template_mode: bool = Field(
         default=False,
-        description="Recompone el arte como plantilla y excluye la copia fiel del KV.",
+        description=(
+            "Sustitución fiel: conserva tamaño, fondo, capas y posiciones del KV; "
+            "solo cambia el producto."
+        ),
     )
     background_provider: (
         Literal["auto", "opencv", "magnific", "openai", "flux", "adobe"] | None

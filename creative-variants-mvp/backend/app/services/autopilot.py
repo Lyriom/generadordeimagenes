@@ -17,22 +17,12 @@ from ..models import (
     Variant,
 )
 from . import analysis, inpainting, layer_extraction, storage, variants as variants_service
+from .layout_engine import FAITHFUL_LAYOUT
 
 logger = logging.getLogger(__name__)
 
 # Formatos que se añaden siempre porque son los de mayor uso en redes.
 SOCIAL_DEFAULTS = ("1080x1080", "1080x1350")
-
-# En modo plantilla el KV aporta el sistema visual, no una composición que se deba
-# copiar literalmente. Estas familias redistribuyen producto, textos y elementos.
-TEMPLATE_LAYOUTS = [
-    "product_left",
-    "product_right",
-    "product_center_headline_top",
-    "headline_center_product_bottom",
-    "vertical_stack",
-]
-
 
 def usable_layers(project: Project) -> list:
     """Capas que el motor de composición puede usar tal como están."""
@@ -57,6 +47,29 @@ def auto_formats(project: Project) -> list[str]:
     formats = [native]
     formats.extend(fmt for fmt in SOCIAL_DEFAULTS if fmt != native)
     return formats
+
+
+def native_format(project: Project) -> str:
+    """Preset con tamaño/proporción más cercanos al lienzo original."""
+    exact = next(
+        (
+            key
+            for key, size in LEGACY_FORMATS.items()
+            if size == (project.canvas.width, project.canvas.height)
+        ),
+        None,
+    )
+    if exact:
+        return exact
+    aspect = project.canvas.width / max(1, project.canvas.height)
+    return min(
+        LEGACY_FORMATS,
+        key=lambda key: (
+            abs(LEGACY_FORMATS[key][0] / LEGACY_FORMATS[key][1] - aspect),
+            abs(LEGACY_FORMATS[key][0] - project.canvas.width)
+            + abs(LEGACY_FORMATS[key][1] - project.canvas.height),
+        ),
+    )
 
 
 def _step(name: str, detail: str, ok: bool = True) -> dict:
@@ -104,16 +117,21 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
         )
 
     # 3 · Fondo. El PSD suele traerlo; si no, se reconstruye.
-    if project.background.path and not request.regenerate_background:
+    replacement_only = bool(request.template_mode)
+    if project.background.path and (replacement_only or not request.regenerate_background):
         origin = "el archivo ya traía el fondo" if from_psd else "ya estaba reconstruido"
         steps.append(_step("Preparar el fondo", origin))
     else:
         try:
             _, provider_name, background_warnings = inpainting.reconstruct_background(
                 project,
-                prompt=request.background_prompt,
-                preferred_provider=request.background_provider,
-                model=getattr(request, "background_model", None),
+                prompt=None if replacement_only else request.background_prompt,
+                preferred_provider=(
+                    "opencv" if replacement_only else request.background_provider
+                ),
+                model=(
+                    None if replacement_only else getattr(request, "background_model", None)
+                ),
             )
             warnings.extend(background_warnings)
             steps.append(_step("Preparar el fondo", f"reconstruido con {provider_name}"))
@@ -132,26 +150,37 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
             )
 
     # 4 · Componer.
-    formats = list(request.formats or []) or auto_formats(project)
-    requested_count = request.count
+    formats = (
+        [native_format(project)]
+        if replacement_only
+        else (list(request.formats or []) or auto_formats(project))
+    )
+    requested_count = 1 if replacement_only else request.count
     # Se exploran varias composiciones y se entregan pocas: calidad sobre volumen.
     generate = GenerateRequest(
         # Debe existir al menos un candidato por formato. Antes, seleccionar más
         # formatos que el valor del slider dejaba algunos sin producir.
-        count=min(30, max(requested_count * 3, len(formats) * 2, requested_count)),
+        count=(
+            1
+            if replacement_only
+            else min(30, max(requested_count * 3, len(formats) * 2, requested_count))
+        ),
         seed=request.seed,
         formats=formats,
-        intensity=request.intensity,
-        instruction=request.instruction,
+        intensity="conservative" if replacement_only else request.intensity,
+        instruction=None if replacement_only else request.instruction,
+        product_position_instruction=(
+            None if replacement_only else request.product_position_instruction
+        ),
         replace_existing=request.replace_existing,
         product_label=request.product_label,
         product_arrangement=request.product_arrangement,
-        layouts=TEMPLATE_LAYOUTS if request.template_mode else None,
+        layouts=[FAITHFUL_LAYOUT] if replacement_only else None,
     )
     variants, generate_warnings = variants_service.generate_variants(project, generate)
     warnings.extend(generate_warnings)
     if variants:
-        quality_first = bool(request.template_mode)
+        quality_first = False
         minimum_score = 80 if quality_first else 0
         ranked_by_format: dict[str, list[Variant]] = {}
         eligible = [

@@ -99,6 +99,31 @@ def test_auto_returns_every_selected_format_even_when_count_is_lower(
     assert len(payload["variants"]) >= len(requested)
 
 
+def test_template_mode_only_replaces_at_native_size_without_new_layouts(
+    client: TestClient, project: dict
+):
+    """El flujo de catálogo entrega un arte fiel, no propuestas recompuestas."""
+    create_manual_layers(client, project["project_id"])
+    response = client.post(
+        f"/projects/{project['project_id']}/auto",
+        json={
+            "count": 6,
+            "formats": ["1080x1350"],
+            "intensity": "creative",
+            "instruction": "mover todo y cambiar el fondo",
+            "template_mode": True,
+            "regenerate_background": True,
+        },
+    )
+    payload = await_task(client, project["project_id"], response)
+
+    assert len(payload["variants"]) == 1
+    variant = payload["variants"][0]
+    assert variant["layout"] == "faithful"
+    assert variant["format"] == "1080x1080"
+    assert variant["intensity"] == "conservative"
+
+
 def test_auto_rejects_unknown_format(client: TestClient, project: dict):
     response = client.post(
         f"/projects/{project['project_id']}/auto", json={"formats": ["5000x5000"]}

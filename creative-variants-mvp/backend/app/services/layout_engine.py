@@ -414,6 +414,8 @@ def parse_instruction(instruction: str | None) -> dict[str, Any]:
         "text_scale": 1.0,
         "preferred_layouts": [],
         "force_align": None,
+        "product_horizontal": None,
+        "product_vertical": None,
         "extra_air": 1.0,
     }
     if not instruction:
@@ -440,8 +442,16 @@ def parse_instruction(instruction: str | None) -> dict[str, Any]:
         bias["preferred_layouts"].append("split_blocks")
     if any(word in text for word in ("izquierda", "left")):
         bias["preferred_layouts"].append("product_left")
+        bias["product_horizontal"] = "left"
     if any(word in text for word in ("derecha", "right")):
         bias["preferred_layouts"].append("product_right")
+        bias["product_horizontal"] = "right"
+    if any(word in text for word in ("centrado", "centrada", "centro", "centered")):
+        bias["product_horizontal"] = "center"
+    if any(word in text for word in ("arriba", "superior", "top")):
+        bias["product_vertical"] = "top"
+    if any(word in text for word in ("abajo", "inferior", "bottom")):
+        bias["product_vertical"] = "bottom"
     if any(word in text for word in ("minimal", "limpio", "aire", "espacio", "respirar")):
         bias["extra_air"] = 0.9
         bias["product_scale"] *= 0.94
@@ -786,6 +796,11 @@ def build_placements(
             # original. Las capas manuales de la misma categoría siguen editables.
             or all(layer.meta.get("mandatory_art") for layer in group)
         )
+        # En el modo fiel todo queda anclado. La única excepción es un combo de
+        # productos: sus integrantes se reparten dentro del hueco original sin
+        # tocar ninguna otra capa del arte.
+        if category == LayerCategory.PRODUCT and len(group) > 1:
+            keep_relative = False
         zone = _zone_for(zones, category)
         if learned_product_zone:
             source_w, source_h = source_canvas
@@ -831,7 +846,40 @@ def build_placements(
                 bw, bh = new_w, new_h
             zone = (bx / source_w, by / source_h, bw / source_w, bh / source_h)
             notes.append("Productos restringidos a la zona aprendida del PSD.")
-        if mirror and category not in {LayerCategory.LEGAL} and not keep_relative and not learned_product_zone:
+        if category == LayerCategory.PRODUCT and (
+            bias.get("product_horizontal") or bias.get("product_vertical")
+        ):
+            zx, zy, zw, zh = zone
+            horizontal = bias.get("product_horizontal")
+            vertical = bias.get("product_vertical")
+            if horizontal == "left":
+                zx = 0.06
+            elif horizontal == "center":
+                zx = (1.0 - zw) / 2
+            elif horizontal == "right":
+                zx = 0.94 - zw
+            if vertical == "top":
+                zy = 0.08
+            elif vertical == "bottom":
+                zy = 0.92 - zh
+            zone = (
+                max(0.02, min(zx, 0.98 - zw)),
+                max(0.02, min(zy, 0.98 - zh)),
+                zw,
+                zh,
+            )
+            learned_product_zone = False
+            notes.append("Posición del producto aplicada desde la indicación escrita.")
+        has_explicit_product_position = category == LayerCategory.PRODUCT and (
+            bias.get("product_horizontal") or bias.get("product_vertical")
+        )
+        if (
+            mirror
+            and category not in {LayerCategory.LEGAL}
+            and not keep_relative
+            and not learned_product_zone
+            and not has_explicit_product_position
+        ):
             zx, zy, zw, zh = zone
             zone = (1.0 - zx - zw, zy, zw, zh)
         if keep_relative:
@@ -889,6 +937,8 @@ def build_placements(
             can_move = layer.movable and (movable is None or layer.id in movable)
             if learned_product_zone:
                 can_resize = False
+                can_move = False
+            if has_explicit_product_position:
                 can_move = False
             if keep_relative:
                 # Se respeta el diseño original: sin escalado extra ni saltos.
@@ -993,15 +1043,16 @@ def build_placements(
     notes.extend(_resolve_overlaps(placements, canvas_w, canvas_h, margin))
     # Decoraciones pueden ir a sangre. Producto, marca y textos deben permanecer
     # dentro del área que cada plataforma deja libre de controles y overlays.
-    bounds = _safe_bounds(canvas_w, canvas_h, safe_area)
-    for placement in placements:
-        if placement.layer.category != LayerCategory.DECORATION:
-            before = placement.box
-            _constrain_to_safe_bounds(placement, bounds)
-            if placement.box != before:
-                notes.append(
-                    f"'{placement.layer.name}' se ajustó al área segura del formato."
-                )
+    if not layout.get("keep_all_relative"):
+        bounds = _safe_bounds(canvas_w, canvas_h, safe_area)
+        for placement in placements:
+            if placement.layer.category != LayerCategory.DECORATION:
+                before = placement.box
+                _constrain_to_safe_bounds(placement, bounds)
+                if placement.box != before:
+                    notes.append(
+                        f"'{placement.layer.name}' se ajustó al área segura del formato."
+                    )
     placements.sort(key=lambda p: (p.z_index, PRIORITY.get(p.layer.category, 10)))
     return placements, notes
 
@@ -1101,6 +1152,18 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     """Construye el plan completo de variantes (sin renderizar)."""
     warnings: list[str] = []
     bias = parse_instruction(getattr(request, "instruction", None))
+    # Las coordenadas explícitas pertenecen solo al campo de posición. El texto
+    # general puede decir, por ejemplo, "titular arriba" sin mover el producto.
+    bias["product_horizontal"] = None
+    bias["product_vertical"] = None
+    position_instruction = getattr(request, "product_position_instruction", None)
+    if position_instruction:
+        position_bias = parse_instruction(f"producto {position_instruction}")
+        bias["product_scale"] *= position_bias["product_scale"]
+        bias["preferred_layouts"].extend(position_bias["preferred_layouts"])
+        for key in ("product_horizontal", "product_vertical"):
+            if position_bias.get(key):
+                bias[key] = position_bias[key]
     intensity = getattr(request, "intensity", "moderate")
     preset = INTENSITY_PRESETS.get(intensity, INTENSITY_PRESETS["moderate"])
     seed = int(getattr(request, "seed", 42))

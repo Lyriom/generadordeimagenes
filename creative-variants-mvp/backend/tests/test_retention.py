@@ -3,8 +3,7 @@
 Un PSD de 100 MB deja cientos de MB entre capas, máscaras, fondos y variantes.
 Sin barrido el disco se llena y el sitio se cae, así que aquí se fija el
 contrato: el trabajo se etiqueta con la sesión del navegador, cada sesión solo
-ve el suyo, y el barrido borra por antigüedad y nunca por sesión —para que
-abrir la página no destruya la campaña que otra persona está produciendo—.
+ve el suyo y puede borrar exclusivamente sus propios proyectos al refrescar.
 """
 from __future__ import annotations
 
@@ -143,6 +142,29 @@ def test_borrar_todo_vacia_el_disco(client: TestClient, artwork_png: bytes):
     assert body["removed_count"] == 2
     assert body["disk_usage_mb"] == 0.0
     assert client.get("/projects").json() == []
+
+
+def test_refrescar_borra_solo_la_sesion_actual(
+    client: TestClient, artwork_png: bytes
+):
+    _wipe(client)
+    _create(client, artwork_png, "De Ana 1", session="ana")
+    _create(client, artwork_png, "De Ana 2", session="ana")
+    beto = _create(client, artwork_png, "De Beto", session="beto")
+
+    response = client.delete("/projects/session", headers={"X-Session-Id": "ana"})
+    assert response.status_code == 200
+    assert response.json()["removed_count"] == 2
+    assert client.get("/projects", params={"session": "ana"}).json() == []
+    assert [
+        item["project_id"]
+        for item in client.get("/projects", params={"session": "beto"}).json()
+    ] == [beto["project_id"]]
+
+
+def test_borrar_sesion_exige_identidad(client: TestClient):
+    response = client.delete("/projects/session")
+    assert response.status_code == 400
 
 
 def test_purge_informa_del_disco_ocupado(client: TestClient, artwork_png: bytes):

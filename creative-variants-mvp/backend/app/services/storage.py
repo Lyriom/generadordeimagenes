@@ -121,6 +121,20 @@ def delete_project(project_id: str) -> bool:
     return not base.exists()
 
 
+def delete_session_projects(session_id: str) -> list[str]:
+    """Borra solamente los proyectos pertenecientes a una sesión del navegador."""
+    session = (session_id or "").strip()
+    if not session:
+        return []
+    removed: list[str] = []
+    for project in list_projects():
+        if project.meta.get("session_id") != session:
+            continue
+        if delete_project(project.project_id):
+            removed.append(project.project_id)
+    return removed
+
+
 def _last_touched(entry: Path) -> float:
     """Momento de la última escritura del proyecto.
 
