@@ -581,6 +581,141 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 }
 .step-footer .notice { margin: 0; }
 
+/* ------------------------------------------------ revisión de capas (paso 2) */
+
+/* Fichas de KV: se ve de un golpe cuál se revisa y cuáles faltan. */
+.kv-switch {
+  display: flex;
+  gap: 8px;
+  padding-bottom: 6px;
+  overflow-x: auto;
+}
+.kv-chip {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+  width: 268px;
+  padding: 8px 10px;
+  text-align: left;
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.kv-chip:hover { border-color: var(--line-strong); background: var(--surface-3); }
+.kv-chip.is-current {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 2px var(--accent-ring);
+}
+.kv-chip img {
+  flex: none;
+  width: 42px;
+  height: 42px;
+  object-fit: contain;
+  border-radius: 7px;
+  background: var(--surface-3);
+}
+.kv-chip-copy { display: grid; gap: 2px; min-width: 0; }
+/* El nombre se parte en dos líneas en vez de cortarse: lo que distingue un KV
+   de otro va al final ("· 01 Estatico NOT 1x1"), justo lo que se perdía. */
+.kv-chip-copy strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  font-size: var(--fs-2xs);
+  line-height: 1.25;
+}
+.kv-chip-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+.kv-chip.is-done .kv-chip-copy small { color: var(--success); }
+.kv-chip-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-left: auto;
+  border-radius: 50%;
+  color: var(--fg-muted);
+  background: var(--surface-3);
+  font-size: 11px;
+  font-weight: 800;
+  font-style: normal;
+}
+.kv-chip.is-done .kv-chip-mark { color: #fff; background: var(--success); }
+.kv-chip.is-current .kv-chip-mark { color: var(--accent-fg); background: var(--accent); }
+
+/* Una fila por capa, con su miniatura: no se puede clasificar lo que no se ve.
+   Los nombres que trae un PSD ("Vector Smart Object copy 7") no dicen nada. */
+/* Mínimo generoso a propósito: las etiquetas de función son largas
+   ("Producto original · eliminar y reemplazar") y con columnas estrechas el
+   desplegable las cortaba, que es tanto como no poder leer qué elegiste. */
+.role-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(430px, 1fr));
+  gap: 10px;
+}
+.role-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  grid-template-areas: "thumb copy" "thumb select";
+  gap: 4px 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.role-thumb {
+  grid-area: thumb;
+  align-self: center;
+  width: 64px;
+  height: 64px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  /* Tablero de ajedrez: si no, un PNG con transparencia parece vacío. */
+  background:
+    conic-gradient(var(--surface-3) 25%, var(--surface) 0 50%,
+      var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 12px 12px;
+}
+.role-thumb.is-text {
+  display: grid;
+  place-items: center;
+  padding: 4px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.15;
+  text-align: center;
+  word-break: break-word;
+}
+.role-copy { grid-area: copy; min-width: 0; align-self: end; }
+.role-copy strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.role-copy small { color: var(--fg-muted); font-size: var(--fs-2xs); }
+.role-row select { grid-area: select; align-self: start; min-height: 38px; }
+
+@media (max-width: 820px) {
+  .role-list { grid-template-columns: 1fr; }
+  .kv-chip { width: 190px; }
+}
+
 /* --------------------------------------------------- trabajos guardados */
 
 .saved-list {

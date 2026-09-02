@@ -1015,8 +1015,10 @@ async function renderLayers(): Promise<void> {
       "Define qué se elimina y qué debe conservarse exactamente. Esto evita que una prenda, un sello o un copy mal nombrado se interpreten mal.",
     ),
     reviewNotice,
+    // Qué KV se está revisando, siempre visible y con su estado.
+    kvSwitcher(project),
     // La confirmación de roles va primero: es lo único obligatorio de este paso.
-    reviewRoles(layers),
+    reviewRoles(project, layers),
     '<div class="spacer"></div>',
     '<details class="card"><summary>Ajustes finos de la capa seleccionada · opcional</summary>',
     '<p class="muted tiny" style="margin-top:10px">Máscaras, geometría y permisos. Solo si algo salió mal en la importación.</p>',
@@ -1051,21 +1053,74 @@ function orderEditor(layers: Layer[]): string {
   return '<section class="card"><div class="card-head"><div><h2>Orden visual</h2><p>Arriba = al frente</p></div></div><div class="order-list">' + rows + "</div></section>";
 }
 
-function reviewRoles(layers: Layer[]): string {
-  const rows = [...layers].sort((a, b) => a.z_index - b.z_index).map((layer) => {
-    const current = layer.visible ? layer.category : "ignore";
+/* Selector de KV siempre visible.
+   Antes vivía dentro del acordeón "Ajustes finos · opcional", así que al
+   confirmar un KV no había forma evidente de pasar al siguiente y el paso
+   parecía roto: el botón guardaba pero el pie seguía pidiendo 7 KV más. */
+function kvSwitcher(active: Project): string {
+  const chips = state.campaign.map((project, index) => {
+    const done = layersConfirmed(project);
+    const isCurrent = project.project_id === active.project_id;
     return [
-      '<label class="field"><span>', esc(layer.name), '</span><select class="role-select" data-id="',
-      attr(layer.id), '">', optionList(ROLE_LABELS, current), "</select></label>",
+      '<button class="kv-chip', isCurrent ? " is-current" : "", done ? " is-done" : "",
+      '" data-kv="', attr(project.project_id), '" title="', attr(project.name), '">',
+      '<img src="', attr(thumbnailUrl(project.project_id, 120)), '" alt="" loading="lazy" decoding="async">',
+      '<span class="kv-chip-copy"><strong>', esc(project.name), "</strong><small>",
+      String(project.canvas.width), "×", String(project.canvas.height), " · ",
+      done ? "confirmado" : "sin confirmar", "</small></span>",
+      '<i class="kv-chip-mark" aria-hidden="true">', done ? "✓" : String(index + 1), "</i>",
+      "</button>",
     ].join("");
   }).join("");
+  const done = state.campaign.filter(layersConfirmed).length;
+  return [
+    '<section class="card" style="margin-bottom:18px"><div class="card-head"><div><h2>KV que estás revisando</h2>',
+    '<p>Cada uno se confirma por separado. Al guardar se salta al siguiente que falte.</p></div>',
+    '<span class="badge', done === state.campaign.length ? " green" : "", '">', String(done), " DE ",
+    String(state.campaign.length), "</span></div>",
+    '<div class="kv-switch">', chips, "</div></section>",
+  ].join("");
+}
+
+/** Miniatura de la capa. Sin verla no se puede decidir su función. */
+function roleThumb(project: Project, layer: Layer): string {
+  if (layer.src) {
+    return '<img class="role-thumb" src="' + attr(fileUrl(project.project_id, layer.src)) +
+      '" alt="' + attr(layer.name) + '" loading="lazy" decoding="async">';
+  }
+  // Las capas de texto del PSD no siempre traen PNG: se muestra su contenido.
+  const text = (layer.content || layer.meta?.editable_content || "").trim();
+  return '<span class="role-thumb is-text" aria-hidden="true">' +
+    (text ? esc(text.slice(0, 28)) : "◇") + "</span>";
+}
+
+function reviewRoles(project: Project, layers: Layer[]): string {
+  const rows = [...layers].sort((a, b) => b.z_index - a.z_index).map((layer) => {
+    const current = layer.visible ? layer.category : "ignore";
+    return [
+      '<div class="role-row">', roleThumb(project, layer),
+      '<div class="role-copy"><strong>', esc(layer.name), "</strong><small>",
+      esc(CATEGORY_LABELS[layer.category] || layer.category), " · ",
+      String(layer.width), "×", String(layer.height), layer.visible ? "" : " · oculta en el PSD",
+      "</small></div>",
+      '<select class="role-select" data-id="', attr(layer.id), '" aria-label="Función de ',
+      attr(layer.name), '">', optionList(ROLE_LABELS, current), "</select></div>",
+    ].join("");
+  }).join("");
+  const others = state.campaign.length - 1;
   return [
     '<section class="card elevated"><div class="card-head"><div><h2>Función de cada capa</h2>',
-    '<p>Marca qué se elimina, qué se conserva obligatoriamente y qué no se usa</p></div>',
+    '<p>Mira la miniatura y marca qué se elimina, qué se conserva y qué no se usa</p></div>',
     '<span class="badge">', String(layers.length), ' CAPAS</span></div>',
-    '<div class="form-grid">', rows, '</div>',
-    '<button class="button large full" id="confirm-roles" style="margin-top:18px">',
-    'Guardar y confirmar estas capas</button></section>',
+    '<div class="role-list">', rows, '</div>',
+    '<div class="button-row" style="margin-top:18px">',
+    '<button class="button large" id="confirm-roles" style="flex:1;min-width:260px">',
+    'Guardar y confirmar este KV</button>',
+    others > 0
+      ? '<button class="ghost-button large" id="apply-to-all" title="Copia estas mismas funciones a las capas con el mismo nombre en los demás KV">' +
+        "Aplicar a los otros " + String(others) + " KV</button>"
+      : "",
+    "</div></section>",
   ].join("");
 }
 
@@ -1141,32 +1196,121 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
       }
     });
   });
-  query("#confirm-roles")?.addEventListener("click", async () => {
-    const updates = queryAll<HTMLSelectElement>(".role-select").map((selectBox) => {
-      const role = selectBox.value;
-      const ignored = role === "ignore";
-      return {
-        id: selectBox.dataset.id,
-        category: ignored ? "decoration" : role,
-        visible: !ignored && role !== "background",
-        locked: MANDATORY.has(role),
-        replaceable: role === "product",
-        preserve_aspect_ratio: true,
-      };
+  // Cambiar de KV desde las fichas de arriba.
+  queryAll<HTMLButtonElement>(".kv-chip").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.activeId = button.dataset.kv || null;
+      state.selectedLayerId = null;
+      saveSession();
+      await renderLayers();
+      window.scrollTo({ top: 0, behavior: "smooth" });
     });
+  });
+
+  query("#confirm-roles")?.addEventListener("click", async () => {
     busy("Guardando revisión", "Actualizando funciones de las capas…", 35);
     try {
-      await put("/projects/" + project.project_id + "/layers", { updates, delete: [] });
+      await put("/projects/" + project.project_id + "/layers", {
+        updates: readRoleSelections(),
+        delete: [],
+      });
       await refreshProject(project.project_id);
-      toast("Capas confirmadas.", "success");
+
+      // Se salta al siguiente KV sin confirmar, como hacía el flujo anterior:
+      // guardar y quedarse en el mismo KV era lo que parecía "no vale".
+      const next = state.campaign.find(
+        (item) => item.project_id !== project.project_id && !layersConfirmed(item),
+      );
+      if (next) {
+        state.activeId = next.project_id;
+        state.selectedLayerId = null;
+        saveSession();
+        toast("Capas confirmadas. Sigue con " + next.name + ".", "success");
+      } else {
+        toast("Todos los KV de la campaña quedaron confirmados.", "success");
+      }
       await renderLayers();
+      window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (error) {
       toast(errorMessage(error), "error");
     } finally {
       idle();
     }
   });
+
+  query("#apply-to-all")?.addEventListener("click", async () => {
+    // Las piezas de un mismo PSD repiten la estructura de capas, así que
+    // revisar 8 KV a mano son 80 desplegables. Aquí se copia por nombre.
+    const selections = readRoleSelections();
+    const roleByName = new Map<string, Record<string, any>>();
+    layers.forEach((layer) => {
+      const match = selections.find((item) => item.id === layer.id);
+      if (match) roleByName.set(layer.name, match);
+    });
+
+    const others = state.campaign.filter((item) => item.project_id !== project.project_id);
+    busy("Copiando la revisión", "Aplicando las mismas funciones al resto…", 5);
+    let applied = 0;
+    const unmatched: string[] = [];
+    try {
+      // El KV actual también se guarda: si no, quedaría como el único sin confirmar.
+      await put("/projects/" + project.project_id + "/layers", { updates: selections, delete: [] });
+      await refreshProject(project.project_id);
+
+      for (let index = 0; index < others.length; index += 1) {
+        const target = others[index];
+        busyProgress(8 + Math.round((index / Math.max(1, others.length)) * 88), target.name);
+        const updates = target.layers
+          .filter((layer) => layer.category !== "background" && roleByName.has(layer.name))
+          .map((layer) => ({ ...roleByName.get(layer.name)!, id: layer.id }));
+        const missing = target.layers.filter(
+          (layer) => layer.category !== "background" && !roleByName.has(layer.name),
+        );
+        if (missing.length) unmatched.push(target.name);
+        if (!updates.length) continue;
+        await put("/projects/" + target.project_id + "/layers", { updates, delete: [] });
+        await refreshProject(target.project_id);
+        applied += 1;
+      }
+      toast("Revisión copiada a " + String(applied) + " KV.", "success");
+      if (unmatched.length) {
+        toast(
+          "Revisa a mano las capas con otro nombre en: " + unmatched.join(", ") + ".",
+          "info",
+        );
+      }
+      const pendiente = state.campaign.find((item) => !layersConfirmed(item));
+      if (pendiente) {
+        state.activeId = pendiente.project_id;
+        state.selectedLayerId = null;
+        saveSession();
+      }
+      await renderLayers();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      idle();
+    }
+  });
+
   query("#new-layer")?.addEventListener("click", () => showNewLayer(project));
+}
+
+/** Lo que el usuario marcó en los desplegables de función. */
+function readRoleSelections(): Array<Record<string, any>> {
+  return queryAll<HTMLSelectElement>(".role-select").map((selectBox) => {
+    const role = selectBox.value;
+    const ignored = role === "ignore";
+    return {
+      id: selectBox.dataset.id,
+      category: ignored ? "decoration" : role,
+      visible: !ignored && role !== "background",
+      locked: MANDATORY.has(role),
+      replaceable: role === "product",
+      preserve_aspect_ratio: true,
+    };
+  });
 }
 
 async function runProjectAction(
