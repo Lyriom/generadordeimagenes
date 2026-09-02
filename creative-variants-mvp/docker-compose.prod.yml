@@ -4,8 +4,7 @@
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 #
 # Solo el proxy publica puerto (8014). Backend, worker y Redis quedan en la red
-# interna: la API no se expone y el navegador nunca habla con ella —Streamlit la
-# consulta desde el servidor—.
+# interna. Astro/Nginx sirve la interfaz y enruta /api dentro de la red Docker.
 services:
   proxy:
     image: caddy:2-alpine
@@ -44,12 +43,6 @@ services:
 
   frontend:
     ports: !override []
-    environment:
-      # Detrás del proxy, Streamlit necesita saber que no sirve en la raíz de un
-      # dominio propio; sin esto el websocket se cae al recargar.
-      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "false"
-      STREAMLIT_SERVER_ENABLE_CORS: "false"
-      BACKEND_URL: http://backend:8000
 
 volumes:
   caddy-data:

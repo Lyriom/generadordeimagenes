@@ -174,8 +174,8 @@ location ~ ^/ {
 
 Tres cosas de ahí no son opcionales:
 
-- **`Upgrade` y `Connection`**: Streamlit habla por websocket. Sin ellas la
-  página carga y se queda colgada al primer clic.
+- **`Upgrade` y `Connection`**: ya no son necesarios para Astro, pero pueden
+  conservarse sin efecto para mantener compatible el bloque del proxy.
 - **`client_max_body_size 300M`**: los PSD llegan a 200 MB y el límite por
   defecto los corta. Va **dentro** del `location`: Plesk ya escribe esa misma
   directiva en el vhost, y declararla otra vez arriba hace que nginx rechace

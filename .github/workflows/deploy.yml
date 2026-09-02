@@ -43,11 +43,14 @@ jobs:
             python -m pytest tests/ -p no:cacheprovider --tb=short
 
       - name: Construir la imagen de la interfaz y comprobar que carga
-        # No hay backend al que llamar; solo se verifica que el módulo importa,
-        # que caza errores de sintaxis antes de tumbar el sitio.
+        # El Dockerfile ejecuta astro check y astro build. Después verificamos
+        # que la imagen final de Nginx contiene el HTML y sus assets compilados.
         run: |
           docker build -t cv-frontend-ci ./frontend
-          docker run --rm cv-frontend-ci python -c "import api_client, app; print('la interfaz carga')"
+          docker run --rm --entrypoint sh cv-frontend-ci -ec '
+            test -s /usr/share/nginx/html/index.html
+            find /usr/share/nginx/html/_assets -type f -print -quit | grep -q .
+          '
 
       - name: Validar compose y Caddyfile
         # Un error de YAML aquí deja el sitio caído sin que ninguna prueba lo avise.

@@ -1,4 +1,4 @@
-# Puerta de entrada única. Detrás quedan Streamlit, la API y Redis, ninguno
+# Puerta de entrada única. Detrás quedan Astro/Nginx, la API y Redis, ninguno
 # publicado: al exterior solo se llega por aquí, y solo con contraseña.
 #
 # La dirección se elige con CV_SITE_ADDRESS en el .env:
@@ -20,15 +20,13 @@
 	# 	{$CV_USER:equipo} {$CV_PASSWORD_HASH}
 	# }
 
-	# El HTML nunca debe quedar guardado: contiene los nombres hash de los chunks
-	# JavaScript de la versión de Streamlit que está activa en ese momento.
+	# El HTML nunca debe quedar guardado: referencia los assets con hash de la
+	# versión de Astro que está activa en ese momento.
 	@index path / /index.html
 	header @index Cache-Control "no-store, max-age=0"
 
-	# Streamlit habla por websocket; Caddy lo pasa sin configurar nada. Durante
-	# un deploy Compose reemplaza el frontend durante unos segundos. Los GET de
-	# HTML/chunks esperan y reintentan, en vez de dejar un error permanente en la
-	# pestaña que el usuario ya tenía abierta.
+	# Durante un deploy Compose reemplaza el frontend durante unos segundos. Los
+	# GET esperan y reintentan para que una pestaña abierta no vea un 502.
 	reverse_proxy frontend:8501 {
 		lb_try_duration 30s
 		lb_try_interval 250ms

@@ -1,0 +1,89 @@
+---
+import "../styles/global.css";
+---
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0d0e16" />
+    <meta
+      name="description"
+      content="Generador de variantes creativas multiformato desde key visuals."
+    />
+    <link rel="icon" href="/favicon.svg" />
+    <title>Misiva · Creative Studio</title>
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <div id="app-shell">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="Creative Studio">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span><strong>Creative</strong><small>STUDIO</small></span>
+        </a>
+
+        <nav id="main-nav" aria-label="Secciones">
+          <button class="nav-item is-active" data-view="campaign">
+            <span class="nav-icon">⌂</span><span>Campaña</span>
+          </button>
+          <button class="nav-item" data-view="layers">
+            <span class="nav-icon">◫</span><span>Capas y KV</span>
+          </button>
+          <button class="nav-item" data-view="generate">
+            <span class="nav-icon">✦</span><span>Generar</span>
+          </button>
+          <button class="nav-item" data-view="results">
+            <span class="nav-icon">▦</span><span>Resultados</span>
+          </button>
+        </nav>
+
+        <div class="sidebar-project" id="sidebar-project">
+          <span class="eyebrow">SIN CAMPAÑA</span>
+          <strong>Carga tu primer KV</strong>
+          <small>PSD, PSB, PNG o JPG</small>
+        </div>
+
+        <div class="engine-status" id="engine-status">
+          <span class="status-dot"></span>
+          <div><strong>Conectando motor</strong><small>Comprobando servicios…</small></div>
+        </div>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <button id="mobile-menu" class="icon-button mobile-only" aria-label="Abrir menú">☰</button>
+          <div class="crumbs"><span>Misiva</span><b>/</b><strong id="view-name">Campaña</strong></div>
+          <div class="top-actions">
+            <button class="ghost-button" id="refresh-button">↻ <span>Actualizar</span></button>
+            <span class="live-pill"><i></i> Motor conectado</span>
+          </div>
+        </header>
+
+        <section id="app-content" class="content" aria-live="polite">
+          <div class="loading-state">
+            <div class="loader"></div>
+            <strong>Preparando Creative Studio</strong>
+            <span>Conectando con el motor de variantes</span>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="toast-region" class="toast-region" aria-live="assertive"></div>
+    <div id="busy-overlay" class="busy-overlay" hidden>
+      <div class="busy-card">
+        <div class="loader large"></div>
+        <strong id="busy-title">Procesando…</strong>
+        <span id="busy-detail">Esto puede tomar unos minutos.</span>
+        <div class="progress-track"><i id="busy-progress"></i></div>
+      </div>
+    </div>
+
+    <script>
+      import { mountApp } from "../scripts/app";
+      mountApp();
+    </script>
+  </body>
+</html>

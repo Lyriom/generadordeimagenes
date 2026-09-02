@@ -7,7 +7,7 @@ para Illustrator. JPG/PNG aplanados se mantienen
 como flujo alternativo para ajustes finos.
 
 - **Backend:** FastAPI (toda la lógica de negocio) · Python 3.11
-- **Frontend:** Streamlit en 5 pasos (solo presentación, consume la API)
+- **Frontend:** Astro + TypeScript, servido por Nginx (solo presentación, consume la API)
 - **Procesamiento:** Pillow + OpenCV + NumPy
 - **Funciona sin GPU y sin claves externas.** OpenAI Images, SAM, PaddleOCR, FLUX y Adobe Firefly son
   proveedores **opcionales** que degradan a alternativas locales.
@@ -42,13 +42,13 @@ docker compose up --build
 
 | Servicio | URL | Notas |
 |---|---|---|
-| Frontend Streamlit | http://localhost:8501 | Interfaz en 5 pasos |
+| Frontend Astro | http://localhost:8501 | Interfaz visual en 4 secciones |
 | Backend FastAPI | http://localhost:8000 | |
 | Swagger / OpenAPI | http://localhost:8000/docs | Documentación automática |
 | Health check | http://localhost:8000/health | Estado de los proveedores |
 
-Los datos persisten en `./data` (montado como volumen). El frontend usa
-`BACKEND_URL=http://backend:8000` dentro de Docker.
+Los datos persisten en `./data` (montado como volumen). Nginx enruta `/api/` al
+backend dentro de la red Docker; el navegador mantiene un único origen.
 
 Detener y limpiar:
 
@@ -216,17 +216,19 @@ DATA_DIR=../data uvicorn app.main:app --reload --port 8000
 
 # Frontend (otra terminal)
 cd frontend
-python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-BACKEND_URL=http://localhost:8000 streamlit run app.py
+npm ci
+npm run dev
 ```
+
+Astro enruta `/api` hacia `http://localhost:8000` durante el desarrollo; con
+Docker Compose, esa misma ruta la resuelve Nginx dentro de la red interna.
 
 ---
 
 ## 4. Flujo de trabajo en la interfaz
 
-La interfaz tiene **dos pantallas**: *Generar* (la que se usa siempre) y *Ajustes finos*
-(solo si algo salió mal).
+La interfaz tiene **cuatro secciones**: *Campaña*, *Capas y KV*, *Generar* y
+*Resultados*. Todas consumen los mismos contratos de FastAPI.
 
 ### Pantalla “Generar” — cuatro decisiones
 
@@ -281,9 +283,8 @@ no pagar el coste de renderizar las tres):
 - **Control total.** La configuración completa de generación: cantidad, semilla, formatos,
   intensidad, familias de layout y la matriz de permisos por capa.
 
-> No se usa una librería de canvas para dibujar a mano alzada: las que existen para
-> Streamlit rompen con las versiones actuales. La corrección se hace con rectángulos,
-> pincel numérico y re-segmentación asistida, que funciona siempre.
+> El pincel de máscara se implementa con Canvas nativo del navegador; también se
+> conservan la edición numérica y la re-segmentación asistida.
 
 ---
 
@@ -647,9 +648,9 @@ fiel** (posiciones reproducidas, solo en formatos de proporción parecida, fondo
 permiso de estirado restringido a la escenografía y sin penalizaciones de composición). Todas usan imágenes sintéticas
 creadas en el momento.
 
-La interfaz se prueba aparte con `streamlit.testing.v1.AppTest`: las dos pantallas se
-renderizan sin excepciones y el botón *Generar variantes* se pulsa de verdad contra el
-backend (9 variantes y 10 botones de descarga en pantalla).
+La interfaz se valida con `astro check` y `astro build` dentro de su imagen Docker.
+La integración HTTP se comprueba a través del proxy `/api`, además de la suite completa
+del backend.
 
 ---
 

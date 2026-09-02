@@ -33,15 +33,13 @@ services:
       context: ./frontend
     image: creative-variants-frontend:latest
     container_name: cv-frontend
-    environment:
-      BACKEND_URL: http://backend:8000
     ports:
       - "8501:8501"
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8501/_stcore/health"]
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:8501/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5
