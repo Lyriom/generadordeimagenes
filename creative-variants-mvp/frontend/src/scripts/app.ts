@@ -61,6 +61,18 @@ function productsReady(): boolean {
   return selectedProductFiles().length > 0 || validGroups().length > 0;
 }
 
+/** KV sin capa Producto: no se sabe qué pieza retirar para poner la nueva. */
+function missingProductTargets(): Project[] {
+  return state.campaign.filter((project) => !productTarget(project));
+}
+
+/** Nombres para un aviso, recortados para que no ocupen media pantalla. */
+function nameList(projects: Project[], max = 3): string {
+  const names = projects.slice(0, max).map((item) => item.name);
+  const rest = projects.length - names.length;
+  return names.join(", ") + (rest > 0 ? " y " + String(rest) + " más" : "");
+}
+
 function stepState(): StepState {
   const hasCampaign = state.campaign.length > 0;
   const reviewed = hasCampaign && state.campaign.every(layersConfirmed);
@@ -87,7 +99,13 @@ function stepState(): StepState {
         ? "Falta confirmar las capas de " + String(pending.length) + " KV."
         : !hasProducts
           ? "Elige al menos un producto o una combinación."
-          : null,
+          // Sin capa Producto no hay nada que reemplazar. Antes esto no
+          // bloqueaba el paso y solo se descubría al pulsar Generar.
+          : missingProductTargets().length
+            ? "Falta identificar el producto en " +
+              String(missingProductTargets().length) + " KV: " +
+              nameList(missingProductTargets()) + "."
+            : null,
     results: null,
   };
   const next = STEP_ORDER.find((view) => !done[view]) || "generate";
@@ -1113,14 +1131,21 @@ function reviewRoles(project: Project, layers: Layer[]): string {
     '<p>Mira la miniatura y marca qué se elimina, qué se conserva y qué no se usa</p></div>',
     '<span class="badge">', String(layers.length), ' CAPAS</span></div>',
     '<div class="role-list">', rows, '</div>',
-    '<div class="button-row" style="margin-top:18px">',
+    // Aviso en vivo: confirmar un KV sin capa Producto era posible, y el
+    // problema no aparecía hasta el último clic de Generar, tres pasos después.
+    '<div id="role-status" style="margin-top:16px"></div>',
+    '<div class="button-row" style="margin-top:14px">',
     '<button class="button large" id="confirm-roles" style="flex:1;min-width:260px">',
     'Guardar y confirmar este KV</button>',
     others > 0
-      ? '<button class="ghost-button large" id="apply-to-all" title="Copia estas mismas funciones a las capas con el mismo nombre en los demás KV">' +
-        "Aplicar a los otros " + String(others) + " KV</button>"
+      ? '<button class="ghost-button large" id="apply-to-all" title="Copia logo, legales, CTA y decoración a los demás KV. El producto se marca en cada uno, porque en cada pieza tiene un nombre distinto.">' +
+        "Copiar logo y textos a los otros " + String(others) + " KV</button>"
       : "",
-    "</div></section>",
+    "</div>",
+    others > 0
+      ? '<p class="muted tiny" style="margin-top:10px">“Copiar” lleva logo, legales, CTA y decoración al resto. El producto se marca KV por KV: en cada pieza del PSD tiene otro nombre, y copiarlo marcaría la capa equivocada.</p>'
+      : "",
+    "</section>",
   ].join("");
 }
 
@@ -1196,6 +1221,55 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
       }
     });
   });
+  /* Cuántas capas van marcadas como Producto en lo que hay en pantalla.
+     Es el requisito que después bloquea la generación, así que se dice aquí,
+     con las capas delante, y no al final del flujo. */
+  const refreshRoleStatus = () => {
+    const host = query<HTMLElement>("#role-status");
+    if (!host) return;
+    const marcadas = queryAll<HTMLSelectElement>(".role-select")
+      .filter((item) => item.value === "product").length;
+    host.innerHTML = marcadas
+      ? '<div class="notice success">' + String(marcadas) +
+        " capa(s) marcada(s) como <strong>Producto</strong>: son las que se retirarán para poner el producto nuevo.</div>"
+      : [
+          '<div class="notice error"><strong>Ninguna capa está marcada como Producto.</strong> ',
+          "Este KV no podrá generar artes: el sistema no sabría qué pieza retirar. ",
+          "Marca la capa del producto como <em>“Producto original · eliminar y reemplazar”</em>, ",
+          "o deja que la IA la detecte.",
+          '<div class="button-row" style="margin-top:10px">',
+          '<button class="ghost-button" id="detect-here">Detectar el producto con IA en este KV</button>',
+          "</div></div>",
+        ].join("");
+
+    query("#detect-here")?.addEventListener("click", async () => {
+      busy("Detectando producto", "Separando el sujeto principal del fondo…", 15);
+      try {
+        const result = await post<any>(
+          "/projects/" + project.project_id + "/layers/detect-product",
+          { force: false },
+        );
+        await refreshProject(project.project_id);
+        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+        toast(
+          result.detected
+            ? "Producto detectado. Revisa que la capa nueva sea la correcta."
+            : "No se pudo detectar. Marca la capa del producto a mano.",
+          result.detected ? "success" : "error",
+        );
+        await renderLayers();
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        idle();
+      }
+    });
+  };
+  refreshRoleStatus();
+  queryAll<HTMLSelectElement>(".role-select").forEach((selectBox) => {
+    selectBox.addEventListener("change", refreshRoleStatus);
+  });
+
   // Cambiar de KV desde las fichas de arriba.
   queryAll<HTMLButtonElement>(".kv-chip").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1208,10 +1282,21 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
   });
 
   query("#confirm-roles")?.addEventListener("click", async () => {
+    const selections = readRoleSelections();
+    // Guardar sin producto deja el KV inservible para generar. Se avisa aquí
+    // y no tres pasos después, cuando ya no se recuerda qué KV era.
+    if (!selections.some((item) => item.category === "product")) {
+      const seguir = window.confirm(
+        "«" + project.name + "» no tiene ninguna capa marcada como Producto.\n\n" +
+        "Así no podrá generar artes: el sistema no sabe qué pieza retirar.\n\n" +
+        "Pulsa Cancelar para marcarla ahora, o Aceptar para guardar de todas formas.",
+      );
+      if (!seguir) return;
+    }
     busy("Guardando revisión", "Actualizando funciones de las capas…", 35);
     try {
       await put("/projects/" + project.project_id + "/layers", {
-        updates: readRoleSelections(),
+        updates: selections,
         delete: [],
       });
       await refreshProject(project.project_id);
@@ -1239,19 +1324,24 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
   });
 
   query("#apply-to-all")?.addEventListener("click", async () => {
-    // Las piezas de un mismo PSD repiten la estructura de capas, así que
-    // revisar 8 KV a mano son 80 desplegables. Aquí se copia por nombre.
+    /* Las piezas de un mismo PSD repiten logo, legal, CTA y decoración, así que
+       copiarlas ahorra decenas de desplegables.
+
+       El producto NO se copia, a propósito. En un PSD real cada pieza nombra su
+       producto distinto ("copy 7", "copy 8", "copy 3 2"…), mientras los nombres
+       genéricos ("Vector Smart Object 2") sí se repiten apuntando a piezas que
+       no son el producto. Copiar ese rol marcaría como producto una capa
+       cualquiera, y el arte saldría mal sin avisar. Se marca KV por KV. */
     const selections = readRoleSelections();
     const roleByName = new Map<string, Record<string, any>>();
     layers.forEach((layer) => {
       const match = selections.find((item) => item.id === layer.id);
-      if (match) roleByName.set(layer.name, match);
+      if (match && match.category !== "product") roleByName.set(layer.name, match);
     });
 
     const others = state.campaign.filter((item) => item.project_id !== project.project_id);
-    busy("Copiando la revisión", "Aplicando las mismas funciones al resto…", 5);
+    busy("Copiando la revisión", "Aplicando logo, legales, CTA y decoración…", 5);
     let applied = 0;
-    const unmatched: string[] = [];
     try {
       // El KV actual también se guarda: si no, quedaría como el único sin confirmar.
       await put("/projects/" + project.project_id + "/layers", { updates: selections, delete: [] });
@@ -1261,27 +1351,35 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
         const target = others[index];
         busyProgress(8 + Math.round((index / Math.max(1, others.length)) * 88), target.name);
         const updates = target.layers
-          .filter((layer) => layer.category !== "background" && roleByName.has(layer.name))
-          .map((layer) => ({ ...roleByName.get(layer.name)!, id: layer.id }));
-        const missing = target.layers.filter(
-          (layer) => layer.category !== "background" && !roleByName.has(layer.name),
-        );
-        if (missing.length) unmatched.push(target.name);
+          .filter((layer) => layer.category !== "background")
+          .map((layer) => {
+            const copied = matchRole(roleByName, layer.name);
+            if (copied) return { ...copied, id: layer.id };
+            // Sin coincidencia se conserva lo que ya tenía, pero se confirma:
+            // así el KV no queda a medias bloqueando el paso siguiente.
+            return {
+              id: layer.id,
+              category: layer.category,
+              visible: layer.visible,
+              locked: MANDATORY.has(layer.category),
+              replaceable: layer.category === "product",
+              preserve_aspect_ratio: true,
+            };
+          });
         if (!updates.length) continue;
         await put("/projects/" + target.project_id + "/layers", { updates, delete: [] });
         await refreshProject(target.project_id);
         applied += 1;
       }
-      toast("Revisión copiada a " + String(applied) + " KV.", "success");
-      if (unmatched.length) {
+
+      toast("Logo, legales, CTA y decoración copiados a " + String(applied) + " KV.", "success");
+      const sinProducto = missingProductTargets();
+      if (sinProducto.length) {
         toast(
-          "Revisa a mano las capas con otro nombre en: " + unmatched.join(", ") + ".",
+          "El producto se marca en cada KV: falta en " + nameList(sinProducto, 4) + ".",
           "info",
         );
-      }
-      const pendiente = state.campaign.find((item) => !layersConfirmed(item));
-      if (pendiente) {
-        state.activeId = pendiente.project_id;
+        state.activeId = sinProducto[0].project_id;
         state.selectedLayerId = null;
         saveSession();
       }
@@ -1295,6 +1393,30 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
   });
 
   query("#new-layer")?.addEventListener("click", () => showNewLayer(project));
+}
+
+/** Nombre sin el sufijo de duplicado que añade Photoshop.
+ *  Un PSD trae "GRATIS" en una pieza y "GRATIS copy" en otra: son la misma
+ *  capa y sin esto no se reconocían. No se tocan los números sueltos, porque
+ *  "Vector Smart Object 2" y "…3" sí son capas distintas. */
+function normalizeLayerName(name: string): string {
+  return name.trim().replace(/(\s+cop(y|ia))+(\s+\d+)*$/i, "").trim();
+}
+
+/** Busca el rol por nombre exacto y, si no, por nombre normalizado. */
+function matchRole(
+  roleByName: Map<string, Record<string, any>>,
+  name: string,
+): Record<string, any> | null {
+  const exact = roleByName.get(name);
+  if (exact) return exact;
+  const target = normalizeLayerName(name).toLowerCase();
+  if (!target) return null;
+  // Solo si es inequívoco: dos capas distintas no pueden reclamar el mismo rol.
+  const candidates = Array.from(roleByName.entries()).filter(
+    ([key]) => normalizeLayerName(key).toLowerCase() === target,
+  );
+  return candidates.length === 1 ? candidates[0][1] : null;
 }
 
 /** Lo que el usuario marcó en los desplegables de función. */
@@ -1646,8 +1768,28 @@ async function renderProducts(): Promise<void> {
   const individuals = selectedProductFiles().length;
 
   const targetsNotice = missingTargets.length
-    ? '<div class="notice warning" style="margin-bottom:16px"><strong>Falta identificar el producto en ' + String(missingTargets.length) + ' KV.</strong> El sistema necesita saber qué pieza retirar para poner la nueva.<div class="button-row" style="margin-top:10px">' +
-      missingTargets.map((project) => '<button class="ghost-button detect-product" data-project="' + attr(project.project_id) + '">Detectar en ' + esc(project.name) + "</button>").join("") + "</div></div>"
+    ? [
+        '<div class="notice error" style="margin-bottom:16px">',
+        "<strong>Falta identificar el producto en ", String(missingTargets.length), " de ",
+        String(state.campaign.length), " KV.</strong> Sin una capa marcada como <em>Producto</em> ",
+        "el sistema no sabe qué pieza retirar, y esos KV no pueden generar.",
+        '<div style="margin:10px 0">',
+        missingTargets.map((project) => '<span class="badge red" style="margin:0 6px 6px 0">' + esc(project.name) + "</span>").join(""),
+        "</div>",
+        '<p class="tiny" style="margin-bottom:10px">Dos formas de arreglarlo: detectarlo con IA aquí, o volver al ',
+        '<strong>paso 2</strong> y marcar la capa correcta como “Producto original · eliminar y reemplazar”.</p>',
+        '<div class="button-row">',
+        '<button class="button" id="detect-all-products">Detectar producto en los ',
+        String(missingTargets.length), " KV que faltan</button>",
+        '<button class="ghost-button" id="back-to-layers">Ir al paso 2 a marcarlo</button>',
+        "</div>",
+        missingTargets.length > 1
+          ? '<details style="margin-top:12px"><summary>Detectar en uno solo</summary><div class="button-row" style="margin-top:10px">' +
+            missingTargets.map((project) => '<button class="ghost-button detect-product" data-project="' + attr(project.project_id) + '">' + esc(project.name) + "</button>").join("") +
+            "</div></details>"
+          : "",
+        "</div>",
+      ].join("")
     : '<div class="notice success" style="margin-bottom:16px">Los ' + String(state.campaign.length) + ' KV tienen su producto identificado: se retirará el original y entrará el nuevo.</div>';
 
   content().innerHTML = [
@@ -1750,6 +1892,7 @@ function bindProductStep(): void {
         await refreshProject(id);
         (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
         if (result.detected) toast("Producto detectado y listo para reemplazar.", "success");
+        else toast("No se pudo detectar el producto. Márcalo a mano en el paso 2.", "error");
         await renderProducts();
       } catch (error) {
         toast(errorMessage(error), "error");
@@ -1757,6 +1900,47 @@ function bindProductStep(): void {
         idle();
       }
     });
+  });
+
+  query("#back-to-layers")?.addEventListener("click", () => navigate("layers"));
+
+  query("#detect-all-products")?.addEventListener("click", async () => {
+    // Uno por uno pero en una sola acción: son varias piezas del mismo PSD y
+    // pedirlo KV a KV era la parte tediosa.
+    const pendientes = missingProductTargets();
+    busy("Detectando el producto", "Separando el sujeto principal del fondo…", 4);
+    const failed: string[] = [];
+    try {
+      for (let index = 0; index < pendientes.length; index += 1) {
+        const project = pendientes[index];
+        busyProgress(
+          4 + Math.round((index / Math.max(1, pendientes.length)) * 92),
+          project.name + " · " + String(index + 1) + " de " + String(pendientes.length),
+        );
+        try {
+          const result = await post<any>(
+            "/projects/" + project.project_id + "/layers/detect-product",
+            { force: false },
+          );
+          await refreshProject(project.project_id);
+          (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+          if (!result.detected) failed.push(project.name);
+        } catch {
+          failed.push(project.name);
+        }
+      }
+      const ok = pendientes.length - failed.length;
+      if (ok) toast("Producto detectado en " + String(ok) + " KV.", "success");
+      if (failed.length) {
+        toast(
+          "En " + failed.join(", ") + " no se pudo. Marca la capa a mano en el paso 2.",
+          "error",
+        );
+      }
+      await renderProducts();
+    } finally {
+      idle();
+    }
   });
 }
 
@@ -1931,8 +2115,16 @@ async function runCatalogGeneration(): Promise<void> {
     return;
   }
   const targets = state.campaign.map((project) => ({ project, layer: productTarget(project) }));
-  if (targets.some((item) => !item.layer)) {
-    toast("Todos los KV necesitan una capa Producto antes de generar.", "error");
+  const sinProducto = targets.filter((item) => !item.layer).map((item) => item.project);
+  if (sinProducto.length) {
+    // Se nombran los KV y se lleva al sitio donde se arregla: "todos los KV
+    // necesitan una capa Producto" no decía cuáles ni qué hacer.
+    toast(
+      "Sin capa Producto en: " + nameList(sinProducto) +
+      ". Ve al paso 3 y usa “Detectar producto”.",
+      "error",
+    );
+    await navigate("products");
     return;
   }
   const settings = generationSettings();
