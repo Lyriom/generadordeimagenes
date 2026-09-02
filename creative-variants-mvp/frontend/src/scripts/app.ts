@@ -207,10 +207,6 @@ interface State {
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
-  /* Instrucción libre sobre posición y composición. Vive en el estado porque se
-     escribe en el paso 3 y se envía al motor al generar en el paso 4. */
-  productPositionInstruction: string;
-  productArrangement: ProductGroup["arrangement"];
 }
 
 const state: State = {
@@ -231,8 +227,6 @@ const state: State = {
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
-  productPositionInstruction: "",
-  productArrangement: "auto",
 };
 
 const ARRANGEMENT_OPTIONS: Record<string, string> = {
@@ -1667,20 +1661,12 @@ function productCard(file: File): string {
   return [
     '<article class="product-card"><img src="', attr(productUrl(file)), '" alt="', attr(productName(file)), '">',
     '<strong>', esc(file.name), '</strong><label class="check"><input class="individual-product" type="checkbox" value="', attr(key), '"',
-    checked(state.individualProducts.has(key)), "> Generar por separado</label></article>",
+    checked(state.individualProducts.has(key)), "> Crear arte individual</label></article>",
   ].join("");
 }
 
 function arrangementLabel(value: string): string {
   return ({ auto: "Automática", horizontal: "En fila", vertical: "Apilados", overlap: "Superpuestos" } as Record<string, string>)[value] || value;
-}
-
-function arrangementFromInstruction(instruction: string): ProductGroup["arrangement"] {
-  const text = instruction.toLocaleLowerCase("es");
-  if (/superpuest|encim|overlap/.test(text)) return "overlap";
-  if (/apilad|vertical|uno (sobre|encima de) otro/.test(text)) return "vertical";
-  if (/en fila|horizontal|uno (al lado|junto) (del|al) otro/.test(text)) return "horizontal";
-  return "auto";
 }
 
 function groupCard(group: ProductGroup): string {
@@ -1740,7 +1726,7 @@ async function renderProducts(): Promise<void> {
     pageHead(
       "Paso 3 de 4",
       "Qué producto va en la plantilla",
-      "Sube el catálogo una sola vez. Después eliges cuáles llevan arte propio, cuáles se combinan y en qué posición.",
+      "Marca los productos que necesitan un arte individual. Si necesitas un combo, créalo una sola vez debajo.",
     ),
     targetsNotice,
     pendingReviews.length
@@ -1756,10 +1742,9 @@ async function renderProducts(): Promise<void> {
     "</section>",
 
     '<div class="spacer"></div>',
-    '<div class="grid two">',
-    '<section class="card"><div class="card-head"><div><h2>Individual o en combinación</h2><p>Puedes usar las dos cosas a la vez</p></div></div>',
-    '<div class="notice" style="margin-bottom:14px">Marcado <strong>“Generar por separado”</strong> en una tarjeta = ese producto tendrá su propio arte. Ahora mismo: <strong>',
-    String(individuals), " individual(es)</strong> y <strong>", String(validGroups().length), " combinación(es)</strong>.</div>",
+    '<section class="card"><div class="card-head"><div><h2>Combos opcionales</h2><p>Solo si varios productos deben aparecer juntos en un mismo arte</p></div></div>',
+    '<div class="notice" style="margin-bottom:14px"><strong>Resumen:</strong> ',
+    String(individuals), " producto(s) con arte individual y ", String(validGroups().length), " combo(s).</div>",
     state.products.length >= 2 ? [
       '<div class="stack"><label class="field"><span>Nombre de la combinación</span><input id="group-name" placeholder="Ej. Combo familiar"></label>',
       '<div><span class="label">Productos que van juntos</span><div class="choice-row" style="margin-top:8px">', productChoices, "</div></div>",
@@ -1769,14 +1754,6 @@ async function renderProducts(): Promise<void> {
     ].join("") : '<div class="notice">Carga al menos dos productos para poder combinarlos.</div>',
     groups ? '<div class="stack" style="margin-top:16px">' + groups + "</div>" : "",
     "</section>",
-
-    '<section class="card"><div class="card-head"><div><h2>Posición de los productos</h2><p>Descríbela con tus palabras</p></div></div>',
-    '<label class="field"><span>¿Dónde y cómo quieres el producto?</span>',
-    '<textarea id="product-position-instruction" maxlength="400" placeholder="Ej. Grande y en la parte superior derecha">',
-    esc(state.productPositionInstruction), "</textarea>",
-    '<small>Puedes indicar izquierda, derecha, arriba, abajo, centrado, tamaño, fila, apilados o superpuestos.</small></label>',
-    '<div class="notice" style="margin-top:14px">En la sustitución fiel se conserva el espacio original. Esta indicación se usa únicamente en “Ajustes finos”.</div>',
-    "</section></div>",
 
     stepFooter("products", "Elegir modelo y generar"),
   ].join("");
@@ -1804,10 +1781,6 @@ function bindProductStep(): void {
       else state.individualProducts.delete(checkBox.value);
       await renderProducts();
     });
-  });
-  query<HTMLTextAreaElement>("#product-position-instruction")?.addEventListener("input", (event) => {
-    state.productPositionInstruction = (event.currentTarget as HTMLTextAreaElement).value;
-    state.productArrangement = arrangementFromInstruction(state.productPositionInstruction);
   });
   query("#add-group")?.addEventListener("click", async () => {
     const members = queryAll<HTMLInputElement>(".group-member:checked").map((item) => item.value);
@@ -2042,16 +2015,14 @@ function generationSettings(): Record<string, any> {
     };
   }
   const generalInstruction = query<HTMLTextAreaElement>("#generation-instruction")!.value.trim();
-  const positionInstruction = state.productPositionInstruction.trim();
   return {
     count: Number(query<HTMLInputElement>("#generation-count")!.value),
     formats: state.autoFormats ? null : Array.from(state.selectedFormats),
     intensity: query<HTMLSelectElement>("#generation-intensity")!.value,
     instruction: generalInstruction || null,
-    product_position_instruction: positionInstruction || null,
+    product_position_instruction: null,
     seed: Number(query<HTMLInputElement>("#generation-seed")!.value),
-    // La disposición estructural se infiere del texto libre escrito en el paso 3.
-    product_arrangement: state.productArrangement,
+    product_arrangement: "auto",
     background_provider: query<HTMLSelectElement>("#generation-provider")!.value,
     background_model: query<HTMLSelectElement>("#generation-model")!.value || null,
     background_prompt: query<HTMLTextAreaElement>("#generation-background-prompt")!.value.trim() || null,
@@ -2107,7 +2078,7 @@ async function runCatalogGeneration(): Promise<void> {
         const file = individuals[index];
         busyProgress(Math.round(completed / Math.max(1, total) * 100), project.name + " · " + file.name);
         const replaced = await replaceProduct(project.project_id, target.id, file, {
-          hide_others: true, append: false, arrangement: state.productArrangement,
+          hide_others: true, append: false, arrangement: "auto",
         });
         (replaced.warnings || []).forEach((warning: string) => toast(warning, "info"));
         const task = await post<any>("/projects/" + project.project_id + "/auto", {
@@ -2115,7 +2086,7 @@ async function runCatalogGeneration(): Promise<void> {
           seed: settings.seed + kvIndex * 100 + index,
           replace_existing: firstBatch,
           product_label: productName(file),
-          product_arrangement: state.productArrangement,
+          product_arrangement: "auto",
           template_mode: true,
           regenerate_background: settings.regenerate_background && firstBatch,
         });
