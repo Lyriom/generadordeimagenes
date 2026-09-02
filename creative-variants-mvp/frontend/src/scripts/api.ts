@@ -58,6 +58,12 @@ export function fileUrl(projectId: string, relative: string): string {
   return API_ROOT + "/projects/" + projectId + "/files/" + safe;
 }
 
+/** Miniatura del KV. No uses `source.path` en las rejillas: es el PNG original
+ *  y en un PSD real pesa megas por tarjeta. */
+export function thumbnailUrl(projectId: string, maxSide = 420): string {
+  return API_ROOT + "/projects/" + projectId + "/thumbnail?max_side=" + String(maxSide);
+}
+
 export function variantPngUrl(projectId: string, variantId: string): string {
   return API_ROOT + "/projects/" + projectId + "/variants/" + variantId + "?download=true";
 }

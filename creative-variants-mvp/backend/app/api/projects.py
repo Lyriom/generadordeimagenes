@@ -1249,6 +1249,50 @@ def preview_mask(project_id: str, layer_id: str):
     return _png_response(image)
 
 
+@router.get("/{project_id}/thumbnail", summary="Miniatura ligera del KV para las rejillas")
+def get_thumbnail(
+    project_id: str,
+    max_side: int = Query(420, ge=80, le=1200, description="Lado mayor en píxeles"),
+):
+    """El KV reducido a JPEG.
+
+    Las rejillas de la interfaz pedían `source.path`, que es el PNG original: en
+    un PSD real son 2 MB por tarjeta y la rejilla no llegaba a pintarse. Aquí se
+    genera una vez, se guarda en `thumbs/` y se sirve desde disco.
+    """
+    from PIL import Image
+
+    project = load_project_or_404(project_id)
+    try:
+        source_path = storage.abs_path(project.project_id, project.source.path)
+        cache_path = storage.abs_path(project.project_id, f"thumbs/source_{max_side}.jpg")
+    except Exception as exc:  # noqa: BLE001
+        raise as_http_error(exc) from exc
+    if not source_path.exists() or not source_path.is_file():
+        raise HTTPException(status_code=404, detail="El KV original no está disponible.")
+
+    # Se rehace si el original cambió (reconstrucción de fondo, nuevo recorte…).
+    stale = (
+        not cache_path.exists()
+        or cache_path.stat().st_mtime < source_path.stat().st_mtime
+    )
+    if stale:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with Image.open(source_path) as image:
+                thumb = image.convert("RGB")
+                thumb.thumbnail((max_side, max_side), Image.LANCZOS)
+                thumb.save(cache_path, format="JPEG", quality=82, optimize=True)
+        except Exception as exc:  # noqa: BLE001
+            raise as_http_error(exc) from exc
+
+    return FileResponse(
+        cache_path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "private, max-age=600"},
+    )
+
+
 @router.get("/{project_id}/files/{relative_path:path}", summary="Servir un archivo del proyecto")
 def get_file(project_id: str, relative_path: str):
     project = load_project_or_404(project_id)

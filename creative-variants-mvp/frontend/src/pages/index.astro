@@ -41,25 +41,31 @@ import "../styles/global.css";
 
         <nav id="main-nav" aria-label="Secciones">
           <span class="nav-label">Flujo de trabajo</span>
-          <button class="nav-item is-active" data-view="campaign" title="Campaña (tecla 1)">
+          <button class="nav-item is-active" data-view="campaign" title="Cargar KV (tecla 1)">
             <span class="nav-icon" aria-hidden="true">1</span>
-            <span>Campaña</span>
+            <span>Cargar KV</span>
             <span class="nav-hint" aria-hidden="true">1</span>
           </button>
-          <button class="nav-item" data-view="layers" title="Capas y KV (tecla 2)">
+          <button class="nav-item" data-view="layers" title="Revisar capas (tecla 2)">
             <span class="nav-icon" aria-hidden="true">2</span>
-            <span>Capas y KV</span>
+            <span>Revisar capas</span>
             <span class="nav-hint" aria-hidden="true">2</span>
           </button>
-          <button class="nav-item" data-view="generate" title="Generar (tecla 3)">
+          <button class="nav-item" data-view="products" title="Productos (tecla 3)">
             <span class="nav-icon" aria-hidden="true">3</span>
-            <span>Generar</span>
+            <span>Productos</span>
             <span class="nav-hint" aria-hidden="true">3</span>
           </button>
-          <button class="nav-item" data-view="results" title="Resultados (tecla 4)">
+          <button class="nav-item" data-view="generate" title="Generar (tecla 4)">
             <span class="nav-icon" aria-hidden="true">4</span>
-            <span>Resultados</span>
+            <span>Generar</span>
             <span class="nav-hint" aria-hidden="true">4</span>
+          </button>
+          <span class="nav-label" style="padding-top: 14px">Salida</span>
+          <button class="nav-item" data-view="results" title="Resultados (tecla 5)">
+            <span class="nav-icon" aria-hidden="true">▦</span>
+            <span>Resultados</span>
+            <span class="nav-hint" aria-hidden="true">5</span>
           </button>
         </nav>
 
@@ -161,7 +167,7 @@ import "../styles/global.css";
               /^(INPUT|TEXTAREA|SELECT)$/.test(node.tagName));
           if (typing || event.metaKey || event.ctrlKey || event.altKey) return;
 
-          if (event.key >= "1" && event.key <= "4") {
+          if (event.key >= "1" && event.key <= "5") {
             var items = document.querySelectorAll(".nav-item");
             var target = items[Number(event.key) - 1];
             if (target) target.click();

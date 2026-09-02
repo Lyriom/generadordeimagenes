@@ -1,4 +1,6 @@
-export type ViewName = "campaign" | "layers" | "generate" | "results";
+/* Los cuatro primeros son los pasos del flujo, en orden. `results` queda
+   siempre accesible porque no es un paso sino la galería de lo producido. */
+export type ViewName = "campaign" | "layers" | "products" | "generate" | "results";
 
 export interface CanvasSize {
   width: number;

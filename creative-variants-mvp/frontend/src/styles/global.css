@@ -381,6 +381,19 @@ a { color: inherit; }
 .nav-item:hover .nav-hint,
 .nav-item:focus-visible .nav-hint { opacity: 1; }
 
+/* Un paso ya completado se marca en verde; uno todavía no alcanzable se ve
+   atenuado y su `title` explica qué falta. */
+.nav-item.is-done .nav-icon {
+  color: #fff;
+  background: var(--success);
+}
+.nav-item.is-locked { opacity: 0.42; }
+.nav-item.is-locked:hover { background: transparent; color: var(--sidebar-muted); }
+.nav-item.is-locked .nav-icon::after {
+  content: "";
+  position: absolute;
+}
+
 .sidebar-project {
   display: grid;
   gap: 4px;
@@ -498,6 +511,113 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   margin: 0 auto;
   padding: 30px 32px 88px;
 }
+
+/* ------------------------------------------------------- barra de pasos */
+
+.step-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 24px;
+  padding: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+}
+.step-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  flex: none;
+  min-height: 38px;
+  padding: 0 15px 0 8px;
+  color: var(--fg-muted);
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  font-size: var(--fs-sm);
+  font-weight: 650;
+  white-space: nowrap;
+  transition: color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.step-chip:hover:not(.is-locked) { color: var(--fg); background: var(--surface-3); }
+.step-chip.is-current {
+  color: var(--accent-soft-fg);
+  background: var(--accent-soft);
+  font-weight: 750;
+}
+.step-chip.is-locked { opacity: 0.45; cursor: not-allowed; }
+.step-num {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: var(--fg-muted);
+  background: var(--surface-3);
+  font-size: var(--fs-2xs);
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.step-chip.is-current .step-num { color: var(--accent-fg); background: var(--accent); }
+.step-chip.is-done .step-num { color: #fff; background: var(--success); }
+.step-sep {
+  flex: 1 1 12px;
+  min-width: 12px;
+  height: 1px;
+  background: var(--line);
+}
+
+.step-footer {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 26px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.step-footer .notice { margin: 0; }
+
+/* --------------------------------------------------- trabajos guardados */
+
+.saved-list {
+  display: grid;
+  gap: 6px;
+  max-height: 460px;
+  margin-top: 12px;
+  overflow-y: auto;
+}
+.saved-row {
+  display: grid;
+  grid-template-columns: auto 56px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+.saved-row:hover { background: var(--surface-3); }
+.saved-row img {
+  width: 56px;
+  height: 42px;
+  object-fit: contain;
+  border-radius: 6px;
+  background: var(--surface-3);
+}
+.saved-copy { display: grid; gap: 2px; min-width: 0; }
+.saved-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.saved-copy small { color: var(--fg-muted); font-size: var(--fs-2xs); }
+.saved-row .ghost-button { min-height: 34px; padding: 0 12px; }
 
 /* --------------------------------------------------------------- cabeceras */
 

@@ -1,4 +1,14 @@
-import { del, downloadUrl, fileUrl, get, pollTask, post, put, variantPngUrl } from "./api";
+import {
+  del,
+  downloadUrl,
+  fileUrl,
+  get,
+  pollTask,
+  post,
+  put,
+  thumbnailUrl,
+  variantPngUrl,
+} from "./api";
 import type {
   Capabilities,
   FormatPreset,
@@ -11,11 +21,137 @@ import type {
 } from "./types";
 
 const VIEW_LABELS: Record<ViewName, string> = {
-  campaign: "Campaña",
-  layers: "Capas y KV",
+  campaign: "Cargar KV",
+  layers: "Revisar capas",
+  products: "Productos",
   generate: "Generar",
   results: "Resultados",
 };
+
+/* El flujo es una secuencia, no cuatro secciones independientes: no se puede
+   elegir productos sin haber confirmado las capas, ni generar sin productos.
+   `stepState` calcula qué pasos están hechos y cuál es el siguiente, y la
+   navegación bloquea los que aún no tocan explicando por qué. */
+const STEP_ORDER: ViewName[] = ["campaign", "layers", "products", "generate"];
+
+interface StepState {
+  done: Record<string, boolean>;
+  blocked: Record<string, string | null>;
+  next: ViewName;
+}
+
+/** Una capa está confirmada cuando el backend guardó su rol revisado. Vive en
+ *  el proyecto, así que sobrevive a recargas y a reabrir la campaña. */
+function layersConfirmed(project: Project): boolean {
+  const relevant = project.layers.filter((layer) => layer.category !== "background");
+  if (!relevant.length) {
+    // Todo quedó marcado como fondo: sigue siendo una revisión válida, así que
+    // basta con que alguna capa lleve el sello para no bloquear el paso.
+    return project.layers.some((layer) => Boolean(layer.meta?.role_confirmed));
+  }
+  return relevant.every((layer) => Boolean(layer.meta?.role_confirmed));
+}
+
+function validGroups(): ProductGroup[] {
+  return state.groups.filter((group) => group.members.length >= 2);
+}
+
+function productsReady(): boolean {
+  return selectedProductFiles().length > 0 || validGroups().length > 0;
+}
+
+function stepState(): StepState {
+  const hasCampaign = state.campaign.length > 0;
+  const reviewed = hasCampaign && state.campaign.every(layersConfirmed);
+  const pending = hasCampaign ? state.campaign.filter((item) => !layersConfirmed(item)) : [];
+  const hasProducts = productsReady();
+
+  const done: Record<string, boolean> = {
+    campaign: hasCampaign,
+    layers: reviewed,
+    products: hasProducts,
+    generate: false,
+  };
+  const blocked: Record<string, string | null> = {
+    campaign: null,
+    layers: hasCampaign ? null : "Primero carga al menos un KV.",
+    products: !hasCampaign
+      ? "Primero carga al menos un KV."
+      : !reviewed
+        ? "Falta confirmar las capas de " + String(pending.length) + " KV."
+        : null,
+    generate: !hasCampaign
+      ? "Primero carga al menos un KV."
+      : !reviewed
+        ? "Falta confirmar las capas de " + String(pending.length) + " KV."
+        : !hasProducts
+          ? "Elige al menos un producto o una combinación."
+          : null,
+    results: null,
+  };
+  const next = STEP_ORDER.find((view) => !done[view]) || "generate";
+  return { done, blocked, next };
+}
+
+/** Barra de pasos que encabeza cada vista del flujo. */
+function stepBar(current: ViewName): string {
+  const steps = stepState();
+  const items = STEP_ORDER.map((view, index) => {
+    const isCurrent = view === current;
+    const isDone = steps.done[view];
+    const locked = Boolean(steps.blocked[view]) && !isCurrent;
+    const classes = [
+      "step-chip",
+      isCurrent ? "is-current" : "",
+      isDone && !isCurrent ? "is-done" : "",
+      locked ? "is-locked" : "",
+    ].filter(Boolean).join(" ");
+    return [
+      '<button class="', classes, '" data-step="', attr(view), '"',
+      locked ? ' title="' + attr(steps.blocked[view]!) + '"' : "",
+      '><span class="step-num">', isDone && !isCurrent ? "✓" : String(index + 1),
+      "</span><span>", esc(VIEW_LABELS[view]), "</span></button>",
+    ].join("");
+  }).join('<i class="step-sep" aria-hidden="true"></i>');
+  return '<nav class="step-bar" aria-label="Pasos">' + items + "</nav>";
+}
+
+function bindStepBar(): void {
+  queryAll<HTMLButtonElement>(".step-chip").forEach((button) => {
+    button.addEventListener("click", () => {
+      const view = button.dataset.step as ViewName;
+      const reason = stepState().blocked[view];
+      if (reason) {
+        toast(reason, "error");
+        return;
+      }
+      navigate(view);
+    });
+  });
+}
+
+/** Pie de paso: explica qué falta y ofrece el salto al siguiente. */
+function stepFooter(current: ViewName, label: string): string {
+  const index = STEP_ORDER.indexOf(current);
+  const nextView = STEP_ORDER[index + 1];
+  if (!nextView) return "";
+  const reason = stepState().blocked[nextView];
+  return [
+    '<div class="step-footer">',
+    reason
+      ? '<span class="notice warning" style="flex:1">' + esc(reason) + "</span>"
+      : '<span class="notice success" style="flex:1">Listo para continuar.</span>',
+    '<button class="button large" id="step-next"', reason ? " disabled" : "", ">",
+    esc(label), " →</button></div>",
+  ].join("");
+}
+
+function bindStepFooter(current: ViewName): void {
+  query("#step-next")?.addEventListener("click", () => {
+    const nextView = STEP_ORDER[STEP_ORDER.indexOf(current) + 1];
+    if (nextView) navigate(nextView);
+  });
+}
 
 const CATEGORY_LABELS: Record<string, string> = {
   product: "Producto",
@@ -64,6 +200,9 @@ interface State {
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
+  /* Posición de los productos individuales dentro del arte. Vive en el estado y
+     no en el DOM porque se elige en el paso 3 y se usa al generar en el 4. */
+  productArrangement: ProductGroup["arrangement"];
 }
 
 const state: State = {
@@ -84,6 +223,14 @@ const state: State = {
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
+  productArrangement: "auto",
+};
+
+const ARRANGEMENT_OPTIONS: Record<string, string> = {
+  auto: "Automática según el formato",
+  horizontal: "En fila",
+  vertical: "Apilados",
+  overlap: "Superpuestos",
 };
 
 const productUrls = new WeakMap<File, string>();
@@ -153,13 +300,30 @@ function idle(): void {
   query<HTMLElement>("#busy-overlay")!.hidden = true;
 }
 
+/* La campaña en curso vive en `sessionStorage`, no en `localStorage`: recargar
+   la pestaña no pierde el trabajo, pero abrir el generador de cero empieza
+   limpio en el paso 1 en vez de resucitar la campaña de la semana pasada. */
 function saveSession(): void {
-  localStorage.setItem("creative-campaign", JSON.stringify(state.campaignIds));
-  if (state.activeId) localStorage.setItem("creative-active", state.activeId);
+  try {
+    sessionStorage.setItem("creative-campaign", JSON.stringify(state.campaignIds));
+    if (state.activeId) sessionStorage.setItem("creative-active", state.activeId);
+    else sessionStorage.removeItem("creative-active");
+  } catch {
+    /* modo privado: la campaña solo vive en memoria */
+  }
 }
 
-function sourceUrl(project: Project): string {
-  return fileUrl(project.project_id, project.source.path);
+function readSession(): { ids: string[]; active: string | null } {
+  try {
+    const raw = sessionStorage.getItem("creative-campaign");
+    const ids = raw ? JSON.parse(raw) : [];
+    return {
+      ids: Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : [],
+      active: sessionStorage.getItem("creative-active"),
+    };
+  } catch {
+    return { ids: [], active: null };
+  }
 }
 
 function pageHead(kicker: string, title: string, description: string, action = ""): string {
@@ -216,8 +380,15 @@ async function refreshAll(): Promise<void> {
 
 function renderChrome(): void {
   query<HTMLElement>("#view-name")!.textContent = VIEW_LABELS[state.view];
+  const steps = stepState();
   queryAll<HTMLButtonElement>(".nav-item").forEach((button) => {
-    button.classList.toggle("is-active", button.dataset.view === state.view);
+    const view = button.dataset.view as ViewName;
+    button.classList.toggle("is-active", view === state.view);
+    button.classList.toggle("is-done", Boolean(steps.done[view]) && view !== state.view);
+    const locked = Boolean(steps.blocked[view]) && view !== state.view;
+    button.classList.toggle("is-locked", locked);
+    if (locked) button.title = steps.blocked[view]!;
+    else button.removeAttribute("title");
   });
   const status = query<HTMLElement>("#engine-status")!;
   const connected = state.health?.status === "ok";
@@ -248,6 +419,13 @@ function renderChrome(): void {
 }
 
 async function navigate(view: ViewName): Promise<void> {
+  // Si se intenta saltar a un paso que aún no toca, se redirige al que falta en
+  // vez de mostrar una pantalla vacía sin explicación.
+  const reason = stepState().blocked[view];
+  if (reason) {
+    toast(reason, "error");
+    view = stepState().next;
+  }
   state.view = view;
   renderChrome();
   document.body.classList.remove("menu-open");
@@ -255,6 +433,7 @@ async function navigate(view: ViewName): Promise<void> {
   try {
     if (view === "campaign") await renderCampaign();
     if (view === "layers") await renderLayers();
+    if (view === "products") await renderProducts();
     if (view === "generate") await renderGenerate();
     if (view === "results") await renderResults();
   } catch (error) {
@@ -277,9 +456,10 @@ function projectCard(project: Project | ProjectSummary, full?: Project): string 
   const variantCount = "variants" in project && typeof project.variants === "number"
     ? project.variants
     : full?.variants.length || 0;
-  const image = full
-    ? '<img src="' + attr(sourceUrl(full)) + '" alt="' + attr(full.name) + '" loading="lazy">'
-    : '<span class="empty-icon">◇</span>';
+  // Siempre hay miniatura: el endpoint la genera desde el KV y la cachea, así
+  // que funciona igual para un proyecto abierto y para uno solo listado.
+  const image = '<img src="' + attr(thumbnailUrl(id, 420)) + '" alt="' + attr(project.name) +
+    '" loading="lazy" decoding="async">';
   return [
     '<article class="project-card', state.activeId === id ? " is-active" : "", '" data-project="', attr(id), '">',
     '<div class="project-thumb">', image, "</div>",
@@ -291,16 +471,41 @@ function projectCard(project: Project | ProjectSummary, full?: Project): string 
   ].join("");
 }
 
+/* Los trabajos anteriores van en una lista compacta con selección múltiple, no
+   en una rejilla de tarjetas: con 20 proyectos de pruebas acumulados, la
+   rejilla tapaba por completo la zona de carga, que es lo que se viene a usar. */
+function savedProjectsHtml(items: ProjectSummary[]): string {
+  if (!items.length) {
+    return '<div class="notice">No hay otros trabajos guardados.</div>';
+  }
+  const rows = items.map((item) => [
+    '<label class="saved-row"><input class="saved-check" type="checkbox" value="', attr(item.project_id), '">',
+    '<img src="', attr(thumbnailUrl(item.project_id, 120)), '" alt="" loading="lazy" decoding="async">',
+    '<span class="saved-copy"><strong>', esc(item.name), "</strong><small>",
+    String(item.canvas.width), "×", String(item.canvas.height), " · ", String(item.layers),
+    " capas · ", String(item.variants), " artes · ", esc(item.created_at.slice(0, 10)),
+    "</small></span>",
+    '<button type="button" class="ghost-button open-project" data-id="', attr(item.project_id), '">Abrir</button>',
+    "</label>",
+  ].join("")).join("");
+  return [
+    '<details class="card"><summary>Trabajos guardados · ', String(items.length), " proyectos</summary>",
+    '<p class="muted tiny" style="margin-top:10px">Abre uno para seguir trabajándolo, o marca los que ya no sirvan y bórralos de una vez.</p>',
+    '<div class="saved-list">', rows, "</div>",
+    '<div class="button-row" style="margin-top:14px"><button class="ghost-button" id="saved-select-all">Marcar todos</button>',
+    '<button class="danger-button" id="saved-delete" disabled>Borrar marcados</button>',
+    '<span class="muted tiny right" id="saved-count">0 marcados</span></div></details>',
+  ].join("");
+}
+
 async function renderCampaign(): Promise<void> {
   const activeCards = state.campaign
     .map((project) => projectCard(project, project))
     .join("");
-  const savedCards = state.projects
-    .filter((item) => !state.campaignIds.includes(item.project_id))
-    .map((item) => projectCard(item))
-    .join("");
+  const saved = state.projects.filter((item) => !state.campaignIds.includes(item.project_id));
 
   content().innerHTML = [
+    stepBar("campaign"),
     pageHead(
       "Creative workspace",
       state.campaign.length ? "Tu campaña está lista" : "Empieza con tus key visuals",
@@ -318,8 +523,7 @@ async function renderCampaign(): Promise<void> {
           '<div class="stat"><strong>', String(state.capabilities?.format_catalog.length || 0), '</strong><span>Presets disponibles</span></div>',
           "</div>",
           '<h2 class="section-title">KV de esta campaña</h2><div class="project-grid">', activeCards, "</div>",
-          '<div class="spacer"></div><div class="button-row"><button class="button large" id="go-layers">Revisar capas →</button>',
-          '<button class="ghost-button" id="add-more-kv">Añadir más KV</button></div>',
+          '<div class="spacer"></div><div class="button-row"><button class="ghost-button" id="add-more-kv">Añadir más KV</button></div>',
         ].join("")
       : [
           '<div class="grid two">',
@@ -336,12 +540,14 @@ async function renderCampaign(): Promise<void> {
           '<button class="button rose full" id="import-ingest" disabled>Importar seleccionados</button></section>',
           "</div>",
         ].join(""),
-    '<h2 class="section-title">Trabajos guardados</h2>',
-    savedCards
-      ? '<div class="project-grid">' + savedCards + "</div>"
-      : '<div class="notice">No hay otros proyectos guardados.</div>',
+    state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
+    '<div class="spacer"></div>',
+    savedProjectsHtml(saved),
   ].join("");
 
+  bindStepBar();
+  bindStepFooter("campaign");
+  bindSavedProjects();
   bindProjectCards();
   query("#clear-campaign")?.addEventListener("click", () => {
     state.campaignIds = [];
@@ -350,7 +556,6 @@ async function renderCampaign(): Promise<void> {
     saveSession();
     navigate("campaign");
   });
-  query("#go-layers")?.addEventListener("click", () => navigate("layers"));
   query("#add-more-kv")?.addEventListener("click", () => {
     state.campaignIds = [];
     state.campaign = [];
@@ -361,6 +566,62 @@ async function renderCampaign(): Promise<void> {
     bindUpload();
     await loadIngest();
   }
+}
+
+function bindSavedProjects(): void {
+  const checks = queryAll<HTMLInputElement>(".saved-check");
+  const deleteButton = query<HTMLButtonElement>("#saved-delete");
+  const counter = query<HTMLElement>("#saved-count");
+  if (!checks.length || !deleteButton || !counter) return;
+
+  const sync = () => {
+    const marked = checks.filter((item) => item.checked).length;
+    deleteButton.disabled = marked === 0;
+    counter.textContent = String(marked) + (marked === 1 ? " marcado" : " marcados");
+  };
+  checks.forEach((check) => check.addEventListener("change", sync));
+
+  query("#saved-select-all")?.addEventListener("click", () => {
+    const allMarked = checks.every((item) => item.checked);
+    checks.forEach((item) => { item.checked = !allMarked; });
+    sync();
+  });
+
+  deleteButton.addEventListener("click", async () => {
+    const ids = checks.filter((item) => item.checked).map((item) => item.value);
+    if (!ids.length) return;
+    const message = ids.length === 1
+      ? "¿Borrar este proyecto y sus archivos?"
+      : "¿Borrar " + String(ids.length) + " proyectos y todos sus archivos?";
+    if (!window.confirm(message)) return;
+    // El backend solo borra de uno en uno, así que se recorre la selección y se
+    // informa de los que fallen en vez de dar por hecho que se fueron todos.
+    busy("Borrando proyectos", "Liberando espacio…", 5);
+    const failed: string[] = [];
+    try {
+      for (let index = 0; index < ids.length; index += 1) {
+        busyProgress(Math.round((index / ids.length) * 92) + 4, String(index + 1) + " de " + String(ids.length));
+        try {
+          await del("/projects/" + ids[index]);
+        } catch {
+          failed.push(ids[index]);
+        }
+      }
+      state.campaignIds = state.campaignIds.filter((id) => !ids.includes(id));
+      state.campaign = state.campaign.filter((item) => !ids.includes(item.project_id));
+      if (state.activeId && ids.includes(state.activeId)) {
+        state.activeId = state.campaignIds[0] || null;
+      }
+      saveSession();
+      await refreshAll();
+      const removed = ids.length - failed.length;
+      if (removed) toast(String(removed) + " proyecto(s) eliminado(s).", "success");
+      if (failed.length) toast("No se pudieron borrar " + String(failed.length) + " proyecto(s).", "error");
+      await navigate("campaign");
+    } finally {
+      idle();
+    }
+  });
 }
 
 function bindProjectCards(): void {
@@ -505,12 +766,9 @@ async function loadIngest(): Promise<void> {
 }
 
 export async function mountApp(): Promise<void> {
-  try {
-    state.campaignIds = JSON.parse(localStorage.getItem("creative-campaign") || "[]");
-  } catch {
-    state.campaignIds = [];
-  }
-  state.activeId = localStorage.getItem("creative-active");
+  const session = readSession();
+  state.campaignIds = session.ids;
+  state.activeId = session.active;
 
   queryAll<HTMLButtonElement>(".nav-item").forEach((button) => {
     button.addEventListener("click", () => navigate(button.dataset.view as ViewName));
@@ -528,7 +786,9 @@ export async function mountApp(): Promise<void> {
 
   try {
     await refreshAll();
-    await navigate("campaign");
+    // Se retoma donde se quedó el flujo, que con una campaña ya revisada es el
+    // paso de productos y no la pantalla de carga otra vez.
+    await navigate(state.campaign.length ? stepState().next : "campaign");
   } catch (error) {
     state.health = null;
     renderChrome();
@@ -682,9 +942,28 @@ async function renderLayers(): Promise<void> {
       ].join("")
     : emptyState("◫", "No hay capas", "Analiza el arte o crea una capa manual.");
 
+  const pending = state.campaign.filter((item) => !layersConfirmed(item));
+  const reviewNotice = pending.length
+    ? '<div class="notice warning" style="margin-bottom:16px"><strong>Falta confirmar ' + String(pending.length) +
+      " de " + String(state.campaign.length) + ' KV:</strong> ' + esc(pending.map((item) => item.name).join(", ")) +
+      ". Marca en cada capa si se usa y para qué, y guarda con “Guardar y confirmar”." + "</div>"
+    : '<div class="notice success" style="margin-bottom:16px">Las capas de los ' + String(state.campaign.length) +
+      " KV están confirmadas.</div>";
+
   content().innerHTML = [
-    pageHead("Control de producción", "Capas y key visual", "Corrige categorías, máscaras, geometría y comportamiento sin alterar el archivo original."),
-    '<div class="button-row" style="margin-bottom:16px"><label class="field" style="min-width:260px"><span>KV activo</span><select id="active-kv">', projectOptions, "</select></label>",
+    stepBar("layers"),
+    pageHead(
+      "Paso 2 de 4",
+      "Limpia las capas: qué se usa y qué no",
+      "Define qué se elimina y qué debe conservarse exactamente. Esto evita que una prenda, un sello o un copy mal nombrado se interpreten mal.",
+    ),
+    reviewNotice,
+    // La confirmación de roles va primero: es lo único obligatorio de este paso.
+    reviewRoles(layers),
+    '<div class="spacer"></div>',
+    '<details class="card"><summary>Ajustes finos de la capa seleccionada · opcional</summary>',
+    '<p class="muted tiny" style="margin-top:10px">Máscaras, geometría y permisos. Solo si algo salió mal en la importación.</p>',
+    '<div class="button-row" style="margin:14px 0 16px"><label class="field" style="min-width:260px"><span>KV activo</span><select id="active-kv">', projectOptions, "</select></label>",
     '<button class="ghost-button" id="analyze-project">Detectar elementos</button>',
     '<button class="ghost-button" id="extract-layers">Extraer PNG</button>',
     '<button class="ghost-button" id="rebuild-background">Reconstruir fondo</button>',
@@ -695,13 +974,14 @@ async function renderLayers(): Promise<void> {
     '<section class="card"><div class="card-head"><div><h2>Vista de máscara</h2><p>Verde = píxeles incluidos</p></div></div>', preview, "</section>",
     layer ? layerEditor(layer) : '<section class="card layer-editor">' + emptyState("◇", "Selecciona una capa", "Elige una capa del panel izquierdo.") + "</section>",
     "</div>",
-    '<div class="grid two" style="margin-top:18px">',
-    orderEditor(layers),
-    reviewRoles(layers),
-    "</div>",
+    '<div style="margin-top:18px">', orderEditor(layers), "</div>",
     '<div style="margin-top:18px">', inventoryHtml(project), "</div>",
+    "</details>",
+    stepFooter("layers", "Cargar productos"),
   ].join("");
 
+  bindStepBar();
+  bindStepFooter("layers");
   bindLayerActions(project, layer, layers);
 }
 
@@ -723,8 +1003,12 @@ function reviewRoles(layers: Layer[]): string {
     ].join("");
   }).join("");
   return [
-    '<section class="card"><div class="card-head"><div><h2>Función de cada capa</h2><p>Confirmación humana para generar</p></div></div>',
-    '<div class="stack">', rows, '</div><button class="button full" id="confirm-roles" style="margin-top:14px">Guardar y confirmar</button></section>',
+    '<section class="card elevated"><div class="card-head"><div><h2>Función de cada capa</h2>',
+    '<p>Marca qué se elimina, qué se conserva obligatoriamente y qué no se usa</p></div>',
+    '<span class="badge">', String(layers.length), ' CAPAS</span></div>',
+    '<div class="form-grid">', rows, '</div>',
+    '<button class="button large full" id="confirm-roles" style="margin-top:18px">',
+    'Guardar y confirmar estas capas</button></section>',
   ].join("");
 }
 
@@ -1148,58 +1432,169 @@ function productTarget(project: Project): Layer | null {
   return products.find((layer) => layer.replaceable) || products.sort((a, b) => b.width * b.height - a.width * a.height)[0] || null;
 }
 
-async function renderGenerate(): Promise<void> {
-  if (!state.campaign.length) {
-    content().innerHTML = emptyState("✦", "Primero abre una campaña", "Necesitamos al menos un KV antes de generar.", '<button class="button" id="go-campaign">Ir a campaña</button>');
-    query("#go-campaign")?.addEventListener("click", () => navigate("campaign"));
-    return;
-  }
+/* ---------------------------------------------------------------- paso 3
+   Productos: qué se pone, si va individual o en combinación, y en qué posición.
+   El paso 4 solo decide el cómo (modelo, contexto, formatos). */
+async function renderProducts(): Promise<void> {
   const missingTargets = state.campaign.filter((project) => !productTarget(project));
   const productCards = state.products.map(productCard).join("");
   const groups = state.groups.map(groupCard).join("");
   const productChoices = state.products.map((file) =>
     '<label class="choice"><input class="group-member" type="checkbox" value="' + attr(productKey(file)) + '"> ' + esc(productName(file)) + "</label>"
   ).join("");
+  const individuals = selectedProductFiles().length;
+
+  const targetsNotice = missingTargets.length
+    ? '<div class="notice warning" style="margin-bottom:16px"><strong>Falta identificar el producto en ' + String(missingTargets.length) + ' KV.</strong> El sistema necesita saber qué pieza retirar para poner la nueva.<div class="button-row" style="margin-top:10px">' +
+      missingTargets.map((project) => '<button class="ghost-button detect-product" data-project="' + attr(project.project_id) + '">Detectar en ' + esc(project.name) + "</button>").join("") + "</div></div>"
+    : '<div class="notice success" style="margin-bottom:16px">Los ' + String(state.campaign.length) + ' KV tienen su producto identificado: se retirará el original y entrará el nuevo.</div>';
+
+  content().innerHTML = [
+    stepBar("products"),
+    pageHead(
+      "Paso 3 de 4",
+      "Qué producto va en la plantilla",
+      "Sube el catálogo una sola vez. Después eliges cuáles llevan arte propio, cuáles se combinan y en qué posición.",
+    ),
+    targetsNotice,
+    '<section class="card elevated"><div class="card-head"><div><h2>Catálogo de productos</h2><p>PNG con transparencia da el mejor recorte</p></div><span class="badge green">',
+    String(state.products.length), " CARGADOS</span></div>",
+    '<label class="dropzone compact"><input id="product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp"><span class="drop-icon">⇧</span><strong>Sube los productos</strong><span>PNG, JPG o WEBP · puedes elegir varios a la vez</span></label>',
+    productCards
+      ? '<div class="product-grid" style="margin-top:16px">' + productCards + "</div>"
+      : '<div class="notice" style="margin-top:16px">Aún no has cargado productos.</div>',
+    "</section>",
+
+    '<div class="spacer"></div>',
+    '<div class="grid two">',
+    '<section class="card"><div class="card-head"><div><h2>Individual o en combinación</h2><p>Puedes usar las dos cosas a la vez</p></div></div>',
+    '<div class="notice" style="margin-bottom:14px">Marcado <strong>“Generar por separado”</strong> en una tarjeta = ese producto tendrá su propio arte. Ahora mismo: <strong>',
+    String(individuals), " individual(es)</strong> y <strong>", String(validGroups().length), " combinación(es)</strong>.</div>",
+    state.products.length >= 2 ? [
+      '<div class="stack"><label class="field"><span>Nombre de la combinación</span><input id="group-name" placeholder="Ej. Combo familiar"></label>',
+      '<div><span class="label">Productos que van juntos</span><div class="choice-row" style="margin-top:8px">', productChoices, "</div></div>",
+      '<label class="field"><span>Posición de estos productos</span><select id="group-arrangement">',
+      optionList(ARRANGEMENT_OPTIONS, "auto"), "</select></label>",
+      '<button class="button" id="add-group">Añadir combinación</button></div>',
+    ].join("") : '<div class="notice">Carga al menos dos productos para poder combinarlos.</div>',
+    groups ? '<div class="stack" style="margin-top:16px">' + groups + "</div>" : "",
+    "</section>",
+
+    '<section class="card"><div class="card-head"><div><h2>Posición de los productos</h2><p>Para los que van por separado</p></div></div>',
+    '<label class="field"><span>Disposición dentro del arte</span><select id="individual-arrangement">',
+    optionList(ARRANGEMENT_OPTIONS, state.productArrangement), "</select></label>",
+    '<p class="muted tiny" style="margin-top:12px">La ubicación exacta se toma de la zona que ya venía diseñada en el PSD; esto solo decide cómo se reparten cuando hay más de una pieza.</p>',
+    '<div class="divider"></div>',
+    '<span class="label">Vista previa de la disposición</span>',
+    '<div class="group-preview ', attr(state.productArrangement === "auto" ? "horizontal" : state.productArrangement), '" style="margin-top:10px">',
+    (selectedProductFiles().slice(0, 3).map((file) => '<img src="' + attr(productUrl(file)) + '" alt="">').join("")
+      || '<span class="muted tiny">Sube productos para verlo</span>'),
+    "</div></section></div>",
+
+    stepFooter("products", "Elegir modelo y generar"),
+  ].join("");
+
+  bindStepBar();
+  bindStepFooter("products");
+  bindProductStep();
+}
+
+function bindProductStep(): void {
+  query<HTMLInputElement>("#product-files")?.addEventListener("change", async (event) => {
+    const files = Array.from((event.currentTarget as HTMLInputElement).files || []);
+    state.products = files;
+    // Por defecto todos llevan arte individual, como en el flujo anterior.
+    state.individualProducts = new Set(files.map(productKey));
+    state.groups = [];
+    await renderProducts();
+  });
+  queryAll<HTMLInputElement>(".individual-product").forEach((checkBox) => {
+    checkBox.addEventListener("change", async () => {
+      if (checkBox.checked) state.individualProducts.add(checkBox.value);
+      else state.individualProducts.delete(checkBox.value);
+      await renderProducts();
+    });
+  });
+  query<HTMLSelectElement>("#individual-arrangement")?.addEventListener("change", async (event) => {
+    state.productArrangement = (event.currentTarget as HTMLSelectElement).value as ProductGroup["arrangement"];
+    await renderProducts();
+  });
+  query("#add-group")?.addEventListener("click", async () => {
+    const members = queryAll<HTMLInputElement>(".group-member:checked").map((item) => item.value);
+    if (members.length < 2) {
+      toast("Elige al menos dos productos para la combinación.", "error");
+      return;
+    }
+    const name = query<HTMLInputElement>("#group-name")!.value.trim() || "Combinación " + String(state.groups.length + 1);
+    state.groups.push({
+      id: "group-" + Date.now().toString(36),
+      name,
+      members,
+      arrangement: query<HTMLSelectElement>("#group-arrangement")!.value as ProductGroup["arrangement"],
+    });
+    await renderProducts();
+  });
+  queryAll<HTMLButtonElement>(".remove-group").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.groups = state.groups.filter((group) => group.id !== button.dataset.group);
+      await renderProducts();
+    });
+  });
+  queryAll<HTMLButtonElement>(".detect-product").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.project!;
+      busy("Detectando producto", "Separando el sujeto principal del fondo…", 15);
+      try {
+        const result = await post<any>("/projects/" + id + "/layers/detect-product", { force: false });
+        await refreshProject(id);
+        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+        if (result.detected) toast("Producto detectado y listo para reemplazar.", "success");
+        await renderProducts();
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        idle();
+      }
+    });
+  });
+}
+
+/* ---------------------------------------------------------------- paso 4
+   Cómo se genera: formatos, modelo, contexto y el botón final. */
+async function renderGenerate(): Promise<void> {
   const active = activeProject()!;
   const modeTabs = [
-    '<div class="tabs"><button class="tab generation-mode', state.generationMode === "catalog" ? " is-active" : "", '" data-mode="catalog">Catálogo de productos</button>',
-    '<button class="tab generation-mode', state.generationMode === "compose" ? " is-active" : "", '" data-mode="compose">Componer capas actuales</button></div>',
+    '<div class="tabs"><button class="tab generation-mode', state.generationMode === "catalog" ? " is-active" : "", '" data-mode="catalog">Producir por producto</button>',
+    '<button class="tab generation-mode', state.generationMode === "compose" ? " is-active" : "", '" data-mode="compose">Ajustes finos del KV activo</button></div>',
   ].join("");
-  const targetsNotice = missingTargets.length
-    ? '<div class="notice warning" style="margin-bottom:16px"><strong>Falta identificar el producto en ' + String(missingTargets.length) + ' KV.</strong> Usa “Detectar producto” para crear la capa reemplazable.<div class="button-row" style="margin-top:10px">' +
-      missingTargets.map((project) => '<button class="ghost-button detect-product" data-project="' + attr(project.project_id) + '">Detectar en ' + esc(project.name) + "</button>").join("") + "</div></div>"
-    : '<div class="notice success" style="margin-bottom:16px">Todos los KV tienen una capa de producto preparada para reemplazo.</div>';
 
   let body = "";
   if (state.generationMode === "catalog") {
+    const total = (selectedProductFiles().length + validGroups().length) * state.campaign.length;
     body = [
-      targetsNotice,
-      '<div class="grid two"><section class="card elevated"><div class="card-head"><div><h2>1 · Productos</h2><p>PNG, JPG o WEBP; mejor con transparencia</p></div><span class="badge green">LOCALES</span></div>',
-      '<label class="dropzone compact"><input id="product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp"><span class="drop-icon">⇧</span><strong>Sube los productos</strong><span>Puedes crear artes separados y combinaciones</span></label>',
-      productCards ? '<div class="product-grid" style="margin-top:14px">' + productCards + "</div>" : '<div class="notice" style="margin-top:14px">Aún no has cargado productos.</div>',
-      '</section><section class="card"><div class="card-head"><div><h2>2 · Combinaciones</h2><p>Cada producto seguirá siendo una capa independiente</p></div></div>',
-      state.products.length >= 2 ? [
-        '<div class="stack"><label class="field"><span>Nombre de la combinación</span><input id="group-name" placeholder="Ej. Combo familiar"></label>',
-        '<div><span class="label">Productos que van juntos</span><div class="choice-row" style="margin-top:8px">', productChoices, "</div></div>",
-        '<label class="field"><span>Disposición</span><select id="group-arrangement"><option value="auto">Automática según formato</option><option value="horizontal">En fila</option><option value="vertical">Apilados</option><option value="overlap">Superpuestos</option></select></label>',
-        '<button class="button" id="add-group">Añadir combinación</button></div>',
-      ].join("") : '<div class="notice">Carga al menos dos productos para crear una combinación.</div>',
-      groups ? '<div class="stack" style="margin-top:16px">' + groups + "</div>" : "",
-      "</section></div>",
-      '<div class="spacer"></div>', formatSelectorHtml(true),
+      '<div class="notice success" style="margin-bottom:16px">Se producirán <strong>', String(total),
+      " tanda(s)</strong>: ", String(selectedProductFiles().length), " individual(es) y ",
+      String(validGroups().length), " combinación(es) por cada uno de los ", String(state.campaign.length), " KV.</div>",
+      formatSelectorHtml(true),
       '<div class="spacer"></div>', generationOptionsHtml("catalog"),
     ].join("");
   } else {
     body = [
-      '<div class="notice" style="margin-bottom:16px">Ajustes finos sobre <strong>', esc(active.name), '</strong>. Conserva el flujo avanzado existente.</div>',
+      '<div class="notice" style="margin-bottom:16px">Ajustes finos sobre <strong>', esc(active.name), '</strong>: recompone las capas actuales sin usar el catálogo de productos.</div>',
       '<div class="grid two">', formatSelectorHtml(false), generationOptionsHtml("compose"), "</div>",
       '<div class="spacer"></div>', permissionsHtml(active),
     ].join("");
   }
   content().innerHTML = [
-    pageHead("Producción multiformato", "Genera sin perder el control", "Elige qué productos van separados, cuáles juntos y las medidas exactas de Meta, Google Ads y YouTube."),
+    stepBar("generate"),
+    pageHead(
+      "Paso 4 de 4",
+      "Modelo, contexto y formatos",
+      "Elige las medidas de salida, con qué motor se rehace el fondo y qué le pides en palabras. Después, genera.",
+    ),
     modeTabs, body,
   ].join("");
+  bindStepBar();
   bindGenerate(active);
 }
 
@@ -1213,19 +1608,33 @@ function generationOptionsHtml(mode: "catalog" | "compose"): string {
     '<label class="choice"><input class="layout-check" type="checkbox" value="' + attr(layout.key) + '"> ' + esc(layout.label) + "</label>"
   ).join("");
   return [
-    '<section class="card elevated"><div class="card-head"><div><h2>', mode === "catalog" ? "3 · Producción" : "Configuración", '</h2><p>Variación, fondo y semilla reproducible</p></div></div>',
+    // El modelo y el contexto ya no viven dentro de un acordeón cerrado: eran
+    // justo las dos decisiones que el usuario no encontraba.
+    '<section class="card elevated"><div class="card-head"><div><h2>Modelo y contexto</h2><p>Con qué motor se rehace el fondo y qué le pides</p></div></div>',
+    '<label class="choice" style="margin-bottom:14px"><input id="regenerate-background" type="checkbox"> Rehacer el fondo con IA</label>',
+    '<div class="form-grid"><label class="field"><span>Motor del fondo</span><select id="generation-provider">',
+    '<option value="opencv">Local · gratis</option><option value="magnific">Magnific · eliges el modelo (con costo)</option>',
+    '<option value="openai">OpenAI · IA de imagen (con costo)</option><option value="auto">Automático</option></select></label>',
+    '<label class="field"><span>Modelo de IA</span><select id="generation-model"><option value="">Predeterminado</option>', models,
+    '</select><small>Solo aplica con Magnific.</small></label></div>',
+    '<label class="field" style="margin-top:14px"><span>Contexto · qué quieres del arte</span>',
+    '<textarea id="generation-instruction" placeholder="Producto grande, titular arriba, composición minimal"></textarea>',
+    "<small>Entiende: producto grande o pequeño, titular arriba, centrado, vertical, diagonal, dividido, izquierda, derecha, minimal.</small></label>",
+    '<label class="field" style="margin-top:14px"><span>Dirección visual del fondo · opcional</span>',
+    '<textarea id="generation-background-prompt" placeholder="Fondo deportivo premium, luces azules, profundidad, sin texto ni logos"></textarea>',
+    "<small>Solo se usa si se rehace el fondo.</small></label></section>",
+
+    '<div class="spacer"></div>',
+    '<section class="card"><div class="card-head"><div><h2>Variación</h2><p>Cuántas propuestas y cuánto pueden alejarse</p></div></div>',
     '<div class="form-grid"><label class="field"><span>Cantidad de propuestas</span><input id="generation-count" type="number" min="', String(countMin), '" max="', String(countMax), '" value="', String(countValue), '"></label>',
-    '<label class="field"><span>Intensidad</span><select id="generation-intensity"><option value="conservative">Conservadora</option><option value="moderate" selected>Moderada</option><option value="creative">Creativa</option></select></label></div>',
-    '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Semilla</span><input id="generation-seed" type="number" min="0" max="2147483647" value="42"></label>',
-    '<label class="field"><span>Disposición de varios productos</span><select id="generation-arrangement"><option value="auto">Automática</option><option value="horizontal">En fila</option><option value="vertical">Apilados</option><option value="overlap">Superpuestos</option></select></label></div>',
-    '<label class="field" style="margin-top:14px"><span>Pedido en palabras · opcional</span><textarea id="generation-instruction" placeholder="Producto grande, titular arriba, composición minimal"></textarea></label>',
+    '<label class="field"><span>Cuánto se pueden alejar del original</span><select id="generation-intensity">',
+    '<option value="conservative">Parecidas al original</option><option value="moderate" selected>Equilibradas</option>',
+    '<option value="creative">Muy distintas entre sí</option></select></label></div>',
+    '<label class="field" style="margin-top:14px"><span>Semilla</span><input id="generation-seed" type="number" min="0" max="2147483647" value="42"><small>La misma semilla repite el mismo resultado.</small></label>',
     mode === "compose" && layouts ? '<div style="margin-top:14px"><span class="label">Familias de layout · vacío = todas</span><div class="choice-row" style="margin-top:8px">' + layouts + "</div></div>" : "",
-    '<details style="margin-top:18px"><summary>Reconstrucción del fondo</summary><div class="stack" style="margin-top:14px">',
-    '<label class="choice"><input id="regenerate-background" type="checkbox"> Rehacer fondo durante la primera tanda</label>',
-    '<div class="form-grid"><label class="field"><span>Motor</span><select id="generation-provider"><option value="opencv">Local · OpenCV</option><option value="auto">Automático</option><option value="magnific">Magnific</option><option value="openai">OpenAI</option></select></label>',
-    '<label class="field"><span>Modelo Magnific</span><select id="generation-model"><option value="">Predeterminado</option>', models, "</select></label></div>",
-    '<label class="field"><span>Dirección visual del fondo</span><textarea id="generation-background-prompt" placeholder="Fondo premium sin texto ni logos"></textarea></label></div></details>',
-    '<button class="button large full" id="run-generation" style="margin-top:20px">✦ ', mode === "catalog" ? "Generar artes por producto" : "Generar variantes", "</button></section>",
+    "</section>",
+    '<button class="button large full" id="run-generation" style="margin-top:20px">✦ ',
+    mode === "catalog" ? "Generar artes por producto" : "Generar variantes", "</button>",
   ].join("");
 }
 
@@ -1276,57 +1685,6 @@ function bindGenerate(project: Project): void {
     });
   });
   bindFormatSelector();
-  query<HTMLInputElement>("#product-files")?.addEventListener("change", async (event) => {
-    const files = Array.from((event.currentTarget as HTMLInputElement).files || []);
-    state.products = files;
-    state.individualProducts = new Set(files.map(productKey));
-    state.groups = [];
-    await renderGenerate();
-  });
-  queryAll<HTMLInputElement>(".individual-product").forEach((checkBox) => {
-    checkBox.addEventListener("change", () => {
-      if (checkBox.checked) state.individualProducts.add(checkBox.value);
-      else state.individualProducts.delete(checkBox.value);
-    });
-  });
-  query("#add-group")?.addEventListener("click", async () => {
-    const members = queryAll<HTMLInputElement>(".group-member:checked").map((item) => item.value);
-    if (members.length < 2) {
-      toast("Elige al menos dos productos para la combinación.", "error");
-      return;
-    }
-    const name = query<HTMLInputElement>("#group-name")!.value.trim() || "Combinación " + String(state.groups.length + 1);
-    state.groups.push({
-      id: "group-" + Date.now().toString(36),
-      name,
-      members,
-      arrangement: query<HTMLSelectElement>("#group-arrangement")!.value as ProductGroup["arrangement"],
-    });
-    await renderGenerate();
-  });
-  queryAll<HTMLButtonElement>(".remove-group").forEach((button) => {
-    button.addEventListener("click", async () => {
-      state.groups = state.groups.filter((group) => group.id !== button.dataset.group);
-      await renderGenerate();
-    });
-  });
-  queryAll<HTMLButtonElement>(".detect-product").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const id = button.dataset.project!;
-      busy("Detectando producto", "Separando el sujeto principal del fondo…", 15);
-      try {
-        const result = await post<any>("/projects/" + id + "/layers/detect-product", { force: false });
-        await refreshProject(id);
-        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
-        if (result.detected) toast("Producto detectado y listo para reemplazar.", "success");
-        await renderGenerate();
-      } catch (error) {
-        toast(errorMessage(error), "error");
-      } finally {
-        idle();
-      }
-    });
-  });
   query("#run-generation")?.addEventListener("click", () => {
     if (state.generationMode === "catalog") runCatalogGeneration();
     else runComposeGeneration(project);
@@ -1340,7 +1698,8 @@ function generationSettings(): Record<string, any> {
     intensity: query<HTMLSelectElement>("#generation-intensity")!.value,
     instruction: query<HTMLTextAreaElement>("#generation-instruction")!.value.trim() || null,
     seed: Number(query<HTMLInputElement>("#generation-seed")!.value),
-    product_arrangement: query<HTMLSelectElement>("#generation-arrangement")!.value,
+    // La posición se eligió en el paso 3, no en esta pantalla.
+    product_arrangement: state.productArrangement,
     background_provider: query<HTMLSelectElement>("#generation-provider")!.value,
     background_model: query<HTMLSelectElement>("#generation-model")!.value || null,
     background_prompt: query<HTMLTextAreaElement>("#generation-background-prompt")!.value.trim() || null,
@@ -1388,7 +1747,7 @@ async function runCatalogGeneration(): Promise<void> {
         const file = individuals[index];
         busyProgress(Math.round(completed / Math.max(1, total) * 100), project.name + " · " + file.name);
         const replaced = await replaceProduct(project.project_id, target.id, file, {
-          hide_others: true, append: false, arrangement: "auto",
+          hide_others: true, append: false, arrangement: state.productArrangement,
         });
         (replaced.warnings || []).forEach((warning: string) => toast(warning, "info"));
         const task = await post<any>("/projects/" + project.project_id + "/auto", {
@@ -1396,7 +1755,7 @@ async function runCatalogGeneration(): Promise<void> {
           seed: settings.seed + kvIndex * 100 + index,
           replace_existing: firstBatch,
           product_label: productName(file),
-          product_arrangement: "auto",
+          product_arrangement: state.productArrangement,
           template_mode: true,
           regenerate_background: settings.regenerate_background && firstBatch,
         });
@@ -1504,8 +1863,11 @@ function resultCard(project: Project, variant: Variant): string {
   const warnings = variant.quality?.warnings || [];
   const svg = variant.meta?.svg;
   const product = variant.meta?.product_label || "Producto";
+  // El backend ya renderiza un JPEG reducido por variante; pedir el PNG a
+  // tamaño real para una rejilla de 280px era descargar megas por tarjeta.
+  const preview = variant.thumbnail || variant.image;
   return [
-    '<article class="result-card"><div class="result-image"><img src="', attr(fileUrl(project.project_id, variant.image)), '" alt="Variante ', String(variant.index), '" loading="lazy"><span class="score">',
+    '<article class="result-card"><div class="result-image"><img src="', attr(fileUrl(project.project_id, preview)), '" alt="Variante ', String(variant.index), '" loading="lazy" decoding="async"><span class="score">',
     String(Math.round(variant.quality?.score || 0)), '</span></div><div class="result-copy"><strong>', String(variant.width), "×", String(variant.height), '</strong><p>',
     esc((format.platform || "") + (format.placement ? " · " + format.placement : " · " + variant.format) + (format.ratio ? " · " + format.ratio : "")), "<br>", esc(product), "</p>",
     '<label class="check"><input class="variant-pick" type="checkbox" value="', attr(key), '"', checked(state.selectedVariants.has(key)), '> Elegir</label>',
@@ -1546,6 +1908,7 @@ async function renderResults(): Promise<void> {
     ].join("");
   }).join("");
   content().innerHTML = [
+    stepBar("results"),
     pageHead("Galería de campaña", "Resultados listos para revisar", "Compara piezas, marca tus favoritas y descarga PNG + PSD + SVG editable para Illustrator."),
     '<div class="stat-row"><div class="stat"><strong>', String(total), '</strong><span>Propuestas</span></div><div class="stat"><strong>',
     String(Math.round(allScores.reduce((sum, value) => sum + value, 0) / Math.max(1, allScores.length))), '</strong><span>Calidad promedio</span></div><div class="stat"><strong>',
@@ -1554,6 +1917,7 @@ async function renderResults(): Promise<void> {
     '<button class="platform-filter result-order', state.resultOrder === "generation" ? " is-active" : "", '" data-order="generation">Orden de generación</button><button class="ghost-button right" id="refresh-results">↻ Actualizar</button></div>',
     sections,
   ].join("");
+  bindStepBar();
   bindResults();
 }
 
