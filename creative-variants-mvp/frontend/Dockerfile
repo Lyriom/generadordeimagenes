@@ -14,6 +14,11 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . ./
 
+# Streamlit captura los fallos de importación de chunks y los muestra dentro de
+# la página. Si una pestaña pide uno justo durante el reemplazo del contenedor,
+# se recarga una sola vez cuando el frontend vuelve a estar disponible.
+RUN python patch_streamlit_index.py
+
 ENV BACKEND_URL=http://backend:8000 \
     STREAMLIT_SERVER_HEADLESS=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false

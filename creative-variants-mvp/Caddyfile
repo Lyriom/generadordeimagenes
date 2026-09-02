@@ -20,8 +20,19 @@
 	# 	{$CV_USER:equipo} {$CV_PASSWORD_HASH}
 	# }
 
-	# Streamlit habla por websocket; Caddy lo pasa sin configurar nada.
-	reverse_proxy frontend:8501
+	# El HTML nunca debe quedar guardado: contiene los nombres hash de los chunks
+	# JavaScript de la versión de Streamlit que está activa en ese momento.
+	@index path / /index.html
+	header @index Cache-Control "no-store, max-age=0"
+
+	# Streamlit habla por websocket; Caddy lo pasa sin configurar nada. Durante
+	# un deploy Compose reemplaza el frontend durante unos segundos. Los GET de
+	# HTML/chunks esperan y reintentan, en vez de dejar un error permanente en la
+	# pestaña que el usuario ya tenía abierta.
+	reverse_proxy frontend:8501 {
+		lb_try_duration 30s
+		lb_try_interval 250ms
+	}
 
 	# Los PSD llegan a 200 MB.
 	request_body {
