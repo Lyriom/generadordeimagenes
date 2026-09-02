@@ -652,16 +652,18 @@ function bindUpload(): void {
   const input = query<HTMLInputElement>("#artwork-files")!;
   const button = query<HTMLButtonElement>("#upload-campaign")!;
   const list = query<HTMLElement>("#upload-file-list")!;
+  let queuedFiles: File[] = [];
   input.addEventListener("change", () => {
-    const files = Array.from(input.files || []);
-    button.disabled = files.length === 0;
-    list.innerHTML = files.map((file) =>
+    queuedFiles = mergeUniqueFiles(queuedFiles, Array.from(input.files || []));
+    input.value = "";
+    button.disabled = queuedFiles.length === 0;
+    list.innerHTML = queuedFiles.map((file) =>
       '<div class="file-chip"><strong>' + esc(file.name) + '</strong><span>' +
       (file.size / 1024 / 1024).toFixed(1) + " MB</span></div>"
     ).join("");
   });
   button.addEventListener("click", async () => {
-    const files = Array.from(input.files || []);
+    const files = queuedFiles;
     if (!files.length) return;
     const logo = query<HTMLInputElement>("#logo-file")?.files?.[0];
     const font = query<HTMLInputElement>("#font-file")?.files?.[0];
@@ -1592,6 +1594,14 @@ function productKey(file: File): string {
   return file.name + "::" + String(file.size) + "::" + String(file.lastModified);
 }
 
+function mergeUniqueFiles(current: File[], incoming: File[]): File[] {
+  const byKey = new Map(current.map((file) => [productKey(file), file]));
+  incoming.forEach((file) => {
+    if (!byKey.has(productKey(file))) byKey.set(productKey(file), file);
+  });
+  return Array.from(byKey.values());
+}
+
 function productName(file: File): string {
   return file.name.replace(/\.[^.]+$/, "");
 }
@@ -1779,10 +1789,13 @@ async function renderProducts(): Promise<void> {
 function bindProductStep(): void {
   query<HTMLInputElement>("#product-files")?.addEventListener("change", async (event) => {
     const files = Array.from((event.currentTarget as HTMLInputElement).files || []);
-    state.products = files;
-    // Por defecto todos llevan arte individual, como en el flujo anterior.
-    state.individualProducts = new Set(files.map(productKey));
-    state.groups = [];
+    const existing = new Set(state.products.map(productKey));
+    state.products = mergeUniqueFiles(state.products, files);
+    // Los productos nuevos se marcan por defecto, sin alterar los anteriores ni
+    // las combinaciones que el usuario ya había preparado.
+    files.forEach((file) => {
+      if (!existing.has(productKey(file))) state.individualProducts.add(productKey(file));
+    });
     await renderProducts();
   });
   queryAll<HTMLInputElement>(".individual-product").forEach((checkBox) => {
