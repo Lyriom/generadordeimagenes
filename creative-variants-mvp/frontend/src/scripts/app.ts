@@ -232,7 +232,8 @@ function renderChrome(): void {
     "</small></div>",
   ].join("");
   const live = query<HTMLElement>(".live-pill")!;
-  live.innerHTML = '<i></i>' + (connected ? "Motor conectado" : "Sin conexión");
+  // El texto va envuelto: en móvil el CSS oculta el <span> y deja solo el punto.
+  live.innerHTML = '<i></i><span>' + (connected ? "Motor conectado" : "Sin conexión") + "</span>";
 
   const project = activeProject();
   const panel = query<HTMLElement>("#sidebar-project")!;
