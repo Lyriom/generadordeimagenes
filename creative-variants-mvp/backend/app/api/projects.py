@@ -8,7 +8,17 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.responses import FileResponse, StreamingResponse
 
 from ..config import settings
@@ -70,11 +80,22 @@ from ..services.security import (
     validate_font_bytes,
     validate_image_path,
 )
-from .deps import as_http_error, bad_request, load_project_or_404, resolve_ingest
+from .deps import (
+    as_http_error,
+    bad_request,
+    bind_session,
+    load_project_or_404,
+    resolve_ingest,
+)
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/projects", tags=["proyectos"])
+router = APIRouter(
+    prefix="/projects",
+    tags=["proyectos"],
+    # Etiqueta el trabajo con la sesión del navegador que lo pide.
+    dependencies=[Depends(bind_session)],
+)
 
 CHUNK = 1024 * 1024
 
@@ -681,7 +702,18 @@ def create_projects_from_ingest_split(request: IngestImportRequest) -> ProjectIm
 
 
 @router.get("", response_model=list[ProjectSummary], summary="Listar proyectos")
-def list_projects() -> list[ProjectSummary]:
+def list_projects(
+    session: str | None = Query(
+        None,
+        max_length=64,
+        description="Devuelve solo el trabajo de esta sesión. Sin él, todo.",
+    ),
+) -> list[ProjectSummary]:
+    projects = storage.list_projects()
+    if session:
+        projects = [
+            project for project in projects if project.meta.get("session_id") == session
+        ]
     return [
         ProjectSummary(
             project_id=project.project_id,
@@ -692,8 +724,38 @@ def list_projects() -> list[ProjectSummary]:
             layers=len(project.layers),
             variants=len(project.variants),
         )
-        for project in storage.list_projects()
+        for project in projects
     ]
+
+
+@router.post("/purge", summary="Barrer el trabajo caducado y medir el disco")
+def purge_projects():
+    """Limpieza por antigüedad, nunca por sesión.
+
+    La interfaz la llama al arrancar. El criterio es el tiempo sin tocar y no
+    "no es mi sesión" a propósito: si fuera por sesión, abrir la página en un
+    segundo navegador borraría la campaña que otra persona está produciendo.
+    """
+    removed = storage.purge_expired_projects()
+    return {
+        "removed": removed,
+        "removed_count": len(removed),
+        "retention_hours": settings.project_retention_hours,
+        "max_projects_kept": settings.max_projects_kept,
+        "disk_usage_mb": storage.disk_usage_mb(),
+        "remaining": len(storage.list_projects()),
+    }
+
+
+@router.delete("", summary="Borrar todo el trabajo guardado")
+def delete_all_projects():
+    """Vacía la carpeta de proyectos. Sin vuelta atrás y a petición explícita."""
+    removed = storage.delete_all_projects()
+    return {
+        "removed": removed,
+        "removed_count": len(removed),
+        "disk_usage_mb": storage.disk_usage_mb(),
+    }
 
 
 @router.get("/{project_id}", response_model=Project, summary="Obtener un proyecto")

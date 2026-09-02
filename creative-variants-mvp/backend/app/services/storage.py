@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import tempfile
+import time
+from contextvars import ContextVar
 from pathlib import Path
 
 from ..config import settings
@@ -25,6 +27,20 @@ SUBDIRS = (
 
 class ProjectNotFoundError(KeyError):
     """No existe el proyecto solicitado."""
+
+
+# Sesión del navegador que está haciendo la petición en curso. La rellena la
+# dependencia `bind_session` de la API; en el worker de Celery queda vacía, y
+# ahí no hace falta porque el proyecto ya viene etiquetado de su creación.
+_current_session: ContextVar[str | None] = ContextVar("current_session", default=None)
+
+
+def set_current_session(session_id: str | None) -> None:
+    _current_session.set((session_id or "").strip() or None)
+
+
+def current_session() -> str | None:
+    return _current_session.get()
 
 
 def projects_root() -> Path:
@@ -52,6 +68,12 @@ def project_json_path(project_id: str) -> Path:
 def save_project(project: Project) -> Path:
     """Escritura atómica de project.json."""
     base = ensure_project_dirs(project.project_id)
+    # Se etiqueta una sola vez, al crearlo: así el proyecto sigue siendo de la
+    # sesión que lo subió aunque más tarde lo toque el worker o otra pestaña.
+    if not project.meta.get("session_id"):
+        session = current_session()
+        if session:
+            project.meta["session_id"] = session
     project.touch()
     target = base / "project.json"
     payload = project.model_dump(mode="json")
@@ -97,6 +119,91 @@ def delete_project(project_id: str) -> bool:
         return False
     shutil.rmtree(base, ignore_errors=True)
     return not base.exists()
+
+
+def _last_touched(entry: Path) -> float:
+    """Momento de la última escritura del proyecto.
+
+    Se usa `project.json`, que se reescribe en cada cambio, y no la carpeta:
+    en algunos sistemas de archivos el mtime del directorio no se actualiza al
+    escribir dentro, y un proyecto en uso parecería abandonado.
+    """
+    manifest = entry / "project.json"
+    try:
+        return manifest.stat().st_mtime if manifest.exists() else entry.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def purge_expired_projects(
+    retention_hours: int | None = None,
+    max_kept: int | None = None,
+) -> list[str]:
+    """Borra el trabajo que ya no pertenece a ninguna sesión viva.
+
+    Dos criterios, ambos por antigüedad y nunca por sesión: un usuario no puede
+    borrar el trabajo en curso de otro por el simple hecho de abrir la página.
+
+      1. Todo proyecto sin tocar desde hace más de `retention_hours`.
+      2. Si aun así quedan más de `max_kept`, los más antiguos hasta el tope.
+
+    Devuelve los identificadores borrados.
+    """
+    hours = settings.project_retention_hours if retention_hours is None else retention_hours
+    keep = settings.max_projects_kept if max_kept is None else max_kept
+
+    try:
+        entries = [entry for entry in projects_root().iterdir() if entry.is_dir()]
+    except OSError:
+        return []
+
+    # Del más reciente al más antiguo, para que los recortes caigan por el final.
+    entries.sort(key=_last_touched, reverse=True)
+    cutoff = time.time() - max(0, hours) * 3600
+    doomed: list[Path] = []
+    survivors: list[Path] = []
+
+    for entry in entries:
+        if hours > 0 and _last_touched(entry) < cutoff:
+            doomed.append(entry)
+        else:
+            survivors.append(entry)
+
+    if keep > 0 and len(survivors) > keep:
+        doomed.extend(survivors[keep:])
+
+    removed: list[str] = []
+    for entry in doomed:
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            removed.append(entry.name)
+    return removed
+
+
+def delete_all_projects() -> list[str]:
+    """Vacía la carpeta de proyectos. Es lo que pide el botón de borrar todo."""
+    removed: list[str] = []
+    try:
+        entries = [entry for entry in projects_root().iterdir() if entry.is_dir()]
+    except OSError:
+        return []
+    for entry in entries:
+        shutil.rmtree(entry, ignore_errors=True)
+        if not entry.exists():
+            removed.append(entry.name)
+    return removed
+
+
+def disk_usage_mb() -> float:
+    """Cuánto ocupan los proyectos, para poder avisar antes de que sea tarde."""
+    total = 0
+    for path in projects_root().rglob("*"):
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except OSError:
+            continue
+    return round(total / (1024 * 1024), 1)
 
 
 def abs_path(project_id: str, relative: str) -> Path:

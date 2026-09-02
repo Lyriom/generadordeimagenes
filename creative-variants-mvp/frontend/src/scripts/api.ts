@@ -1,5 +1,33 @@
 const API_ROOT = "/api";
 
+/* Identidad de la sesión del navegador.
+ *
+ * Nada de lo que se produce está pensado para quedarse en el servidor: un PSD
+ * de 100 MB deja cientos de MB entre capas, máscaras, fondos y variantes, y
+ * acumularlo llena el disco. El backend etiqueta cada proyecto con esta sesión
+ * y barre por antigüedad; la interfaz solo lista lo de la sesión en curso.
+ *
+ * Va en `sessionStorage`: sobrevive a recargar la pestaña y muere al cerrarla. */
+const SESSION_KEY = "creative-session";
+
+function newSessionId(): string {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) return crypto.randomUUID();
+  return "s-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+}
+
+export function sessionId(): string {
+  try {
+    const existing = sessionStorage.getItem(SESSION_KEY);
+    if (existing) return existing;
+    const created = newSessionId();
+    sessionStorage.setItem(SESSION_KEY, created);
+    return created;
+  } catch {
+    // Modo privado sin almacenamiento: una sesión por carga de página.
+    return newSessionId();
+  }
+}
+
 export class ApiError extends Error {
   status: number;
   payload: unknown;
@@ -32,6 +60,7 @@ export async function request<T = any>(
     ...init,
     headers: {
       ...(init.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      "X-Session-Id": sessionId(),
       ...(init.headers || {}),
     },
   });

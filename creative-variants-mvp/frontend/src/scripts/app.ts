@@ -6,6 +6,7 @@ import {
   pollTask,
   post,
   put,
+  sessionId,
   thumbnailUrl,
   variantPngUrl,
 } from "./api";
@@ -203,6 +204,13 @@ interface State {
   /* Posición de los productos individuales dentro del arte. Vive en el estado y
      no en el DOM porque se elige en el paso 3 y se usa al generar en el 4. */
   productArrangement: ProductGroup["arrangement"];
+  /* Lo que informó el barrido de retención: horas de vida y disco ocupado. */
+  retention: {
+    retention_hours?: number;
+    max_projects_kept?: number;
+    disk_usage_mb?: number;
+    removed_count?: number;
+  } | null;
 }
 
 const state: State = {
@@ -224,6 +232,7 @@ const state: State = {
   autoFormats: true,
   resultOrder: "score",
   productArrangement: "auto",
+  retention: null,
 };
 
 const ARRANGEMENT_OPTIONS: Record<string, string> = {
@@ -354,10 +363,12 @@ async function refreshProject(projectId: string): Promise<Project> {
 }
 
 async function refreshAll(): Promise<void> {
+  // El listado va acotado a la sesión: el trabajo de sesiones anteriores no se
+  // ofrece porque el servidor lo borra por antigüedad.
   const [health, capabilities, projects] = await Promise.all([
     get<any>("/health"),
     get<Capabilities>("/capabilities"),
-    get<ProjectSummary[]>("/projects"),
+    get<ProjectSummary[]>("/projects?session=" + encodeURIComponent(sessionId())),
   ]);
   state.health = health;
   state.capabilities = capabilities;
@@ -471,13 +482,48 @@ function projectCard(project: Project | ProjectSummary, full?: Project): string 
   ].join("");
 }
 
-/* Los trabajos anteriores van en una lista compacta con selección múltiple, no
-   en una rejilla de tarjetas: con 20 proyectos de pruebas acumulados, la
-   rejilla tapaba por completo la zona de carga, que es lo que se viene a usar. */
+/** Aviso permanente de que esto no es un archivo: el trabajo se borra. */
+function retentionNotice(): string {
+  const info = state.retention;
+  const hours = info?.retention_hours ?? 8;
+  const disk = info?.disk_usage_mb;
+  return [
+    '<div class="notice warning"><strong>Nada de esto se guarda.</strong> El trabajo vive solo durante tu sesión y el servidor lo borra tras ',
+    String(hours), " horas sin actividad, para no llenarse.",
+    disk !== undefined ? " Ocupado ahora: <strong>" + String(disk) + " MB</strong>." : "",
+    ' Descarga lo que quieras conservar desde <em>Resultados</em>.',
+    '<div class="button-row" style="margin-top:10px"><button class="danger-button" id="wipe-all">Borrar todo del servidor ahora</button></div></div>',
+  ].join("");
+}
+
+function bindRetention(): void {
+  query("#wipe-all")?.addEventListener("click", async () => {
+    if (!window.confirm(
+      "Se borrará TODO el trabajo del servidor, incluido el de otras sesiones abiertas. ¿Continuar?",
+    )) return;
+    busy("Liberando el servidor", "Borrando proyectos y sus archivos…", 20);
+    try {
+      const result = await del<any>("/projects");
+      state.campaignIds = [];
+      state.campaign = [];
+      state.activeId = null;
+      saveSession();
+      await refreshAll();
+      toast(String(result.removed_count || 0) + " proyecto(s) borrados. Disco: " +
+        String(result.disk_usage_mb ?? 0) + " MB.", "success");
+      await navigate("campaign");
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      idle();
+    }
+  });
+}
+
+/* El trabajo de esta sesión, en lista compacta con selección múltiple. No hay
+   "trabajos guardados": lo de sesiones anteriores el servidor ya lo borró. */
 function savedProjectsHtml(items: ProjectSummary[]): string {
-  if (!items.length) {
-    return '<div class="notice">No hay otros trabajos guardados.</div>';
-  }
+  if (!items.length) return "";
   const rows = items.map((item) => [
     '<label class="saved-row"><input class="saved-check" type="checkbox" value="', attr(item.project_id), '">',
     '<img src="', attr(thumbnailUrl(item.project_id, 120)), '" alt="" loading="lazy" decoding="async">',
@@ -489,8 +535,8 @@ function savedProjectsHtml(items: ProjectSummary[]): string {
     "</label>",
   ].join("")).join("");
   return [
-    '<details class="card"><summary>Trabajos guardados · ', String(items.length), " proyectos</summary>",
-    '<p class="muted tiny" style="margin-top:10px">Abre uno para seguir trabajándolo, o marca los que ya no sirvan y bórralos de una vez.</p>',
+    '<details class="card"><summary>Otros KV de esta sesión · ', String(items.length), "</summary>",
+    '<p class="muted tiny" style="margin-top:10px">Ábrelos para seguir trabajándolos, o marca los que ya no sirvan y bórralos para liberar el servidor.</p>',
     '<div class="saved-list">', rows, "</div>",
     '<div class="button-row" style="margin-top:14px"><button class="ghost-button" id="saved-select-all">Marcar todos</button>',
     '<button class="danger-button" id="saved-delete" disabled>Borrar marcados</button>',
@@ -543,11 +589,14 @@ async function renderCampaign(): Promise<void> {
     state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
     '<div class="spacer"></div>',
     savedProjectsHtml(saved),
+    '<div class="spacer"></div>',
+    retentionNotice(),
   ].join("");
 
   bindStepBar();
   bindStepFooter("campaign");
   bindSavedProjects();
+  bindRetention();
   bindProjectCards();
   query("#clear-campaign")?.addEventListener("click", () => {
     state.campaignIds = [];
@@ -769,6 +818,14 @@ export async function mountApp(): Promise<void> {
   const session = readSession();
   state.campaignIds = session.ids;
   state.activeId = session.active;
+
+  // Barrido al abrir: libera el disco del servidor sin depender de reinicios.
+  // Borra por antigüedad, así que no toca la campaña que otro esté produciendo.
+  try {
+    state.retention = await post<any>("/projects/purge");
+  } catch {
+    /* si falla, el arranque del backend ya hace su propio barrido */
+  }
 
   queryAll<HTMLButtonElement>(".nav-item").forEach((button) => {
     button.addEventListener("click", () => navigate(button.dataset.view as ViewName));

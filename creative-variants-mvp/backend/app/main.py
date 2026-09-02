@@ -88,6 +88,12 @@ async def _not_found_handler(_: Request, exc: storage.ProjectNotFoundError) -> J
 @app.on_event("startup")
 def _startup() -> None:
     storage.projects_root()
+    # El trabajo no sobrevive a la sesión: al arrancar se limpia lo que quedó
+    # de sesiones anteriores, que es lo que llenaba el disco del servidor.
+    removed = storage.purge_expired_projects()
+    if removed:
+        logger.info("Retención: %s proyecto(s) caducado(s) eliminados", len(removed))
+    logger.info("Proyectos en disco: %s MB", storage.disk_usage_mb())
     status_info = provider_status()
     logger.info("Datos en %s", settings.data_dir)
     logger.info(

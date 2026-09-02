@@ -3,12 +3,34 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import HTTPException, status
+from fastapi import Header, HTTPException, status
 
 from ..config import settings
 from ..models import Project
 from ..services import storage
 from ..services.security import FileValidationError, PathTraversalError, resolve_inside
+
+
+async def bind_session(
+    x_session_id: str | None = Header(
+        None,
+        alias="X-Session-Id",
+        max_length=64,
+        description="Sesión del navegador. El trabajo se etiqueta con ella.",
+    ),
+) -> str | None:
+    """Deja la sesión de la petición al alcance de `storage.save_project`.
+
+    Va como dependencia del router para no tener que añadir el parámetro a cada
+    endpoint que crea proyectos: cualquiera que se guarde durante la petición
+    queda etiquetado con la sesión que lo pidió.
+
+    Tiene que ser `async`: FastAPI ejecuta las dependencias sincrónicas en un
+    hilo del pool, que recibe una copia del contexto, y el ContextVar fijado
+    allí no llega al endpoint. Declarada así corre en la misma tarea.
+    """
+    storage.set_current_session(x_session_id)
+    return x_session_id
 
 
 def load_project_or_404(project_id: str) -> Project:

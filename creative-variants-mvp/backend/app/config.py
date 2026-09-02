@@ -40,6 +40,17 @@ class Settings:
             os.getenv("INGEST_DIR", str(default_data / "ingest"))
         ).resolve()
 
+        # --- Retención ---
+        # Nada está pensado para quedarse: un PSD de 100 MB se convierte en
+        # cientos de MB de capas, máscaras, fondos y variantes. Sin barrido el
+        # disco del servidor se llena y el sitio se cae.
+        #
+        # El trabajo vive mientras dura la sesión y se borra pasadas estas
+        # horas. El tope por cantidad es la red de seguridad para el caso de
+        # muchas campañas seguidas dentro de la ventana de retención.
+        self.project_retention_hours: int = _env_int("PROJECT_RETENTION_HOURS", 8)
+        self.max_projects_kept: int = _env_int("MAX_PROJECTS_KEPT", 60)
+
         # --- Límites de subida ---
         # Los PSD de KV pesan 60-100 MB: el límite debe cubrirlos.
         self.max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 250)
