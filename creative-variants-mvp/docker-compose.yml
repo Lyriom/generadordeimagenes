@@ -14,6 +14,12 @@ services:
       INGEST_DIR: /app/data/ingest
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Los topes de tamaño viven aquí y no en el .env. El .env es del servidor
+      # y el despliegue no lo toca a propósito (ahí están las claves), así que
+      # un valor viejo se quedaba mandando y no había forma de moverlo sin
+      # entrar por SSH. `environment` gana a `env_file`, así que esto manda.
+      MAX_UPLOAD_MB: "4096"
+      MAX_IMAGE_MEGAPIXELS: "400"
     ports:
       - "8000:8000"
     volumes:
@@ -77,6 +83,12 @@ services:
       INGEST_DIR: /app/data/ingest
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
+      # Los topes de tamaño viven aquí y no en el .env. El .env es del servidor
+      # y el despliegue no lo toca a propósito (ahí están las claves), así que
+      # un valor viejo se quedaba mandando y no había forma de moverlo sin
+      # entrar por SSH. `environment` gana a `env_file`, así que esto manda.
+      MAX_UPLOAD_MB: "4096"
+      MAX_IMAGE_MEGAPIXELS: "400"
     volumes:
       - ./data:/app/data
     depends_on:

@@ -62,6 +62,25 @@ function readableDetail(payload: any): string {
   return String(detail || "El servidor no pudo completar la operación.");
 }
 
+function gatewayMessage(status: number): string {
+  if (status === 413) {
+    return (
+      "El archivo es más grande de lo que admite el servidor web, que corta la " +
+      "subida antes de que llegue a la aplicación. Déjalo en la carpeta " +
+      "data/ingest del servidor y tráelo desde la pestaña «Tomarlo de la " +
+      "carpeta compartida», que no pasa por el navegador."
+    );
+  }
+  if (status === 502 || status === 503 || status === 504) {
+    return (
+      "El servidor no contestó a tiempo. Si era un PSD grande puede seguir " +
+      "trabajando: espere un momento y recargue antes de repetir la operación."
+    );
+  }
+  return `El servidor respondió ${status} y no dio detalle.`;
+}
+
+
 export async function request<T = any>(
   path: string,
   init: RequestInit = {},
@@ -78,7 +97,15 @@ export async function request<T = any>(
   const payload = type.includes("application/json")
     ? await response.json()
     : await response.blob();
-  if (!response.ok) throw new ApiError(readableDetail(payload), response.status, payload);
+  if (!response.ok) {
+    // Los proxys de delante (nginx, Caddy) contestan en HTML, no en JSON. Sin
+    // esto el mensaje que se veía era "[object Blob]", justo en el error más
+    // frecuente al subir un PSD grande, que además tiene solución conocida.
+    const message = type.includes("application/json")
+      ? readableDetail(payload)
+      : gatewayMessage(response.status);
+    throw new ApiError(message, response.status, payload);
+  }
   return payload as T;
 }
 
