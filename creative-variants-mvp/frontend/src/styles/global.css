@@ -676,8 +676,7 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   border-radius: var(--radius);
   background: var(--surface-2);
 }
-.role-thumb,
-.copy-thumb {
+.role-thumb {
   grid-area: thumb;
   align-self: center;
   width: 64px;
@@ -688,6 +687,17 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   background:
     conic-gradient(var(--surface-3) 25%, var(--surface) 0 50%,
       var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 12px 12px;
+}
+.copy-thumb {
+  grid-area: thumb;
+  align-self: center;
+  width: 116px;
+  height: 46px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  background:
+    conic-gradient(var(--surface-3) 25%, var(--surface) 0 50%,
+      var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 10px 10px;
 }
 .role-thumb.is-text,
 .copy-thumb.is-text {
@@ -724,8 +734,8 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   /* Con áreas nombradas: las miniaturas y el rótulo se comparten con la
      revisión de roles, que ya declara su `grid-area`. Sin nombrarlas aquí, el
      navegador las colocaba en filas implícitas y la fila salía descuadrada. */
-  grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1.7fr) minmax(200px, auto);
-  grid-template-areas: "thumb meta edit actions";
+  grid-template-columns: 116px minmax(0, 1fr) minmax(0, 1.6fr) minmax(200px, auto);
+  grid-template-areas: "thumb meta edit actions" "zoom zoom zoom zoom";
   gap: 6px 12px;
   align-items: center;
   padding: 10px;
@@ -742,6 +752,39 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   font-family: inherit;
 }
 .copy-locked { margin: 0; }
+.copy-thumb-btn {
+  grid-area: thumb;
+  position: relative;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: zoom-in;
+  line-height: 0;
+}
+.copy-thumb-btn .copy-thumb { grid-area: auto; }
+.copy-zoom-hint {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  font-size: 10px;
+  line-height: 14px;
+}
+.copy-zoom {
+  grid-area: zoom;
+  margin-top: 8px;
+  padding: 10px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  /* Tablero: el copy suele ser blanco o de un color claro sobre transparencia. */
+  background:
+    conic-gradient(var(--surface-3) 25%, var(--surface) 0 50%,
+      var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 14px 14px;
+}
+.copy-zoom img { display: block; max-width: 100%; height: auto; }
 .copy-actions {
   grid-area: actions;
   display: flex;
@@ -758,9 +801,122 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 
 @media (max-width: 980px) {
   .copy-row {
-    grid-template-columns: 64px minmax(0, 1fr);
-    grid-template-areas: "thumb meta" "edit edit" "actions actions";
+    grid-template-columns: 116px minmax(0, 1fr);
+    grid-template-areas: "thumb meta" "edit edit" "actions actions" "zoom zoom";
   }
+}
+
+/* Elegir qué copy cambia por producto: los píxeles del elemento a la izquierda
+   y el arte con recuadros numerados a la derecha. Un nombre de capa de
+   Photoshop —"Decoración 2"— no permite decidir nada. */
+.copy-choose {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  gap: 16px;
+  align-items: start;
+}
+.copy-picks { display: grid; gap: 8px; }
+.copy-pick {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px 18px 112px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  cursor: pointer;
+}
+.copy-pick.is-on { border-color: var(--accent); background: var(--accent-soft, var(--surface-3)); }
+.copy-pick-num {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--surface-3);
+  color: var(--fg-muted);
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+}
+.copy-pick.is-on .copy-pick-num { background: var(--accent); color: var(--accent-fg); }
+.copy-pick-art {
+  width: 112px;
+  height: 40px;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  /* Tablero: un copy en blanco sobre fondo oscuro parecería vacío. */
+  background:
+    conic-gradient(var(--surface-3) 25%, var(--surface) 0 50%,
+      var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 10px 10px;
+}
+.copy-pick-art.is-text {
+  display: grid;
+  place-items: center;
+  padding: 3px;
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 9px;
+  font-weight: 700;
+  text-align: center;
+  word-break: break-word;
+}
+.copy-pick-copy { min-width: 0; }
+.copy-pick-copy strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.copy-pick-copy small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg-muted);
+  font-size: var(--fs-2xs);
+}
+
+.copy-map {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-2);
+}
+.copy-map img { display: block; width: 100%; height: auto; }
+.copy-map-box {
+  position: absolute;
+  border: 2px solid var(--fg-muted);
+  border-radius: 3px;
+}
+.copy-map-box.is-on { border-color: var(--accent); background: rgba(99, 102, 241, .18); }
+.copy-map-box i {
+  position: absolute;
+  top: -9px;
+  left: -9px;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+}
+.copy-map-box.is-on i { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+
+.copy-col { display: flex; align-items: center; gap: 8px; }
+.copy-col img { width: 46px; height: 22px; object-fit: contain; border-radius: 3px; }
+
+@media (max-width: 980px) {
+  .copy-choose { grid-template-columns: minmax(0, 1fr); }
+  .copy-map { max-width: 360px; }
 }
 
 @media (max-width: 820px) {
@@ -1576,6 +1732,124 @@ td.truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white
 .notice.success { color: var(--success); border-color: transparent; background: var(--success-soft); }
 
 /* ------------------------------------------------- overlay y avisos flotantes */
+
+/* ------------------------------------------------------------------ visor */
+/* La rejilla de resultados sirve para comparar de un vistazo, no para revisar:
+   a 280 px no se juzga si un precio quedó legible ni si un legal está bien
+   escrito. El visor abre la pieza a pantalla completa, deja pasar de una a otra
+   con las flechas y permite verla a tamaño real. */
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  display: grid;
+  /* Sin esto, una barra que desborda hace scroll horizontal a todo el visor y
+     se lleva por delante la flecha de "siguiente". */
+  overflow: hidden;
+  /* Una sola columna acotada: los hijos de un grid valen `min-width: auto` por
+     defecto, así que un aviso largo en el pie ensanchaba el visor entero y la
+     flecha de "siguiente" se quedaba fuera de la pantalla. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: rgba(8, 9, 16, 0.94);
+  backdrop-filter: blur(10px);
+  animation: fade 0.18s var(--ease);
+}
+.viewer-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.viewer-head { min-width: 0; flex: 1; }
+.viewer-head strong {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.viewer-head span { color: var(--fg-muted); font-size: var(--fs-2xs); }
+.viewer-body {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: stretch;
+  min-width: 0;
+  min-height: 0;
+}
+.viewer-stage {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  min-height: 0;
+  padding: 12px;
+  overflow: auto;
+}
+.viewer-stage img {
+  max-width: 100%;
+  /* Contra la ventana y no contra el padre: dentro de un grid el 100% se
+     resolvía contra una fila de alto automático y la pieza salía cortada. La
+     resta son la barra de arriba y el pie de avisos. */
+  max-height: calc(100vh - 132px);
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  /* Tablero: un arte con transparencia parecería recortado sobre negro. */
+  background:
+    conic-gradient(var(--surface-3) 25%, var(--surface-2) 0 50%,
+      var(--surface-3) 0 75%, var(--surface-2) 0) 0 0 / 18px 18px;
+}
+/* A tamaño real se desplaza dentro del escenario: es como se comprueba la
+   legibilidad de un precio antes de aprobarlo. */
+.viewer.is-real .viewer-stage { place-items: start center; }
+.viewer.is-real .viewer-stage img { max-width: none; max-height: none; }
+@supports (height: 100dvh) {
+  .viewer-stage img { max-height: calc(100dvh - 132px); }
+}
+.viewer-nav {
+  align-self: center;
+  padding: 18px 14px;
+  border: 0;
+  background: none;
+  color: var(--fg-muted);
+  font-size: 34px;
+  line-height: 1;
+  cursor: pointer;
+}
+.viewer-nav:hover { color: var(--fg); }
+.viewer-nav[disabled] { opacity: .25; cursor: default; }
+.viewer-foot {
+  min-width: 0;
+  padding: 10px 16px 14px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-muted);
+  font-size: var(--fs-2xs);
+  overflow-wrap: anywhere;
+}
+/* `display: contents` deja que la imagen siga siendo hija de la rejilla de la
+   tarjeta, así que las reglas de .result-image img no cambian. El botón no
+   genera caja: el cursor va en la imagen. */
+.result-open { display: contents; }
+.result-image img { cursor: zoom-in; }
+
+@media (max-width: 720px) {
+  /* El nombre de la pieza ocupa su propia línea y los botones se desplazan en
+     una tira: apilarlos a la fuerza partía el título letra a letra. */
+  .viewer-bar { position: relative; padding: 10px 46px 10px 12px; }
+  .viewer-head { flex: 1 1 100%; }
+  .viewer-bar .button-row {
+    flex: 1 1 100%;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+  .viewer-bar > .icon-button { position: absolute; top: 8px; right: 8px; }
+  .viewer-nav { font-size: 26px; padding: 12px 4px; }
+  .viewer-stage { padding: 8px 2px; }
+  .viewer-foot { padding: 8px 12px 10px; }
+}
 
 .busy-overlay {
   position: fixed;

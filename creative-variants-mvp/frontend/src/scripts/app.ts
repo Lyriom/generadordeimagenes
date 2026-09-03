@@ -438,6 +438,7 @@ async function navigate(view: ViewName): Promise<void> {
   state.view = view;
   renderChrome();
   document.body.classList.remove("menu-open");
+  closeViewer();
   content().innerHTML = '<div class="loading-state"><div class="loader"></div><strong>Cargando</strong></div>';
   try {
     if (view === "campaign") await renderCampaign();
@@ -796,6 +797,7 @@ export async function mountApp(): Promise<void> {
     button.addEventListener("click", () => navigate(button.dataset.view as ViewName));
   });
   query("#mobile-menu")?.addEventListener("click", () => document.body.classList.toggle("menu-open"));
+  bindViewer();
   query("#refresh-button")?.addEventListener("click", () => window.location.reload());
 
   try {
@@ -1209,11 +1211,16 @@ function twinLayerId(source: Project, target: Project, layerId: string): string 
 }
 
 function copyThumb(project: Project, item: ArtTextLayer): string {
-  if (item.src) {
-    return '<img class="copy-thumb" src="' + attr(fileUrl(project.project_id, item.src)) +
-      '" alt="' + attr(item.name) + '" loading="lazy" decoding="async">';
+  if (!item.src) {
+    return '<span class="copy-thumb is-text">' + esc(item.text.slice(0, 28) || "◇") + "</span>";
   }
-  return '<span class="copy-thumb is-text">' + esc(item.text.slice(0, 28) || "◇") + "</span>";
+  const url = attr(fileUrl(project.project_id, item.src));
+  return [
+    '<button type="button" class="copy-thumb-btn zoom-copy" data-layer="', attr(item.id),
+    '" title="Ver el elemento en grande">',
+    '<img class="copy-thumb" src="', url, '" alt="', attr(item.name),
+    '" loading="lazy" decoding="async"><span class="copy-zoom-hint">⤢</span></button>',
+  ].join("");
 }
 
 function copyRow(project: Project, item: ArtTextLayer): string {
@@ -1221,7 +1228,11 @@ function copyRow(project: Project, item: ArtTextLayer): string {
   const editor = item.editable
     ? [
         '<textarea class="copy-text" rows="', String(lines), '" data-layer="', attr(item.id),
-        '" spellcheck="false">', esc(item.text), "</textarea>",
+        '" spellcheck="false" placeholder="',
+        item.text
+          ? ""
+          : "Lee la miniatura de la izquierda y escribe aquí el texto que la reemplaza",
+        '">', esc(item.text), "</textarea>",
       ].join("")
     : '<p class="muted tiny copy-locked">Sus píxeles no contienen texto que se pueda medir ' +
       "(es una forma, un sello o una foto). Se puede quitar del arte, pero no reescribir.</p>";
@@ -1234,6 +1245,10 @@ function copyRow(project: Project, item: ArtTextLayer): string {
     '<div class="copy-row', item.removed ? " is-removed" : "", '">', copyThumb(project, item),
     '<div class="copy-meta"><strong>', esc(item.name), "</strong><small>", esc(notes), "</small></div>",
     '<div class="copy-edit">', editor, "</div>",
+    item.src
+      ? '<div class="copy-zoom" data-layer="' + attr(item.id) + '" hidden><img src="' +
+        attr(fileUrl(project.project_id, item.src)) + '" alt="' + attr(item.name) + '"></div>'
+      : "",
     '<div class="copy-actions">',
     item.editable
       ? '<button class="button small save-copy" data-layer="' + attr(item.id) + '">Guardar texto</button>'
@@ -1350,6 +1365,12 @@ function bindCopyEditor(project: Project): void {
     if (form) form.hidden = !form.hidden;
   });
   query("#save-brand-font")?.addEventListener("click", () => void saveBrandFont(project));
+  queryAll<HTMLButtonElement>(".zoom-copy").forEach((button) => {
+    button.addEventListener("click", () => {
+      const panel = query<HTMLElement>('.copy-zoom[data-layer="' + button.dataset.layer + '"]');
+      if (panel) panel.hidden = !panel.hidden;
+    });
+  });
   queryAll<HTMLButtonElement>(".save-copy").forEach((button) => {
     button.addEventListener("click", () => {
       const id = button.dataset.layer!;
@@ -2085,6 +2106,55 @@ function setCopyValue(key: string, layerId: string, value: string): void {
   stored[layerId] = value;
 }
 
+/* Un nombre de capa de Photoshop no dice nada: «Decoración 2», «logo marci
+   copia». Para elegir qué copy cambia por producto hay que ver el elemento, así
+   que cada opción enseña sus píxeles y un mapa señala dónde cae en el arte.
+   Las dos cosas salen de datos que el cliente ya tiene: el PNG de la capa y su
+   geometría. Ninguna pide un render nuevo al servidor. */
+
+function copyPick(project: Project, item: ArtTextLayer, index: number): string {
+  const marca = state.copyFields.has(item.id);
+  const vista = item.src
+    ? '<img class="copy-pick-art" src="' + attr(fileUrl(project.project_id, item.src)) +
+      '" alt="" loading="lazy" decoding="async">'
+    : '<span class="copy-pick-art is-text">' + esc((item.text || "◇").slice(0, 18)) + "</span>";
+  const texto = (item.text || "").trim();
+  return [
+    '<label class="copy-pick', marca ? " is-on" : "", '">',
+    '<span class="copy-pick-num">', String(index + 1), "</span>",
+    '<input class="copy-field" type="checkbox" value="', attr(item.id), '"', checked(marca), ">",
+    vista,
+    '<span class="copy-pick-copy"><strong>', esc(item.name), "</strong><small>",
+    texto ? esc(texto.slice(0, 40)) : esc(CATEGORY_LABELS[item.category] || item.category),
+    "</small></span></label>",
+  ].join("");
+}
+
+/** El arte con un recuadro numerado por elemento: responde “dónde está esto”. */
+function copyLocator(project: Project, items: ArtTextLayer[]): string {
+  const canvas = project.canvas;
+  const cajas = items.map((item, index) => {
+    const layer = project.layers.find((entry) => entry.id === item.id);
+    if (!layer) return "";
+    const style = [
+      "left:" + ((layer.x / Math.max(1, canvas.width)) * 100).toFixed(2) + "%",
+      "top:" + ((layer.y / Math.max(1, canvas.height)) * 100).toFixed(2) + "%",
+      "width:" + ((layer.width / Math.max(1, canvas.width)) * 100).toFixed(2) + "%",
+      "height:" + ((layer.height / Math.max(1, canvas.height)) * 100).toFixed(2) + "%",
+    ].join(";");
+    return [
+      '<span class="copy-map-box', state.copyFields.has(item.id) ? " is-on" : "",
+      '" style="', attr(style), '" data-layer="', attr(item.id), '">',
+      '<i>', String(index + 1), "</i></span>",
+    ].join("");
+  }).join("");
+  return [
+    '<div class="copy-map"><img src="', attr(thumbnailUrl(project.project_id, 520)),
+    '" alt="Arte de ', attr(project.name), '" loading="lazy" decoding="async">',
+    cajas, "</div>",
+  ].join("");
+}
+
 function productCopyHtml(project: Project): string {
   const texts = state.texts[project.project_id] || EMPTY_TEXTS;
   const items = texts.layers.filter((item) => item.editable);
@@ -2099,16 +2169,18 @@ function productCopyHtml(project: Project): string {
     ].join("");
   }
 
-  const chooser = items.map((item) =>
-    '<label class="choice"><input class="copy-field" type="checkbox" value="' + attr(item.id) + '"' +
-    checked(state.copyFields.has(item.id)) + "> " + esc(item.name) + " <small class=\"muted\">" +
-    esc((item.text || "").slice(0, 24)) + "</small></label>"
-  ).join("");
+  const chooser = items.map((item, index) => copyPick(project, item, index)).join("");
 
   const chosen = items.filter((item) => state.copyFields.has(item.id));
   let table = "";
   if (chosen.length && targets.length) {
-    const head = chosen.map((item) => "<th>" + esc(item.name) + "</th>").join("");
+    const head = chosen.map((item) => [
+      "<th><span class=\"copy-col\">",
+      item.src
+        ? '<img src="' + attr(fileUrl(project.project_id, item.src)) + '" alt="" loading="lazy">'
+        : "",
+      "<span>", String(items.indexOf(item) + 1), ". ", esc(item.name), "</span></span></th>",
+    ].join("")).join("");
     const rows = targets.map((target) => [
       "<tr><td><strong>", esc(target.label), "</strong></td>",
       chosen.map((item) => [
@@ -2129,8 +2201,9 @@ function productCopyHtml(project: Project): string {
 
   return [
     '<section class="card"><div class="card-head"><div><h2>Textos por producto · opcional</h2>',
-    "<p>Qué parte del copy cambia en cada arte</p></div><span class=\"badge\">",
-    String(state.copyFields.size), " ELEMENTOS</span></div>",
+    "<p>Qué parte del copy cambia en cada arte</p></div><span class=\"badge",
+    state.copyFields.size ? " green" : "", '">', String(state.copyFields.size), " DE ",
+    String(items.length), "</span></div>",
     // Quien salta directo aquí no ha visto el aviso del paso 2.
     !texts.brand_font && state.copyFields.size
       ? '<div class="notice warning" style="margin-bottom:14px">Este KV no tiene tipografía de marca: ' +
@@ -2143,7 +2216,10 @@ function productCopyHtml(project: Project): string {
         " KV por categoría y posición: las piezas de un mismo PSD repiten el diseño.</p>"
       : "",
     '<span class="label">Elementos que cambian de un producto a otro</span>',
-    '<div class="choice-row" style="margin-top:8px">', chooser, "</div>",
+    '<p class="muted tiny" style="margin:6px 0 12px">Los nombres los pone Photoshop y no siempre ',
+    "dicen qué son. Cada opción enseña sus píxeles, y el número la sitúa en el arte de la derecha.</p>",
+    '<div class="copy-choose"><div class="copy-picks">', chooser, "</div>",
+    copyLocator(project, items), "</div>",
     table,
     "</section>",
   ].join("");
@@ -2710,8 +2786,14 @@ function resultCard(project: Project, variant: Variant): string {
   // El backend ya renderiza un JPEG reducido por variante; pedir el PNG a
   // tamaño real para una rejilla de 280px era descargar megas por tarjeta.
   const preview = variant.thumbnail || variant.image;
+  const slot = viewerItems.findIndex(
+    (item) => item.projectId === project.project_id && item.variantId === variant.id,
+  );
   return [
-    '<article class="result-card"><div class="result-image"><img src="', attr(fileUrl(project.project_id, preview)), '" alt="Variante ', String(variant.index), '" loading="lazy" decoding="async"><span class="score">',
+    '<article class="result-card"><div class="result-image">',
+    '<button type="button" class="result-open" data-slot="', String(slot), '" aria-label="Ver en grande">',
+    '<img src="', attr(fileUrl(project.project_id, preview)), '" alt="Variante ', String(variant.index),
+    '" title="Ver en grande" loading="lazy" decoding="async"></button><span class="score">',
     String(Math.round(variant.quality?.score || 0)), '</span></div><div class="result-copy"><strong>', String(variant.width), "×", String(variant.height), '</strong><p>',
     esc((format.platform || "") + (format.placement ? " · " + format.placement : " · " + variant.format) + (format.ratio ? " · " + format.ratio : "")), "<br>", esc(product), "</p>",
     '<label class="check"><input class="variant-pick" type="checkbox" value="', attr(key), '"', checked(state.selectedVariants.has(key)), '> Elegir</label>',
@@ -2741,10 +2823,22 @@ async function renderResults(): Promise<void> {
   }
   const allScores = projects.flatMap((project) => project.variants.map((variant) => variant.quality?.score || 0));
   const selectedCount = state.selectedVariants.size;
+  const ordenar = (list: Variant[]) => [...list].sort(state.resultOrder === "score"
+    ? (a, b) => (b.quality?.score || 0) - (a.quality?.score || 0)
+    : (a, b) => a.index - b.index);
+  // El recorrido del visor se fija aquí, con el mismo orden con el que se
+  // pintan las tarjetas: las flechas siguen lo que el usuario está viendo.
+  viewerItems = projects
+    .filter((project) => project.variants.length)
+    .flatMap((project) =>
+      ordenar(project.variants).map((variant) => ({
+        projectId: project.project_id,
+        projectName: project.name,
+        variantId: variant.id,
+      })),
+    );
   const sections = projects.filter((project) => project.variants.length).map((project) => {
-    const variants = [...project.variants].sort(state.resultOrder === "score"
-      ? (a, b) => (b.quality?.score || 0) - (a.quality?.score || 0)
-      : (a, b) => a.index - b.index);
+    const variants = ordenar(project.variants);
     const picked = variants.filter((variant) => state.selectedVariants.has(resultKey(project.project_id, variant.id))).map((variant) => variant.id);
     return [
       '<section style="margin-top:28px"><div class="card-head"><div><h2>', esc(project.name), '</h2><p>', String(variants.length), ' propuestas</p></div>',
@@ -2766,7 +2860,113 @@ async function renderResults(): Promise<void> {
   bindResults();
 }
 
+/* ------------------------------------------------------------------ visor
+   La rejilla compara; el visor revisa. Se guarda la lista en el orden en que se
+   pintó la galería para que las flechas recorran lo mismo que se ve. */
+
+interface ViewerItem {
+  projectId: string;
+  projectName: string;
+  variantId: string;
+}
+
+let viewerItems: ViewerItem[] = [];
+let viewerAt = -1;
+
+function viewerVariant(item: ViewerItem): { project: Project; variant: Variant } | null {
+  const project = state.campaign.find((entry) => entry.project_id === item.projectId);
+  const variant = project?.variants.find((entry) => entry.id === item.variantId);
+  return project && variant ? { project, variant } : null;
+}
+
+function openViewer(slot: number): void {
+  if (slot < 0 || slot >= viewerItems.length) return;
+  viewerAt = slot;
+  const overlay = query<HTMLElement>("#viewer")!;
+  const found = viewerVariant(viewerItems[slot]);
+  if (!found) return;
+  const { project, variant } = found;
+  const format = variant.meta?.format || {};
+  const warnings = variant.quality?.warnings || [];
+  const svg = variant.meta?.svg;
+  const psd = variant.meta?.psd;
+
+  // El PNG a tamaño real, no la miniatura: es lo que hay que juzgar.
+  const image = query<HTMLImageElement>("#viewer-img")!;
+  image.src = fileUrl(project.project_id, variant.image);
+  image.alt = project.name + " · propuesta " + String(variant.index);
+
+  query<HTMLElement>("#viewer-title")!.textContent = project.name;
+  query<HTMLElement>("#viewer-meta")!.textContent = [
+    String(variant.width) + "×" + String(variant.height),
+    format.platform || variant.format,
+    variant.meta?.product_label || "",
+    "puntaje " + String(Math.round(variant.quality?.score || 0)) + "/100",
+    String(slot + 1) + " de " + String(viewerItems.length),
+  ].filter(Boolean).join(" · ");
+
+  query<HTMLElement>("#viewer-actions")!.innerHTML = [
+    '<button class="ghost-button" id="viewer-real">Tamaño real</button>',
+    '<a class="ghost-button" href="' + attr(variantPngUrl(project.project_id, variant.id)) + '" download>PNG</a>',
+    psd ? '<a class="ghost-button" href="' + attr(fileUrl(project.project_id, psd)) + '" download>PSD</a>' : "",
+    svg ? '<a class="ghost-button" href="' + attr(fileUrl(project.project_id, svg)) + '" download>SVG</a>' : "",
+  ].join("");
+
+  query<HTMLElement>("#viewer-foot")!.innerHTML = [
+    "Composición: <strong>" + esc(variant.layout_label) + "</strong>",
+    warnings.length
+      ? " · " + warnings.map((warning) => "⚠ " + esc(warning)).join(" · ")
+      : " · sin avisos",
+    '<span class="right"> ← → para pasar · Esc para cerrar</span>',
+  ].join("");
+
+  query<HTMLButtonElement>("#viewer-prev")!.disabled = slot === 0;
+  query<HTMLButtonElement>("#viewer-next")!.disabled = slot >= viewerItems.length - 1;
+  overlay.classList.remove("is-real");
+  overlay.hidden = false;
+  query<HTMLButtonElement>("#viewer-real")?.addEventListener("click", () => {
+    overlay.classList.toggle("is-real");
+  });
+  query<HTMLButtonElement>("#viewer-close")!.focus();
+}
+
+function closeViewer(): void {
+  const overlay = query<HTMLElement>("#viewer");
+  if (!overlay || overlay.hidden) return;
+  overlay.hidden = true;
+  // El PNG puede pesar megas: se suelta al cerrar.
+  query<HTMLImageElement>("#viewer-img")!.removeAttribute("src");
+  viewerAt = -1;
+}
+
+function stepViewer(delta: number): void {
+  if (viewerAt < 0) return;
+  openViewer(Math.min(viewerItems.length - 1, Math.max(0, viewerAt + delta)));
+}
+
+/** Se engancha una sola vez: el visor vive fuera del contenido que se repinta. */
+function bindViewer(): void {
+  query("#viewer-close")?.addEventListener("click", closeViewer);
+  query("#viewer-prev")?.addEventListener("click", () => stepViewer(-1));
+  query("#viewer-next")?.addEventListener("click", () => stepViewer(1));
+  query("#viewer")?.addEventListener("click", (event) => {
+    // Pulsar el fondo cierra; pulsar la imagen o la barra, no.
+    if ((event.target as HTMLElement).id === "viewer-stage") closeViewer();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (query<HTMLElement>("#viewer")?.hidden) return;
+    if (event.key === "Escape") closeViewer();
+    else if (event.key === "ArrowLeft") stepViewer(-1);
+    else if (event.key === "ArrowRight") stepViewer(1);
+    else return;
+    event.preventDefault();
+  });
+}
+
 function bindResults(): void {
+  queryAll<HTMLButtonElement>(".result-open").forEach((button) => {
+    button.addEventListener("click", () => openViewer(Number(button.dataset.slot)));
+  });
   queryAll<HTMLInputElement>(".variant-pick").forEach((checkBox) => {
     checkBox.addEventListener("change", async () => {
       if (checkBox.checked) state.selectedVariants.add(checkBox.value);

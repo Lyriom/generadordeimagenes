@@ -111,6 +111,25 @@ import "../styles/global.css";
       </main>
     </div>
 
+    <!-- Visor de resultados. Una rejilla de 280 px sirve para comparar, no para
+         revisar: un precio o un legal hay que verlos grandes antes de aprobar. -->
+    <div id="viewer" class="viewer" role="dialog" aria-modal="true" aria-label="Ver propuesta" hidden>
+      <div class="viewer-bar">
+        <div class="viewer-head">
+          <strong id="viewer-title"></strong>
+          <span id="viewer-meta"></span>
+        </div>
+        <div class="button-row" id="viewer-actions"></div>
+        <button class="icon-button" id="viewer-close" aria-label="Cerrar (Esc)">×</button>
+      </div>
+      <div class="viewer-body">
+        <button class="viewer-nav" id="viewer-prev" aria-label="Anterior (flecha izquierda)">‹</button>
+        <div class="viewer-stage" id="viewer-stage"><img id="viewer-img" alt=""></div>
+        <button class="viewer-nav" id="viewer-next" aria-label="Siguiente (flecha derecha)">›</button>
+      </div>
+      <div class="viewer-foot" id="viewer-foot"></div>
+    </div>
+
     <div id="toast-region" class="toast-region" aria-live="assertive"></div>
     <div id="busy-overlay" class="busy-overlay" hidden>
       <div class="busy-card">
