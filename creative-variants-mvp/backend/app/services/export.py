@@ -228,8 +228,8 @@ def _append_editable_text(parent, project: Project, placement: Placement) -> Non
             layer.line_height,
             max_lines=20,
         )
-    font_size = int(getattr(font, "size", placement.font_size or layer.font_size))
-    ascent, descent = font.getmetrics() if hasattr(font, "getmetrics") else (font_size, 0)
+    font_size = int(font.size)
+    ascent, descent = font.getmetrics()
     line_px = int((ascent + descent) * layer.line_height)
     if placement.valign == "top":
         block_y = placement.y

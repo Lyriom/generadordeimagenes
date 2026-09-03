@@ -303,7 +303,10 @@ def _invert_mask_png(mask_path: str) -> bytes:
     """Ideogram edita el NEGRO; nuestra máscara marca en blanco lo que se borra."""
     with Image.open(mask_path) as source:
         gray = source.convert("L")
-        inverted = gray.point(lambda value: 0 if value > 127 else 255)
+        # Tabla de 256 entradas en vez de una lambda: Pillow la aplica entera en
+        # C. La lambda entraba y salía de Python una vez por píxel, un millón de
+        # veces en una máscara de 1080x1080, para decidir un umbral.
+        inverted = gray.point([0 if value > 127 else 255 for value in range(256)])
         output = io.BytesIO()
         inverted.save(output, format="PNG")
         return output.getvalue()
@@ -580,7 +583,7 @@ def compose_inpaint(
         mask = read_mask(mask_path)
         if mask.shape[:2] != (height, width):
             mask = np.array(
-                Image.fromarray(mask).resize((width, height), Image.NEAREST)
+                Image.fromarray(mask).resize((width, height), Image.Resampling.NEAREST)
             )
         alpha = Image.fromarray(mask.astype("uint8"), mode="L")
         if feather > 0:

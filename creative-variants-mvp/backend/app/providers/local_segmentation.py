@@ -186,7 +186,10 @@ class LocalSegmentationProvider:
         blurred = cv2.GaussianBlur(image, (5, 5), 0)
         bg = _background_color(blurred)
         diff = np.linalg.norm(blurred.astype(np.float32) - bg[None, None, :], axis=2)
-        diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        # `dst=None` es la forma documentada de pedirle a OpenCV que cree la
+        # salida; sus anotaciones lo declaran obligatorio.
+        normalizado = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)  # type: ignore[call-overload]
+        diff_norm = normalizado.astype(np.uint8)
         _, color_mask = cv2.threshold(diff_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
         gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
@@ -264,7 +267,17 @@ class LocalSegmentationProvider:
                 gc_mask, (work.shape[1], work.shape[0]), interpolation=cv2.INTER_NEAREST
             )
         try:
-            cv2.grabCut(work, gc_mask, None, bgd_model, fgd_model, 4, cv2.GC_INIT_WITH_MASK)
+            # `rect=None` es lo correcto con GC_INIT_WITH_MASK: la máscara ya
+            # dice qué es fondo y qué figura. Las anotaciones lo piden igual.
+            cv2.grabCut(
+                work,
+                gc_mask,
+                None,  # type: ignore[arg-type]
+                bgd_model,
+                fgd_model,
+                4,
+                cv2.GC_INIT_WITH_MASK,
+            )
         except cv2.error:
             return self._color_distance_mask(image, box)
         result = np.where(
@@ -284,7 +297,10 @@ class LocalSegmentationProvider:
             return np.zeros((h, w), np.uint8)
         bg = _background_color(crop, border=max(2, min(bw, bh) // 10))
         diff = np.linalg.norm(crop.astype(np.float32) - bg[None, None, :], axis=2)
-        diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        # `dst=None` es la forma documentada de pedirle a OpenCV que cree la
+        # salida; sus anotaciones lo declaran obligatorio.
+        normalizado = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX)  # type: ignore[call-overload]
+        diff_norm = normalizado.astype(np.uint8)
         _, local = cv2.threshold(diff_norm, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         if (local > 127).mean() > 0.85:
             local = cv2.bitwise_not(local)

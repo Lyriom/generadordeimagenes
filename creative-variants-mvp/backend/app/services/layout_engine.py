@@ -784,26 +784,43 @@ def build_placements(
 
     placements: list[Placement] = []
     for category, group in by_category.items():
-        learned_product_zone = (
-            source_canvas is not None
-            and category == LayerCategory.PRODUCT
-            and all(len(layer.meta.get("replacement_box") or []) == 4 for layer in group)
+        # Los dos modos anclados necesitan el lienzo del arte original, así que
+        # la variable guarda ese lienzo en vez de un sí/no: donde el modo está
+        # activo, las medidas de origen están a mano y no hace falta volver a
+        # preguntarse si existen.
+        learned_zone = (
+            source_canvas
+            if (
+                source_canvas is not None
+                and category == LayerCategory.PRODUCT
+                and all(
+                    len(layer.meta.get("replacement_box") or []) == 4 for layer in group
+                )
+            )
+            else None
         )
-        keep_relative = source_canvas is not None and (
-            bool(layout.get("keep_all_relative"))
-            or category in KEEP_RELATIVE_CATEGORIES
-            # Solo los recortes confirmados del PSD conservan la composición
-            # original. Las capas manuales de la misma categoría siguen editables.
-            or all(layer.meta.get("mandatory_art") for layer in group)
+        relative = (
+            source_canvas
+            if (
+                source_canvas is not None
+                and (
+                    bool(layout.get("keep_all_relative"))
+                    or category in KEEP_RELATIVE_CATEGORIES
+                    # Solo los recortes confirmados del PSD conservan la composición
+                    # original. Las capas manuales de la misma categoría siguen editables.
+                    or all(layer.meta.get("mandatory_art") for layer in group)
+                )
+            )
+            else None
         )
         # En el modo fiel todo queda anclado. La única excepción es un combo de
         # productos: sus integrantes se reparten dentro del hueco original sin
         # tocar ninguna otra capa del arte.
         if category == LayerCategory.PRODUCT and len(group) > 1:
-            keep_relative = False
+            relative = None
         zone = _zone_for(zones, category)
-        if learned_product_zone:
-            source_w, source_h = source_canvas
+        if learned_zone is not None:
+            source_w, source_h = learned_zone
             bx, by, bw, bh = (int(value) for value in group[0].meta["replacement_box"])
             output_aspect = canvas_w / max(1, canvas_h)
             if output_aspect >= BANNER_ASPECT:
@@ -868,7 +885,7 @@ def build_placements(
                 zw,
                 zh,
             )
-            learned_product_zone = False
+            learned_zone = None
             notes.append("Posición del producto aplicada desde la indicación escrita.")
         has_explicit_product_position = category == LayerCategory.PRODUCT and (
             bias.get("product_horizontal") or bias.get("product_vertical")
@@ -876,14 +893,14 @@ def build_placements(
         if (
             mirror
             and category not in {LayerCategory.LEGAL}
-            and not keep_relative
-            and not learned_product_zone
+            and relative is None
+            and learned_zone is None
             and not has_explicit_product_position
         ):
             zx, zy, zw, zh = zone
             zone = (1.0 - zx - zw, zy, zw, zh)
-        if keep_relative:
-            slots = [_relative_zone(layer, source_canvas) for layer in group]
+        if relative is not None:
+            slots = [_relative_zone(layer, relative) for layer in group]
         else:
             aspects = [
                 layer.width / max(1, layer.height) for layer in group if not layer.is_text
@@ -902,15 +919,15 @@ def build_placements(
             )
 
         for layer, slot in zip(group, slots):
-            if keep_relative:
+            if relative is not None:
                 x, y, width, height, stretch = _pinned_box(
-                    layer, source_canvas, canvas_w, canvas_h
+                    layer, relative, canvas_w, canvas_h
                 )
                 # Un copy reescrito del arte trae su cuerpo ya medido contra la
                 # tinta original: recalcularlo por la altura de la caja lo dejaría
                 # a otro tamaño que el resto del diseño. Solo se escala.
                 art_text = layer.is_text and bool(layer.meta.get("art_text"))
-                scale = _uniform_scale(source_canvas, canvas_w, canvas_h)
+                scale = _uniform_scale(relative, canvas_w, canvas_h)
                 placements.append(
                     Placement(
                         layer=layer,
@@ -944,12 +961,12 @@ def build_placements(
 
             can_resize = layer.resizable and (resizable is None or layer.id in resizable)
             can_move = layer.movable and (movable is None or layer.id in movable)
-            if learned_product_zone:
+            if learned_zone is not None:
                 can_resize = False
                 can_move = False
             if has_explicit_product_position:
                 can_move = False
-            if keep_relative:
+            if relative is not None:
                 # Se respeta el diseño original: sin escalado extra ni saltos.
                 can_resize = False
                 can_move = False
@@ -1002,7 +1019,7 @@ def build_placements(
 
             # Un elemento anclado reproduce el diseño original, que puede ir a sangre:
             # aplicarle el margen de seguridad lo encoge y desplaza toda la pieza.
-            box_margin = 0 if (keep_relative or learned_product_zone) else margin
+            box_margin = 0 if (relative is not None or learned_zone is not None) else margin
             x, y, width, height = _clamp_box(
                 x, y, width, height, canvas_w, canvas_h, box_margin
             )
@@ -1016,7 +1033,7 @@ def build_placements(
                     z_index=layer.z_index,
                     align=align,
                     valign=valign,
-                    pinned=keep_relative or learned_product_zone,
+                    pinned=relative is not None or learned_zone is not None,
                     font_size=font_size,
                     color=layer.color,
                 )

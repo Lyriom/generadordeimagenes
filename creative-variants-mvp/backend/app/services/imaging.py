@@ -131,8 +131,10 @@ def dominant_colors(
     count = max(1, min(count, 8))
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
     try:
+        # `bestLabels=None` es la forma documentada de pedirle a OpenCV que las
+        # cree; sus anotaciones lo declaran obligatorio.
         _, labels, centers = cv2.kmeans(
-            data, count, None, criteria, 3, cv2.KMEANS_PP_CENTERS
+            data, count, None, criteria, 3, cv2.KMEANS_PP_CENTERS  # type: ignore[arg-type]
         )
     except cv2.error:  # pragma: no cover - defensivo
         return [rgb_to_hex(tuple(np.mean(data, axis=0)))]
@@ -287,7 +289,8 @@ def resize_contain_canvas(
             ],
             dtype=np.uint8,
         )
-        background = tuple(int(value) for value in np.median(corners, axis=0))
+        red, green, blue = (int(value) for value in np.median(corners, axis=0))
+        background = (red, green, blue)
     canvas = Image.new("RGB", (width, height), background)
     canvas.paste(resized, ((width - new_w) // 2, (height - new_h) // 2))
     return canvas

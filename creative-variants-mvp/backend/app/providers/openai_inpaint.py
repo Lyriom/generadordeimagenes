@@ -22,7 +22,8 @@ def _openai_mask(mask_path: str) -> bytes:
     with Image.open(mask_path) as source:
         gray = source.convert("L")
         rgba = Image.new("RGBA", gray.size, (255, 255, 255, 255))
-        rgba.putalpha(gray.point(lambda value: 0 if value > 127 else 255))
+        # Tabla de 256 entradas en vez de una lambda: se aplica de una vez en C.
+        rgba.putalpha(gray.point([0 if value > 127 else 255 for value in range(256)]))
         output = io.BytesIO()
         rgba.save(output, format="PNG")
         return output.getvalue()

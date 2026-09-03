@@ -416,8 +416,12 @@ def _subject_mask(
         raw, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (41, 41))
     )
 
+    # Por nombre y no por posición: el segundo argumento posicional de OpenCV es
+    # `labels`, no la conectividad, así que ese 8 se estaba pasando como matriz
+    # de salida. Salía bien de casualidad, porque 8 es además el valor por
+    # defecto de la conectividad.
     count, labels, stats, _ = cv2.connectedComponentsWithStats(
-        (raw > 0).astype(np.uint8), 8
+        (raw > 0).astype(np.uint8), connectivity=8
     )
     mask = np.zeros_like(raw)
     for index in range(1, count):

@@ -74,7 +74,16 @@ def _load_font(path: str | None, size: int) -> FreeTypeFont:
     # Pillow, que ignora el cuerpo pedido y dibuja siempre en el mismo tamaño
     # diminuto. Si un día no se resolviera ninguna cara, el arte saldría con el
     # precio en letra de 11 px, no solo con otra tipografía.
-    return ImageFont.load_default(size=size)
+    #
+    # `load_default` está declarado como "puede devolver la de mapa de bits". Con
+    # `size` siempre devuelve una escalable, pero se comprueba en vez de darlo
+    # por hecho: si algún día dejara de serlo, el fallo saldría aquí y no tres
+    # capas más abajo, midiendo un texto con una tipografía que no se puede
+    # medir.
+    fallback = ImageFont.load_default(size=size)
+    if not isinstance(fallback, FreeTypeFont):  # pragma: no cover - defensivo
+        raise RuntimeError("Pillow no pudo cargar ninguna tipografía escalable.")
+    return fallback
 
 
 def load_font(path: str | None, size: int) -> FreeTypeFont:
@@ -185,7 +194,9 @@ def build_background(project: Project, plan: VariantPlan) -> Image.Image:
 
 
 # ------------------------------------------------------------------------ texto
-def _wrap_text(text: str, font, max_width: int, draw: ImageDraw.ImageDraw) -> list[str]:
+def _wrap_text(
+    text: str, font: FreeTypeFont, max_width: int, draw: ImageDraw.ImageDraw
+) -> list[str]:
     lines: list[str] = []
     for paragraph in text.split("\n"):
         words = paragraph.split()
@@ -205,12 +216,12 @@ def _wrap_text(text: str, font, max_width: int, draw: ImageDraw.ImageDraw) -> li
 
 
 def _text_block_size(
-    lines: list[str], font, draw: ImageDraw.ImageDraw, line_height: float
+    lines: list[str], font: FreeTypeFont, draw: ImageDraw.ImageDraw, line_height: float
 ) -> tuple[int, int]:
     if not lines:
         return 0, 0
     widths = [draw.textlength(line, font=font) for line in lines]
-    ascent, descent = font.getmetrics() if hasattr(font, "getmetrics") else (font.size, 0)
+    ascent, descent = font.getmetrics()
     line_px = int((ascent + descent) * line_height)
     return int(max(widths)), int(line_px * len(lines))
 
@@ -225,7 +236,7 @@ def fit_text(
     line_height: float = 1.15,
     min_size: int = 9,
     max_lines: int = 3,
-) -> tuple[object, list[str], tuple[int, int]]:
+) -> tuple[FreeTypeFont, list[str], tuple[int, int]]:
     """Reduce el tamaño hasta que el texto quepa en la caja y en `max_lines`."""
     size = max(min_size, int(start_size))
     explicit_lines = text.count("\n") + 1
@@ -331,7 +342,7 @@ def draw_text_layer(
         scrim = rounded_rect(
             (block_w + pad * 2, block_h + pad * 2),
             radius=max(6, pad),
-            fill=(*scrim_rgb, 150),
+            fill=(scrim_rgb[0], scrim_rgb[1], scrim_rgb[2], 150),
         )
         canvas.paste(scrim, (block_x - pad, block_y - pad), scrim)
         warnings.append(
@@ -340,7 +351,7 @@ def draw_text_layer(
         bg_rgb = scrim_rgb
         color = best_text_color(bg_rgb, layer.color)
 
-    ascent, descent = font.getmetrics() if hasattr(font, "getmetrics") else (font.size, 0)
+    ascent, descent = font.getmetrics()
     line_px = int((ascent + descent) * layer.line_height)
     y = block_y
     fill = hex_to_rgb(color)
@@ -400,7 +411,7 @@ def draw_image_layer(
         )
 
     if layer.rotation and not layer.pixel_critical:
-        resized = resized.rotate(-layer.rotation, expand=True, resample=Image.BICUBIC)
+        resized = resized.rotate(-layer.rotation, expand=True, resample=Image.Resampling.BICUBIC)
 
     x = placement.x + (placement.width - resized.width) // 2
     y = placement.y + (placement.height - resized.height) // 2

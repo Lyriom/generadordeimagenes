@@ -58,7 +58,9 @@ def _overlap_ratio(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -
 def detect_faces(image_path: str) -> list[tuple[int, int, int, int]]:
     """Detección de rostros con Haar cascade (incluida en OpenCV, sin descargas)."""
     try:
-        cascade_path = f"{cv2.data.haarcascades}haarcascade_frontalface_default.xml"
+        # `cv2.data` existe en tiempo de ejecución; las anotaciones de OpenCV no
+        # lo declaran.
+        cascade_path = f"{cv2.data.haarcascades}haarcascade_frontalface_default.xml"  # type: ignore[attr-defined]
         cascade = cv2.CascadeClassifier(cascade_path)
         if cascade.empty():
             return []
@@ -224,9 +226,13 @@ def analyze_project(
     # adivinar nada. Este es el caso de los PNG de producto ya recortados.
     source_alpha = load_alpha(image_path)
     cutout_ratio = float((source_alpha < 10).mean()) if source_alpha is not None else 0.0
-    is_cutout = source_alpha is not None and cutout_ratio > 0.12
-    if is_cutout:
-        bbox = mask_bbox(source_alpha, threshold=8)
+    # El alfa recortado se guarda en su propia variable en vez de en un sí/no:
+    # dentro de la rama ya no hay que volver a preguntarse si existe.
+    cutout_alpha = (
+        source_alpha if (source_alpha is not None and cutout_ratio > 0.12) else None
+    )
+    if cutout_alpha is not None:
+        bbox = mask_bbox(cutout_alpha, threshold=8)
         if bbox is not None:
             cutout_layer = Layer(
                 name=_unique_name(CATEGORY_LABELS_ES[LayerCategory.PRODUCT], used_names),
@@ -243,7 +249,7 @@ def analyze_project(
                 source="auto",
             )
             cutout_layer.meta["from_alpha"] = True
-            layer_extraction.write_mask(project, cutout_layer, source_alpha)
+            layer_extraction.write_mask(project, cutout_layer, cutout_alpha)
             layers.append(cutout_layer)
             assigned_cutout = True
         else:

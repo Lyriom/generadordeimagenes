@@ -510,7 +510,10 @@ def _apply_opacity(rgba: Image.Image, opacity: float) -> Image.Image:
     """
     if opacity >= 0.999:
         return rgba
-    alpha = rgba.getchannel("A").point(lambda value: int(round(value * opacity)))
+    # Tabla de 256 entradas en vez de una lambda: la opacidad de una capa se
+    # aplica de una vez en C y no con una llamada de Python por píxel.
+    tabla = [int(round(value * opacity)) for value in range(256)]
+    alpha = rgba.getchannel("A").point(tabla)
     rgba.putalpha(alpha)
     return rgba
 

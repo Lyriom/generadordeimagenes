@@ -63,13 +63,17 @@ class AdobeInpaintProvider:
         prompt: str | None = None,
         output_path: str | None = None,
     ) -> str:
-        if not self.available():
+        # Se comprueban aquí y no con `available()` para que quede a la vista que
+        # a partir de esta línea las tres existen: antes se llamaba `.rstrip` y
+        # se mandaba la clave sobre lo que el tipo declaraba como opcional.
+        client_id, base = self.client_id, self.upload_base_url
+        if not (client_id and self.client_secret and base):
             raise ProviderUnavailableError(
                 "Adobe Firefly requiere ADOBE_CLIENT_ID, ADOBE_CLIENT_SECRET y "
                 "ADOBE_UPLOAD_BASE_URL."
             )
-        image_url = f"{self.upload_base_url.rstrip('/')}/{Path(image_path).name}"
-        mask_url = f"{self.upload_base_url.rstrip('/')}/{Path(mask_path).name}"
+        image_url = f"{base.rstrip('/')}/{Path(image_path).name}"
+        mask_url = f"{base.rstrip('/')}/{Path(mask_path).name}"
         try:
             with httpx.Client(timeout=self.timeout) as client:
                 token = self._token(client)
@@ -77,7 +81,7 @@ class AdobeInpaintProvider:
                     FIREFLY_FILL_URL,
                     headers={
                         "Authorization": f"Bearer {token}",
-                        "x-api-key": self.client_id,
+                        "x-api-key": client_id,
                         "Content-Type": "application/json",
                     },
                     json={
