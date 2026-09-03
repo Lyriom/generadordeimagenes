@@ -192,6 +192,23 @@ retirar de la pieza:
 | Reescribir | La capa pasa a ser texto con el color, el peso, la interlínea y el sitio del original. Nada más se recoloca |
 | Quitar del arte | Lo oculta y, si sus píxeles venían aplanados en el fondo, **también los borra de la plancha**. Sin eso, ocultar un logo aplanado no quitaba nada |
 | Volver al original | Devuelve el PNG del arte importado. La plancha se rehace desde una copia anterior a cualquier edición, así que deshacer no deja restos |
+| Separar en partes | Parte una capa que trae varias piezas en una capa por pieza, para poder tocar solo una |
+
+**Separar en partes.** El PSD no trae el precio solo: en la misma capa vienen el
+rótulo «PRECIO OFERTA», el precio, el precio anterior y el sello «EXCLUSIVO
+ONLINE». Reescribir eso de una vez no sirve para lo que se hace siempre, que es
+cambiar el precio y nada más. Cuando una capa trae varias piezas, la lista lo
+avisa y ofrece separarlas; cada una pasa a ser un elemento normal —se reescribe,
+se quita y se exporta por su cuenta— y «Volver a unir» deshace la separación.
+
+Lo difícil no es cortar, es saber dónde. Un hueco no vale: en el arte real esas
+cuatro piezas están a 4, 4 y 11 px unas de otras, más cerca de lo que separa la
+tilde de una Á de su letra. Lo que las distingue es la forma de la mancha: una
+tilde ocupa poco ancho, o lo reparte en marcas sueltas con aire en medio; un
+rótulo, por corto que sea, ocupa una parte seria del ancho del bloque y lo
+llena. Entre dos piezas de verdad basta con que cambie una de tres cosas —el
+color, el cuerpo o un hueco grande— para separarlas; dos líneas de un mismo
+párrafo no cambian ninguna y siguen juntas.
 
 Qué se mide sobre los píxeles del original antes de escribir, y por qué:
 

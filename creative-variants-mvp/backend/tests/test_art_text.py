@@ -10,6 +10,7 @@ from __future__ import annotations
 import pathlib
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
 
@@ -888,3 +889,205 @@ def test_the_svg_carries_the_rewritten_copy_as_text_and_the_rest_as_pixels(
     editables = manifiesto["variants"][0]["editable_text_layers"]
     assert price["name"] in editables
     assert headline["name"] not in editables
+
+
+# ------------------------------------------------------------------- piezas
+# Un bloque de precio de agencia viene entero en una capa: el rótulo "PRECIO
+# OFERTA", el precio, el precio anterior y el sello. Reescribirlo como un solo
+# texto no sirve para cambiar solo el precio, que es lo que se hace siempre.
+
+
+def _ink(text: str, size: int, fill: tuple[int, int, int, int]):
+    """El texto recortado a su tinta, sin el aire que deja la tipografía."""
+    from app.services.renderer import load_font
+
+    probe = Image.new("RGBA", (1400, 500), (0, 0, 0, 0))
+    ImageDraw.Draw(probe).text((20, 20), text, font=load_font(_face("bold"), size), fill=fill)
+    return probe.crop(probe.getbbox())
+
+
+def _price_block_image():
+    """Una capa con cuatro piezas distintas, como las que trae el PSD real.
+
+    Las piezas se pegan con huecos exactos (14, 4 y 11 px) porque así están en
+    el arte de verdad: más cerca de lo que separa la tilde de una Á de su letra.
+    Con huecos holgados esta prueba pasaba con una regla que fallaba en el arte
+    real, y midiéndolos a partir de la tipografía cambiaba entre macOS y Docker,
+    que no tienen las mismas caras instaladas.
+    """
+    azul = (23, 62, 110, 255)
+    sello = Image.new("RGBA", (242, 40), (0, 0, 0, 0))
+    trazo = ImageDraw.Draw(sello)
+    trazo.rounded_rectangle([0, 0, 241, 39], radius=19, fill=(146, 214, 46, 255))
+    etiqueta = _ink("EXCLUSIVO ONLINE", 22, (12, 40, 70, 255))
+    sello.paste(etiqueta, (16, (40 - etiqueta.height) // 2), etiqueta)
+
+    piezas = [
+        (_ink("PRECIO OFERTA", 34, azul), 0),
+        (_ink("$235.00", 150, azul), 14),
+        (_ink("P. ANTES $253.66", 40, azul), 4),
+        (sello, 11),
+    ]
+    ancho = max(pieza.width for pieza, _ in piezas)
+    alto = sum(pieza.height for pieza, _ in piezas) + sum(hueco for _, hueco in piezas)
+    image = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+    y = 0
+    for pieza, hueco in piezas:
+        y += hueco
+        image.paste(pieza, (0, y), pieza)
+        y += pieza.height
+    return image
+
+
+def block_psd(path, width: int = 900, height: int = 900):
+    return write_psd(
+        path,
+        (width, height),
+        [
+            {
+                "name": "Relleno de color 1",
+                "image": Image.new("RGBA", (width, height), (245, 245, 248, 255)),
+                "position": (0, 0),
+            },
+            {"name": "bloque precio", "image": _price_block_image(), "position": (120, 300)},
+        ],
+    )
+
+
+@pytest.fixture()
+def block_project(client: TestClient, tmp_path) -> dict:
+    source = tmp_path / "bloques.psd"
+    block_psd(source)
+    response = client.post(
+        "/projects",
+        data={"name": "KV con bloque de precio"},
+        files={"artwork": ("bloques.psd", source.read_bytes(), "image/vnd.adobe.photoshop")},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _block_layer(project: dict) -> dict:
+    return next(layer for layer in project["layers"] if "bloque" in layer["name"])
+
+
+def test_the_inventory_says_how_many_pieces_a_layer_holds(
+    client: TestClient, block_project
+):
+    listed = client.get(f"/projects/{block_project['project_id']}/texts").json()
+    block = next(
+        item for item in listed["layers"] if item["id"] == _block_layer(block_project)["id"]
+    )
+    # Rótulo, precio, precio anterior y sello.
+    assert block["pieces"] == 4
+
+
+def test_a_paragraph_is_not_cut_into_pieces(client: TestClient, tmp_path):
+    """Dos líneas del mismo cuerpo y color son un texto, no dos piezas."""
+    from app.services.renderer import load_font
+
+    image = Image.new("RGBA", (700, 160), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    for index, line in enumerate(["Aplican condiciones. Válido", "para productos elegidos."]):
+        draw.text((10, 10 + index * 48), line, font=load_font(_face("bold"), 34), fill=(23, 62, 110, 255))
+    source = tmp_path / "parrafo.psd"
+    write_psd(
+        source,
+        (900, 400),
+        [
+            {
+                "name": "Relleno de color 1",
+                "image": Image.new("RGBA", (900, 400), (245, 245, 248, 255)),
+                "position": (0, 0),
+            },
+            {"name": "legal", "image": image, "position": (60, 120)},
+        ],
+    )
+    created = client.post(
+        "/projects",
+        data={"name": "Legal"},
+        files={"artwork": ("parrafo.psd", source.read_bytes(), "image/vnd.adobe.photoshop")},
+    ).json()
+    listed = client.get(f"/projects/{created['project_id']}/texts").json()
+    legal = next(item for item in listed["layers"] if item["name"] == "legal")
+    assert legal["pieces"] == 1
+
+
+def test_splitting_turns_each_piece_into_its_own_element(
+    client: TestClient, block_project
+):
+    """Separado, el precio es un elemento: se reescribe sin tocar a los demás."""
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    response = client.post(f"/projects/{project_id}/layers/{block['id']}/split")
+    assert response.status_code == 200, response.text
+    parts = response.json()["layers"]
+    assert len(parts) == 4
+    # Cada parte queda donde estaba su tinta, dentro de la caja de la madre.
+    for part in parts:
+        assert block["x"] <= part["x"] <= block["x"] + block["width"]
+        assert block["y"] <= part["y"] <= block["y"] + block["height"]
+    # Y de arriba abajo, en el orden en que se leen.
+    assert [part["y"] for part in parts] == sorted(part["y"] for part in parts)
+
+    # La madre ya no está en el arte, pero cada parte sí se puede reescribir.
+    project = client.get(f"/projects/{project_id}").json()
+    assert block["id"] not in [layer["id"] for layer in project["layers"]]
+    precio = max(parts, key=lambda item: item["height"])
+    rewrite = client.post(
+        f"/projects/{project_id}/layers/{precio['id']}/text",
+        json={"content": "$199.00"},
+    )
+    assert rewrite.status_code == 200, rewrite.text
+    assert rewrite.json()["layer"]["content"] == "$199.00"
+
+    # Los otros tres siguen intactos: eso es lo que no se podía hacer antes.
+    after = client.get(f"/projects/{project_id}").json()
+    for part in parts:
+        if part["id"] == precio["id"]:
+            continue
+        current = next(item for item in after["layers"] if item["id"] == part["id"])
+        assert current["type"] == "image"
+        assert current["src"] == part["src"]
+
+
+def test_a_piece_can_be_removed_without_touching_the_rest(
+    client: TestClient, block_project
+):
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    sello = parts[-1]
+    response = client.post(
+        f"/projects/{project_id}/layers/{sello['id']}/text", json={"removed": True}
+    )
+    assert response.status_code == 200, response.text
+    after = client.get(f"/projects/{project_id}").json()
+    quitado = next(item for item in after["layers"] if item["id"] == sello["id"])
+    assert quitado["visible"] is False
+    for part in parts[:-1]:
+        assert next(item for item in after["layers"] if item["id"] == part["id"])["visible"]
+
+
+def test_the_pieces_can_be_put_back_together(client: TestClient, block_project):
+    """Separar no es una puerta de un solo sentido."""
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    response = client.post(f"/projects/{project_id}/layers/{parts[0]['id']}/unsplit")
+    assert response.status_code == 200, response.text
+    after = client.get(f"/projects/{project_id}").json()
+    ids = [layer["id"] for layer in after["layers"]]
+    assert block["id"] in ids
+    for part in parts:
+        assert part["id"] not in ids
+
+
+def test_a_single_piece_layer_refuses_to_split(client: TestClient, tmp_path):
+    project = psd_project(client, tmp_path)
+    price = price_layer(project)
+    response = client.post(
+        f"/projects/{project['project_id']}/layers/{price['id']}/split"
+    )
+    assert response.status_code == 400
+    assert "una sola pieza" in response.json()["detail"]

@@ -1285,7 +1285,17 @@ function copyRow(project: Project, item: ArtTextLayer): string {
     CATEGORY_LABELS[item.category] || item.category,
     item.rewritten ? "reescrito" : "",
     item.in_plate ? "aplanado en el fondo" : "",
+    item.part_of ? "parte separada" : "",
   ].filter(Boolean).join(" · ");
+  // El PSD trae el rótulo, el precio, el precio anterior y el sello en la misma
+  // capa. Reescribir eso de una vez no sirve para cambiar solo el precio, así
+  // que se ofrece separarlo en las piezas que el arte ya tiene dibujadas.
+  const split = item.pieces > 1
+    ? '<div class="copy-split">Esta capa trae <strong>' + String(item.pieces) +
+      " partes</strong> (rótulo, precio, sello…). Sepáralas para cambiar solo una." +
+      '<button class="button small split-copy" data-layer="' + attr(item.id) +
+      '">Separar en ' + String(item.pieces) + " partes</button></div>"
+    : "";
   return [
     '<div class="copy-row', item.removed ? " is-removed" : "", '">', copyThumb(project, item),
     '<div class="copy-meta"><strong>', esc(item.name), "</strong><small>", esc(notes), "</small></div>",
@@ -1306,8 +1316,14 @@ function copyRow(project: Project, item: ArtTextLayer): string {
     item.rewritten
       ? '<button class="ghost-button small restore-copy" data-layer="' + attr(item.id) + '">Volver al original</button>'
       : "",
+    item.part_of
+      ? '<button class="ghost-button small unsplit-copy" data-layer="' + attr(item.id) +
+        '" title="Deshace la separación y devuelve las partes a su capa original">Volver a unir</button>'
+      : "",
     '<label class="check"><input class="remove-copy" type="checkbox" data-layer="', attr(item.id), '"',
-    checked(item.removed), "> Quitar del arte</label></div></div>",
+    checked(item.removed), "> Quitar del arte</label></div>",
+    split,
+    "</div>",
   ].join("");
 }
 
@@ -1334,6 +1350,32 @@ function copyEditor(project: Project): string {
     '<div class="copy-list">', items.map((item) => copyRow(project, item)).join(""), "</div></section>",
   ].join("");
 }
+
+async function sendCopySplit(
+  project: Project, layerId: string, undo: boolean,
+): Promise<void> {
+  busy(
+    undo ? "Volviendo a unir" : "Separando en partes",
+    undo ? "Devolviendo las piezas a su capa…" : "Buscando dónde acaba cada pieza…",
+    30,
+  );
+  try {
+    const response = await post<any>(
+      "/projects/" + project.project_id + "/layers/" + layerId +
+        (undo ? "/unsplit" : "/split"),
+      {},
+    );
+    (response.warnings || []).forEach((warning: string) => toast(warning, "info"));
+    await refreshProject(project.project_id);
+    await loadTexts(project.project_id, true);
+    await renderLayers();
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
+}
+
 
 async function sendCopyEdit(project: Project, payload: Record<string, unknown>): Promise<void> {
   busy("Guardando el arte", "Aplicando el cambio sobre el KV…", 30);
@@ -1431,6 +1473,16 @@ function bindCopyEditor(project: Project): void {
   queryAll<HTMLButtonElement>(".restore-copy").forEach((button) => {
     button.addEventListener("click", () =>
       void sendCopyEdit(project, { layer_id: button.dataset.layer!, restore: true }),
+    );
+  });
+  queryAll<HTMLButtonElement>(".split-copy").forEach((button) => {
+    button.addEventListener("click", () =>
+      void sendCopySplit(project, button.dataset.layer!, false),
+    );
+  });
+  queryAll<HTMLButtonElement>(".unsplit-copy").forEach((button) => {
+    button.addEventListener("click", () =>
+      void sendCopySplit(project, button.dataset.layer!, true),
     );
   });
   queryAll<HTMLInputElement>(".remove-copy").forEach((box) => {

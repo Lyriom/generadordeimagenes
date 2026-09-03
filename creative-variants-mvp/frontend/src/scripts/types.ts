@@ -134,6 +134,10 @@ export interface ArtTextLayer {
   /** Sus píxeles siguen aplanados en el fondo: quitarlo exige borrarlo de ahí. */
   in_plate: boolean;
   src?: string | null;
+  /** Piezas distintas dentro del PNG. Más de una se puede separar. */
+  pieces: number;
+  /** Id de la capa de la que salió esta parte, si es una parte. */
+  part_of?: string | null;
   style?: {
     color: string;
     align: "left" | "center" | "right";

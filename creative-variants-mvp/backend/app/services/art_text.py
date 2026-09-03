@@ -24,6 +24,7 @@ acumula reconstrucciones sobre reconstrucciones.
 """
 from __future__ import annotations
 
+import io
 import logging
 import math
 import shutil
@@ -201,6 +202,21 @@ def _rendered_stroke(font, text: str, line_height: float) -> float:
     return _ink_stroke(np.asarray(canvas) > 96)
 
 
+def _ink_runs(rows: np.ndarray) -> list[tuple[int, int]]:
+    """Tramos verticales con tinta, tal cual, sin unir nada."""
+    runs: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, filled in enumerate(rows):
+        if filled and start is None:
+            start = index
+        elif not filled and start is not None:
+            runs.append((start, index - 1))
+            start = None
+    if start is not None:
+        runs.append((start, len(rows) - 1))
+    return runs
+
+
 def _line_runs(rows: np.ndarray) -> list[tuple[int, int]]:
     """Tramos verticales con tinta: una entrada por línea de texto.
 
@@ -213,16 +229,7 @@ def _line_runs(rows: np.ndarray) -> list[tuple[int, int]]:
     se fusionaban en una sola y el alto de tinta salía del doble. El texto nuevo
     se escribía entonces a más del doble de cuerpo que el original.
     """
-    runs: list[list[int]] = []
-    start: int | None = None
-    for index, filled in enumerate(rows):
-        if filled and start is None:
-            start = index
-        elif not filled and start is not None:
-            runs.append([start, index - 1])
-            start = None
-    if start is not None:
-        runs.append([start, len(rows) - 1])
+    runs = [list(run) for run in _ink_runs(rows)]
     if len(runs) < 2:
         return [(run[0], run[1]) for run in runs]
 
@@ -821,6 +828,258 @@ def _register_plate(project: Project) -> None:
         if not project.background.provider:
             project.background.provider = "art-edit"
     project.meta["art_plate_signature"] = _plate_signature(project)
+
+
+# --------------------------------------------------------------------- partes
+#: Una capa de copy de agencia trae varias piezas juntas: el rótulo "PRECIO
+#: OFERTA", el precio, el precio anterior y un sello "EXCLUSIVO ONLINE", todo
+#: en el mismo PNG aplanado. Reescribir eso como un solo texto no sirve de
+#: nada: para cambiar el precio hay que poder tocar el precio y nada más.
+#:
+#: Se separa por lo que separa un elemento de otro a ojo: un hueco claro, un
+#: cambio de cuerpo o un cambio de color. Dos líneas de un mismo párrafo no
+#: cumplen ninguna de las tres y siguen juntas.
+#: Un hueco no distingue una pieza de otra: en el arte real el rótulo, el
+#: precio y el precio anterior van a 4-14 px unos de otros, más pegados que la
+#: tilde de una Á. Lo que sí las distingue es la forma de la mancha de tinta.
+#:
+#: Una tilde, el punto de una i o el signo de una ñ ocupan poco ancho (una marca
+#: sobre una letra), o lo reparten en marcas sueltas con mucho aire en medio
+#: (una línea entera de mayúsculas acentuadas). Un rótulo, por corto que sea,
+#: ocupa una parte seria del ancho del bloque y lo llena.
+BLOCK_SPAN = 0.25
+BLOCK_COVERAGE = 0.45
+#: Y entre dos piezas de verdad, lo que las separa: color, cuerpo o un hueco
+#: grande. Basta con una de las tres.
+BLOCK_GAP = 0.9
+BLOCK_SIZE_RATIO = 1.7
+BLOCK_COLOR_DISTANCE = 70.0
+
+
+@dataclass(frozen=True)
+class _Run:
+    """Un tramo de tinta con lo que hace falta para saber qué es."""
+
+    top: int
+    bottom: int
+    left: int
+    right: int
+    coverage: float
+    color: tuple[int, int, int]
+
+    @property
+    def height(self) -> int:
+        return self.bottom - self.top + 1
+
+    @property
+    def span(self) -> int:
+        return self.right - self.left + 1
+
+
+def _profile(rgb: np.ndarray, ink: np.ndarray) -> list[_Run]:
+    """Cada tramo con su ancho, su relleno y su color."""
+    profiled: list[_Run] = []
+    for top, bottom in _ink_runs(ink.any(axis=1)):
+        band = ink[top : bottom + 1]
+        columns = np.nonzero(band.any(axis=0))[0]
+        if not columns.size:
+            continue
+        left, right = int(columns[0]), int(columns[-1])
+        pixels = rgb[top : bottom + 1][band]
+        profiled.append(
+            _Run(
+                top=top,
+                bottom=bottom,
+                left=left,
+                right=right,
+                coverage=columns.size / max(1, right - left + 1),
+                color=_dominant_rgb(pixels.reshape(-1, 3).astype(np.float32)),
+            )
+        )
+    return profiled
+
+
+def _is_fragment(run: _Run, width: int) -> bool:
+    """Marca suelta que pertenece a la línea de al lado, no una pieza propia."""
+    return run.span < width * BLOCK_SPAN or run.coverage < BLOCK_COVERAGE
+
+
+def _apart(previous: _Run, run: _Run) -> bool:
+    """¿Son dos piezas distintas? Basta con que cambie una de las tres cosas."""
+    tall = max(previous.height, run.height)
+    short = max(1, min(previous.height, run.height))
+    gap = run.top - previous.bottom - 1
+    distance = float(
+        np.linalg.norm(
+            np.asarray(previous.color, np.float32) - np.asarray(run.color, np.float32)
+        )
+    )
+    return (
+        gap > tall * BLOCK_GAP
+        or tall / short > BLOCK_SIZE_RATIO
+        or distance > BLOCK_COLOR_DISTANCE
+    )
+
+
+def _group_runs(rgb: np.ndarray, ink: np.ndarray) -> list[list[_Run]]:
+    """Agrupa tramos en piezas. Cada grupo es un elemento editable por separado."""
+    runs = _profile(rgb, ink)
+    if not runs:
+        return []
+    width = ink.shape[1]
+    groups: list[list[_Run]] = []
+    waiting: list[_Run] = []  # fragmentos esperando a la línea de abajo
+
+    for index, run in enumerate(runs):
+        if _is_fragment(run, width):
+            # La tilde va encima de su letra, así que lo normal es que espere a
+            # la línea siguiente; solo se queda con la anterior si está más
+            # pegada a ella que a la que viene.
+            following = runs[index + 1] if index + 1 < len(runs) else None
+            with_previous = bool(groups) and (
+                following is None
+                or (run.top - groups[-1][-1].bottom) <= (following.top - run.bottom)
+            )
+            if with_previous:
+                groups[-1].append(run)
+            else:
+                waiting.append(run)
+            continue
+
+        block = waiting + [run]
+        waiting = []
+        if groups and not _apart(groups[-1][-1], run):
+            groups[-1].extend(block)
+        else:
+            groups.append(block)
+
+    if waiting:
+        if groups:
+            groups[-1].extend(waiting)
+        else:
+            groups.append(waiting)
+    return groups
+
+
+def _block_boxes(rgb: np.ndarray, ink: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Rectángulos de tinta de cada pieza, en coordenadas del PNG de la capa."""
+    boxes: list[tuple[int, int, int, int]] = []
+    for group in _group_runs(rgb, ink):
+        top = min(run.top for run in group)
+        bottom = max(run.bottom for run in group)
+        left = min(run.left for run in group)
+        right = max(run.right for run in group)
+        boxes.append((left, top, right - left + 1, bottom - top + 1))
+    return sorted(boxes, key=lambda box: (box[1], box[0]))
+
+
+def blocks(project: Project, layer: Layer) -> list[tuple[int, int, int, int]]:
+    """Piezas que contiene el elemento. Una sola significa que no hay que separar."""
+    path = _layer_png(project, layer)
+    if path is None:
+        return []
+    with Image.open(path) as opened:
+        art = opened.convert("RGBA")
+        rgb = np.asarray(art.convert("RGB"), dtype=np.uint8)
+        alpha = np.asarray(art.getchannel("A"), dtype=np.uint8)
+    ink = _ink_mask(rgb, alpha)
+    if not ink.any():
+        return []
+    return _block_boxes(rgb, ink)
+
+
+def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
+    """Convierte una capa con varias piezas en una capa por pieza.
+
+    Cada parte pasa a ser un elemento normal del arte: se mide, se reescribe,
+    se quita y se exporta como cualquier otro. Así "cambiar solo el precio" no
+    necesita nada nuevo, porque el precio ya es un elemento.
+    """
+    if layer.meta.get("art_text", {}).get("applied"):
+        raise ArtTextError(
+            f"'{layer.name}' ya está reescrita. Devuélvala al original antes de separarla."
+        )
+    if layer.meta.get("split_into"):
+        raise ArtTextError(f"'{layer.name}' ya está separada en partes.")
+
+    path = _layer_png(project, layer)
+    if path is None:
+        raise ArtTextError(f"'{layer.name}' no tiene píxeles que separar.")
+    boxes = blocks(project, layer)
+    if len(boxes) < 2:
+        raise ArtTextError(
+            f"'{layer.name}' es una sola pieza: no hay nada que separar. "
+            "Reescríbala entera desde su casilla de texto."
+        )
+
+    with Image.open(path) as opened:
+        art = opened.convert("RGBA")
+        parts: list[Layer] = []
+        for index, (left, top, width, height) in enumerate(boxes):
+            crop = art.crop((left, top, left + width, top + height))
+            relative = f"layers/{layer.id[:8]}_parte{index + 1}.png"
+            buffer = io.BytesIO()
+            crop.save(buffer, format="PNG", optimize=True)
+            storage.write_bytes(project.project_id, relative, buffer.getvalue())
+            parts.append(
+                Layer(
+                    name=f"{layer.name} · parte {index + 1}",
+                    type=LayerType.IMAGE,
+                    category=layer.category,
+                    src=relative,
+                    x=layer.x + left,
+                    y=layer.y + top,
+                    width=width,
+                    height=height,
+                    z_index=layer.z_index,
+                    visible=layer.visible,
+                    locked=layer.locked,
+                    movable=layer.movable,
+                    resizable=layer.resizable,
+                    reorderable=layer.reorderable,
+                    replaceable=layer.replaceable,
+                    preserve_aspect_ratio=layer.preserve_aspect_ratio,
+                    source=layer.source,
+                    meta={"split_from": layer.id, "split_index": index},
+                )
+            )
+
+    # La capa madre sale del arte pero no se pierde: se guarda entera para poder
+    # deshacer. Guardarla fuera de `layers` evita que el resto del programa
+    # tenga que aprender a ignorarla en cada recorrido.
+    stash = dict(project.meta.get("split_layers") or {})
+    stash[layer.id] = layer.model_dump(mode="json")
+    project.meta["split_layers"] = stash
+
+    position = project.layers.index(layer)
+    project.layers[position : position + 1] = parts
+    for part in parts:
+        part.meta["split_into"] = [item.id for item in parts]
+
+    return parts, [
+        f"'{layer.name}' se separó en {len(parts)} partes: ahora cada una se "
+        "reescribe o se quita por su cuenta."
+    ]
+
+
+def unsplit(project: Project, parent_id: str) -> list[str]:
+    """Vuelve a juntar las partes en la capa original."""
+    stash = dict(project.meta.get("split_layers") or {})
+    stored = stash.get(parent_id)
+    if stored is None:
+        raise ArtTextError("Esa capa no está separada en partes.")
+
+    parent = Layer(**stored)
+    children = [item for item in project.layers if item.meta.get("split_from") == parent_id]
+    if not children:
+        raise ArtTextError(f"No quedan partes de '{parent.name}' que juntar.")
+
+    position = min(project.layers.index(item) for item in children)
+    project.layers = [item for item in project.layers if item.meta.get("split_from") != parent_id]
+    project.layers.insert(position, parent)
+    del stash[parent_id]
+    project.meta["split_layers"] = stash
+    return [f"Las partes volvieron a ser '{parent.name}'."]
 
 
 # ------------------------------------------------------------------ inventario

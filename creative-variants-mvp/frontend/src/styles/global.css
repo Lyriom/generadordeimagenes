@@ -773,7 +773,7 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
      revisión de roles, que ya declara su `grid-area`. Sin nombrarlas aquí, el
      navegador las colocaba en filas implícitas y la fila salía descuadrada. */
   grid-template-columns: 116px minmax(0, 1fr) minmax(0, 1.6fr) minmax(200px, auto);
-  grid-template-areas: "thumb meta edit actions" "zoom zoom zoom zoom";
+  grid-template-areas: "thumb meta edit actions" "zoom zoom zoom zoom" "split split split split";
   gap: 6px 12px;
   align-items: center;
   padding: 10px;
@@ -823,6 +823,25 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
       var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 14px 14px;
 }
 .copy-zoom img { display: block; max-width: 100%; height: auto; }
+/* Aviso de que la capa trae varias piezas. Ocupa la fila entera debajo del
+   editor: es una decisión sobre toda la capa, no una acción más de la lista. */
+.copy-split {
+  grid-area: split;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius);
+  color: var(--fg-muted);
+  background: var(--surface-1);
+  font-size: var(--fs-2xs);
+}
+.copy-split strong { color: var(--fg); }
+.copy-split .button { margin-left: auto; }
+
 .copy-actions {
   grid-area: actions;
   display: flex;

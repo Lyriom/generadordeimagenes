@@ -29,6 +29,7 @@ from ..models import (
     AnalyzeResponse,
     ArtTextLayer,
     ArtTextListResponse,
+    ArtTextSplitResponse,
     ArtTextRequest,
     ArtTextResponse,
     ArtTextStyle,
@@ -1239,6 +1240,14 @@ def art_texts(project_id: str) -> ArtTextListResponse:
                 in_plate=in_plate.get(layer.id, False),
                 src=origin.get("src") or layer.src,
                 style=ArtTextStyle(**style.as_dict()) if style else None,
+                # Solo tiene sentido preguntarlo de lo que aún no se ha tocado:
+                # una capa reescrita ya es un texto, y una parte ya está suelta.
+                pieces=(
+                    1
+                    if origin.get("applied") or layer.meta.get("split_from")
+                    else max(1, len(art_text.blocks(project, layer)))
+                ),
+                part_of=layer.meta.get("split_from"),
             )
         )
     return ArtTextListResponse(
@@ -1246,6 +1255,54 @@ def art_texts(project_id: str) -> ArtTextListResponse:
         layers=items,
         brand_font=bool(project.references.font),
         brand_font_bold=bool(project.references.font_bold),
+    )
+
+
+@router.post(
+    "/{project_id}/layers/{layer_id}/split",
+    response_model=ArtTextSplitResponse,
+    summary="Separar una capa en sus piezas para poder editar solo una",
+)
+def split_art_text(project_id: str, layer_id: str) -> ArtTextSplitResponse:
+    """El PSD trae el rótulo, el precio, el precio anterior y el sello juntos.
+
+    Separados, cada uno es un elemento normal del arte: se reescribe, se quita
+    y se exporta por su cuenta, sin tocar los otros.
+    """
+    project = load_project_or_404(project_id)
+    layer = project.layer_by_id(layer_id)
+    if layer is None:
+        raise bad_request(f"Capa inexistente: {layer_id}")
+    if layer.category in art_text.EXCLUDED_CATEGORIES:
+        raise bad_request("Producto, persona y fondo no se separan en piezas.")
+    try:
+        parts, warnings = art_text.split(project, layer)
+    except art_text.ArtTextError as exc:
+        raise bad_request(str(exc)) from exc
+    storage.save_project(project)
+    return ArtTextSplitResponse(
+        project_id=project.project_id, layers=parts, warnings=warnings
+    )
+
+
+@router.post(
+    "/{project_id}/layers/{layer_id}/unsplit",
+    response_model=ArtTextSplitResponse,
+    summary="Volver a juntar las piezas en la capa original",
+)
+def unsplit_art_text(project_id: str, layer_id: str) -> ArtTextSplitResponse:
+    project = load_project_or_404(project_id)
+    layer = project.layer_by_id(layer_id)
+    # Se acepta el id de cualquiera de las partes: quien pulsa "volver a unir"
+    # lo hace desde una de ellas, no desde una capa madre que ya no ve.
+    parent_id = (layer.meta.get("split_from") if layer else None) or layer_id
+    try:
+        warnings = art_text.unsplit(project, parent_id)
+    except art_text.ArtTextError as exc:
+        raise bad_request(str(exc)) from exc
+    storage.save_project(project)
+    return ArtTextSplitResponse(
+        project_id=project.project_id, layers=project.layers, warnings=warnings
     )
 
 

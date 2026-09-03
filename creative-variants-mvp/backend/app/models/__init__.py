@@ -31,6 +31,7 @@ from .schemas import (  # noqa: F401
     AnalyzeResponse,
     ArtTextLayer,
     ArtTextListResponse,
+    ArtTextSplitResponse,
     ArtTextRequest,
     ArtTextResponse,
     ArtTextStyle,

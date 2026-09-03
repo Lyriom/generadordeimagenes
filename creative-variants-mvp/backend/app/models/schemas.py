@@ -373,6 +373,25 @@ class ArtTextLayer(BaseModel):
     )
     src: str | None = None
     style: ArtTextStyle | None = None
+    pieces: int = Field(
+        default=1,
+        description=(
+            "Piezas distintas que contiene el PNG del elemento. Más de una "
+            "significa que el PSD trae varias cosas en la misma capa (rótulo, "
+            "precio, precio anterior, sello) y que se pueden separar."
+        ),
+    )
+    part_of: str | None = Field(
+        default=None, description="Id de la capa de la que salió esta parte."
+    )
+
+
+class ArtTextSplitResponse(BaseModel):
+    """Resultado de separar una capa en sus piezas, o de volver a juntarlas."""
+
+    project_id: str
+    layers: list[Layer] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class ArtTextListResponse(BaseModel):
