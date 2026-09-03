@@ -631,6 +631,43 @@ function bindSavedProjects(): void {
   });
 }
 
+async function dropKv(projectId: string): Promise<void> {
+  const project = state.campaign.find((item) => item.project_id === projectId);
+  if (!project) return;
+  const last = state.campaignIds.length <= 1;
+  const warning = last
+    ? "Es el último KV de la campaña: al quitarlo vuelves a la carga."
+    : "Los otros " + String(state.campaignIds.length - 1) + " no se tocan.";
+  if (!window.confirm(
+    "¿Quitar «" + project.name + "» de la campaña?\n\n" +
+    warning + "\n\nSe borra con sus archivos y no se puede deshacer.",
+  )) return;
+
+  busy("Quitando el KV", project.name, 40);
+  try {
+    await del("/projects/" + projectId);
+    // El siguiente de la lista, no el primero: quitar el KV que estabas
+    // mirando te dejaba al principio de veinte y había que volver a buscar.
+    const position = state.campaignIds.indexOf(projectId);
+    state.campaignIds = state.campaignIds.filter((id) => id !== projectId);
+    state.campaign = state.campaign.filter((item) => item.project_id !== projectId);
+    delete state.texts[projectId];
+    if (state.activeId === projectId) {
+      state.activeId = state.campaignIds[Math.min(position, state.campaignIds.length - 1)] || null;
+      state.selectedLayerId = null;
+    }
+    saveSession();
+    await refreshAll();
+    toast("«" + project.name + "» quitado de la campaña.", "success");
+    await navigate(state.campaignIds.length ? "layers" : "campaign");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
+}
+
+
 function bindProjectCards(): void {
   queryAll<HTMLButtonElement>(".open-project").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -1025,7 +1062,11 @@ function kvSwitcher(active: Project): string {
   const chips = state.campaign.map((project, index) => {
     const done = layersConfirmed(project);
     const isCurrent = project.project_id === active.project_id;
+    // El aspa va fuera del botón y no dentro: un <button> no puede contener
+    // otro, y anidarlos hace que el clic de quitar abra el KV además de
+    // borrarlo. Por eso la ficha es un envoltorio con dos botones hermanos.
     return [
+      '<div class="kv-chip-wrap">',
       '<button class="kv-chip', isCurrent ? " is-current" : "", done ? " is-done" : "",
       '" data-kv="', attr(project.project_id), '" title="', attr(project.name), '">',
       '<img src="', attr(thumbnailUrl(project.project_id, 120)), '" alt="" loading="lazy" decoding="async">',
@@ -1034,12 +1075,16 @@ function kvSwitcher(active: Project): string {
       done ? "confirmado" : "sin confirmar", "</small></span>",
       '<i class="kv-chip-mark" aria-hidden="true">', done ? "✓" : String(index + 1), "</i>",
       "</button>",
+      '<button class="kv-drop" data-drop="', attr(project.project_id),
+      '" title="Quitar «', attr(project.name), '» de la campaña"',
+      ' aria-label="Quitar ', attr(project.name), ' de la campaña">×</button>',
+      "</div>",
     ].join("");
   }).join("");
   const done = state.campaign.filter(layersConfirmed).length;
   return [
     '<section class="card" style="margin-bottom:18px"><div class="card-head"><div><h2>KV que estás revisando</h2>',
-    '<p>Cada uno se confirma por separado. Al guardar se salta al siguiente que falte.</p></div>',
+    '<p>Cada uno se confirma por separado. Al guardar se salta al siguiente que falte. Con la × quitas el que no vayas a usar.</p></div>',
     '<span class="badge', done === state.campaign.length ? " green" : "", '">', String(done), " DE ",
     String(state.campaign.length), "</span></div>",
     '<div class="kv-switch">', chips, "</div></section>",
@@ -1546,6 +1591,13 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
       await renderLayers();
       window.scrollTo({ top: 0, behavior: "smooth" });
     });
+  });
+
+  // Quitar un KV de la campaña. Un pliego trae portadas y piezas que no se van
+  // a producir, y hasta ahora arrastraban hasta el final: contaban en "0 de 20",
+  // pedían capas confirmadas y se generaban igual.
+  queryAll<HTMLButtonElement>(".kv-drop").forEach((button) => {
+    button.addEventListener("click", () => dropKv(button.dataset.drop!));
   });
 
   query("#confirm-roles")?.addEventListener("click", async () => {

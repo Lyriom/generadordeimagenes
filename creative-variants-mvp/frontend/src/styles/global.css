@@ -590,14 +590,52 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   padding-bottom: 6px;
   overflow-x: auto;
 }
+/* La ficha y su aspa son hermanas dentro del envoltorio: el aspa tiene que
+   quedar por encima del botón, y un botón no puede ir dentro de otro. */
+.kv-chip-wrap {
+  position: relative;
+  flex: none;
+}
+.kv-drop {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--fg-muted);
+  background: var(--surface-1);
+  font-size: 13px;
+  line-height: 1;
+  /* Visible siempre y no solo al pasar por encima: en una pantalla táctil no
+     hay hover, y ahí el aspa no aparecería nunca. */
+  opacity: 0.55;
+  cursor: pointer;
+  transition: opacity 0.15s var(--ease), color 0.15s var(--ease),
+    border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+.kv-chip-wrap:hover .kv-drop { opacity: 1; }
+.kv-drop:hover,
+.kv-drop:focus-visible {
+  opacity: 1;
+  color: #fff;
+  border-color: var(--danger);
+  background: var(--danger);
+}
 .kv-chip {
   position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
-  flex: none;
-  width: 268px;
-  padding: 8px 10px;
+  /* 268 + el hueco del aspa. Sin ensanchar, ese hueco se lo quitaba al nombre,
+     y el nombre es lo único que distingue una pieza del pliego de las otras
+     diecinueve: todas empiezan igual y se diferencian por el final. */
+  width: 296px;
+  padding: 8px 30px 8px 10px;
   text-align: left;
   color: inherit;
   border: 1px solid var(--line);
