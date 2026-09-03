@@ -1,0 +1,19 @@
+{
+  // El backend se ejecuta en Docker, así que el editor se quedaba sin ningún
+  // Python con las dependencias: Pylance no resolvía numpy, cv2, PIL, fastapi
+  // ni celery y marcaba en rojo cada import de todo el proyecto, sin que
+  // hubiera nada roto. Esto le señala el entorno local de edición.
+  //
+  // Si no existe, se crea una vez con:
+  //   cd creative-variants-mvp/backend
+  //   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+  "python.defaultInterpreterPath": "${workspaceFolder}/creative-variants-mvp/backend/.venv/bin/python",
+  "python.analysis.extraPaths": ["${workspaceFolder}/creative-variants-mvp/backend"],
+  "python.testing.pytestEnabled": true,
+  "python.testing.cwd": "${workspaceFolder}/creative-variants-mvp/backend",
+  "python.testing.pytestArgs": ["tests"],
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/.pytest_cache": true
+  }
+}

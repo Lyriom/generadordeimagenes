@@ -149,7 +149,18 @@ def _dominant_rgb(pixels: np.ndarray) -> tuple[int, int, int]:
     values, counts = np.unique(keys, return_counts=True)
     winner = values[int(np.argmax(counts))]
     chosen = pixels[keys == winner]
-    return tuple(int(round(value)) for value in chosen.mean(axis=0))
+    red, green, blue = (int(round(value)) for value in chosen.mean(axis=0))
+    return red, green, blue
+
+
+def _ink_rows(ink: np.ndarray) -> np.ndarray:
+    """Qué filas del recorte tienen tinta.
+
+    `ndarray.any(axis=1)` está declarado como "escalar o array" porque con un
+    array de cero dimensiones devuelve un escalar. Aquí siempre es 2D, pero el
+    analizador no lo sabe y marcaba en rojo cada llamada.
+    """
+    return np.atleast_1d(np.asarray(ink.any(axis=1)))
 
 
 def _ink_stroke(ink: np.ndarray) -> float:
@@ -159,7 +170,7 @@ def _ink_stroke(ink: np.ndarray) -> float:
     candidato tienen que pasar por el mismo procedimiento o la comparación de
     pesos compara dos mezclas de letras distintas.
     """
-    runs = _line_runs(ink.any(axis=1))
+    runs = _line_runs(_ink_rows(ink))
     if not runs:
         return 0.0
     heights = [bottom - top + 1 for top, bottom in runs]
@@ -297,7 +308,7 @@ def measure(project: Project, layer: Layer) -> TextStyle | None:
     if not ink.any():
         return None
 
-    runs = _line_runs(ink.any(axis=1))
+    runs = _line_runs(_ink_rows(ink))
     if not runs:
         return None
     heights = [bottom - top + 1 for top, bottom in runs]
@@ -563,8 +574,11 @@ def apply(
     layer.type = LayerType.TEXT
     layer.content = text
     layer.color = color
-    layer.text_align = align
-    layer.font_weight = weight
+    # Cerrados a propósito: la capa solo admite estos valores y hasta ahora se
+    # le asignaba un `str` cualquiera, así que una alineación inventada llegaba
+    # al renderer en vez de rebotar aquí.
+    layer.text_align = align if align in ("left", "center", "right") else "center"
+    layer.font_weight = "bold" if weight == "bold" else "normal"
     # La familia real del archivo, no la del valor por defecto: es el nombre que
     # el SVG le pide a Illustrator al abrirlo.
     layer.font_family = renderer.font_family_name(font_path) or layer.font_family
@@ -879,7 +893,7 @@ class _Run:
 def _profile(rgb: np.ndarray, ink: np.ndarray) -> list[_Run]:
     """Cada tramo con su ancho, su relleno y su color."""
     profiled: list[_Run] = []
-    for top, bottom in _ink_runs(ink.any(axis=1)):
+    for top, bottom in _ink_runs(_ink_rows(ink)):
         band = ink[top : bottom + 1]
         columns = np.nonzero(band.any(axis=0))[0]
         if not columns.size:

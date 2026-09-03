@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL.ImageFont import FreeTypeFont
 
 from ..config import settings
 from ..models import LayerCategory, LayerType, Project
@@ -58,7 +59,7 @@ FALLBACK_FONTS_BOLD = (
 
 
 @lru_cache(maxsize=64)
-def _load_font(path: str | None, size: int):
+def _load_font(path: str | None, size: int) -> FreeTypeFont:
     size = max(6, int(size))
     candidates = [path] if path else []
     candidates += [settings.default_font, settings.default_font_bold, *FALLBACK_FONTS]
@@ -69,10 +70,14 @@ def _load_font(path: str | None, size: int):
             return ImageFont.truetype(candidate, size)
         except (OSError, ValueError):
             continue
-    return ImageFont.load_default()
+    # Con `size`: sin él, el respaldo devuelve la tipografía de mapa de bits de
+    # Pillow, que ignora el cuerpo pedido y dibuja siempre en el mismo tamaño
+    # diminuto. Si un día no se resolviera ninguna cara, el arte saldría con el
+    # precio en letra de 11 px, no solo con otra tipografía.
+    return ImageFont.load_default(size=size)
 
 
-def load_font(path: str | None, size: int):
+def load_font(path: str | None, size: int) -> FreeTypeFont:
     """Tipografía cacheada. Pública para medir fuera del renderer."""
     return _load_font(path, size)
 

@@ -1464,7 +1464,10 @@ def generate(project_id: str, request: GenerateRequest | None = None):
     project = load_project_or_404(project_id)
     request = request or GenerateRequest()
     from app.worker import generate_variants_task
-    task = generate_variants_task.delay(project_id, request.model_dump())
+
+    # `.delay` lo añade Celery al decorar, y el analizador estático solo ve la
+    # función de dentro.
+    task = generate_variants_task.delay(project_id, request.model_dump())  # type: ignore[attr-defined]
     return {"task_id": task.id, "status": "PENDING"}
 
 @router.get(
@@ -1493,7 +1496,8 @@ def auto(project_id: str, request: AutoRequest | None = None):
     project = load_project_or_404(project_id)
     request = request or AutoRequest()
     from app.worker import auto_task
-    task = auto_task.delay(project_id, request.model_dump())
+
+    task = auto_task.delay(project_id, request.model_dump())  # type: ignore[attr-defined]
     return {"task_id": task.id, "status": "PENDING"}
 
 
@@ -1614,7 +1618,7 @@ def get_thumbnail(
         try:
             with Image.open(source_path) as image:
                 thumb = image.convert("RGB")
-                thumb.thumbnail((max_side, max_side), Image.LANCZOS)
+                thumb.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
                 thumb.save(cache_path, format="JPEG", quality=82, optimize=True)
         except Exception as exc:  # noqa: BLE001
             raise as_http_error(exc) from exc
