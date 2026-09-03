@@ -55,7 +55,19 @@ class Settings:
         # Los PSD de KV pesan 60-100 MB: el límite debe cubrirlos.
         self.max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 250)
         self.min_image_side: int = _env_int("MIN_IMAGE_SIDE", 200)
-        self.max_image_side: int = _env_int("MAX_IMAGE_SIDE", 8000)
+        # Lo que cuesta una imagen es su área, no su lado más largo. Medir por
+        # el lado rechazaba un pliego de 11700x3100 (36 Mpx) y en cambio dejaba
+        # pasar un cuadrado de 8000x8000 (64 Mpx), que ocupa casi el doble en
+        # memoria: el pliego, que es el formato que este proyecto existe para
+        # cortar en piezas, era justo el que no entraba.
+        #
+        # Ya no hay tope de lado. Con un mínimo por lado y un tope de área, la
+        # forma queda acotada por los dos extremos y sobra el tercero, que era
+        # además el que se desincronizaba con el del lienzo.
+        #
+        # El techo es el mismo que la guarda de Pillow en imaging.py, para
+        # avisar con un mensaje entendible antes de su DecompressionBombError.
+        self.max_image_megapixels: int = _env_int("MAX_IMAGE_MEGAPIXELS", 80)
 
         # --- Proveedores ---
         # auto | sam | local | manual
@@ -141,6 +153,10 @@ class Settings:
     @property
     def max_upload_bytes(self) -> int:
         return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def max_image_pixels(self) -> int:
+        return self.max_image_megapixels * 1_000_000
 
 
 @lru_cache(maxsize=1)

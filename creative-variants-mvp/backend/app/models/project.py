@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from ..config import settings
 
 
 def new_id() -> str:
@@ -65,8 +67,24 @@ class LayerType(str, Enum):
 
 
 class Canvas(BaseModel):
-    width: int = Field(gt=0, le=8000)
-    height: int = Field(gt=0, le=8000)
+    """Lienzo del proyecto.
+
+    El tope es el mismo que el de las subidas y sale de la configuración, no de
+    un número escrito aquí: cuando eran dos valores sueltos, subir el de las
+    subidas dejaba el arte aceptado y luego reventando al crear el proyecto.
+    """
+
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _fits_in_memory(self) -> "Canvas":
+        if self.width * self.height > settings.max_image_pixels:
+            raise ValueError(
+                f"El lienzo excede {settings.max_image_megapixels} Mpx "
+                f"({self.width}x{self.height})."
+            )
+        return self
 
 
 class Layer(BaseModel):

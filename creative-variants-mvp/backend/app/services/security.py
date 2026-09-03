@@ -71,6 +71,38 @@ def detect_image_format(payload: bytes) -> str:
     )
 
 
+def _check_decoded(
+    real_format: str,
+    magic_format: str,
+    width: int,
+    height: int,
+    min_side: int,
+    allow_psd: bool,
+) -> None:
+    """Comprobaciones sobre la imagen ya descodificada.
+
+    Vive aparte porque los dos validadores (en memoria y por ruta) hacían lo
+    mismo copiado, y una copia se queda atrás en cuanto se toca la otra.
+    """
+    accepted = {"JPEG", "PNG"} | ({"PSD"} if allow_psd else set())
+    if real_format not in accepted:
+        raise FileValidationError(f"Formato interno no soportado: {real_format}.")
+    if real_format != magic_format:
+        raise FileValidationError("El contenido no coincide con la firma del archivo.")
+    if width < min_side or height < min_side:
+        raise FileValidationError(
+            f"Dimensiones demasiado pequeñas ({width}x{height}). Mínimo {min_side}px por lado."
+        )
+    # Un pliego es ancho y bajo, y eso no lo hace pesado: lo que hay que acotar
+    # es el área, que es la memoria que ocupa al descodificarse.
+    if width * height > settings.max_image_pixels:
+        megapixels = width * height / 1_000_000
+        raise FileValidationError(
+            f"La imagen es demasiado grande ({width}x{height}, {megapixels:.0f} Mpx). "
+            f"Máximo {settings.max_image_megapixels} Mpx."
+        )
+
+
 def validate_image_bytes(
     payload: bytes,
     filename: str,
@@ -120,20 +152,7 @@ def validate_image_bytes(
     except (UnidentifiedImageError, OSError) as exc:  # pragma: no cover - defensivo
         raise FileValidationError(f"La imagen no se puede decodificar: {exc}") from exc
 
-    accepted = {"JPEG", "PNG"} | ({"PSD"} if allow_psd else set())
-    if real_format not in accepted:
-        raise FileValidationError(f"Formato interno no soportado: {real_format}.")
-    if real_format != magic_format:
-        raise FileValidationError("El contenido no coincide con la firma del archivo.")
-    if width < min_side or height < min_side:
-        raise FileValidationError(
-            f"Dimensiones demasiado pequeñas ({width}x{height}). Mínimo {min_side}px por lado."
-        )
-    if max(width, height) > settings.max_image_side:
-        raise FileValidationError(
-            f"Dimensiones demasiado grandes ({width}x{height}). "
-            f"Máximo {settings.max_image_side}px por lado."
-        )
+    _check_decoded(real_format, magic_format, width, height, min_side, allow_psd)
     return real_format, width, height
 
 
@@ -190,20 +209,7 @@ def validate_image_path(
     except (UnidentifiedImageError, OSError) as exc:
         raise FileValidationError(f"La imagen no se puede decodificar: {exc}") from exc
 
-    accepted = {"JPEG", "PNG"} | ({"PSD"} if allow_psd else set())
-    if real_format not in accepted:
-        raise FileValidationError(f"Formato interno no soportado: {real_format}.")
-    if real_format != magic_format:
-        raise FileValidationError("El contenido no coincide con la firma del archivo.")
-    if width < min_side or height < min_side:
-        raise FileValidationError(
-            f"Dimensiones demasiado pequeñas ({width}x{height}). Mínimo {min_side}px por lado."
-        )
-    if max(width, height) > settings.max_image_side:
-        raise FileValidationError(
-            f"Dimensiones demasiado grandes ({width}x{height}). "
-            f"Máximo {settings.max_image_side}px por lado."
-        )
+    _check_decoded(real_format, magic_format, width, height, min_side, allow_psd)
     return real_format, width, height
 
 

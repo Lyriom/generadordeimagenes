@@ -236,6 +236,28 @@ def test_uploaded_sheet_is_split_and_the_psd_is_not_kept(
         assert project["meta"]["psd_original_name"] == "pliego.psd"
 
 
+def test_a_sheet_wider_than_the_old_limit_is_split(client: TestClient, tmp_path):
+    """Un pliego de 9000px de ancho se corta en piezas de tamaño normal.
+
+    Era el caso que fallaba: el pliego se medía entero contra un tope pensado
+    para un aviso suelto, así que se rechazaba antes de llegar a cortarlo, que
+    es justo para lo que existe este endpoint.
+    """
+    pieces = [(100, 50, 4300, 300), (4500, 50, 4300, 300)]
+    wide = sample_sheet(tmp_path / "pliego_ancho.psd", pieces, (9000, 400))
+
+    response = client.post(
+        "/projects/split",
+        data={"name": "Pliego ancho"},
+        files={"artwork": ("ancho.psd", wide.read_bytes(), "image/vnd.adobe.photoshop")},
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["pieces_imported"] == 2
+    # Cada pieza cabe de sobra: el que no cabía era el pliego, no el aviso.
+    assert [project["canvas"]["width"] for project in payload["projects"]] == [4300, 4300]
+
+
 def test_uploaded_flat_art_is_rejected_by_the_split_endpoint(client: TestClient):
     response = client.post(
         "/projects/split",

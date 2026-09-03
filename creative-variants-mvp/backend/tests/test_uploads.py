@@ -7,6 +7,11 @@ import json
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import pytest
+from pydantic import ValidationError
+
+from app.config import settings
+from app.models.project import Canvas
 from app.services import storage
 from app.services.security import FileValidationError, validate_image_bytes
 from tests.conftest import make_artwork
@@ -151,3 +156,47 @@ def test_get_and_delete_project(client: TestClient, project: dict):
 
 def test_invalid_project_id_is_rejected(client: TestClient):
     assert client.get("/projects/not-a-uuid").status_code == 400
+
+
+# ------------------------------------------------------- pliegos y tamaño real
+# Un pliego de agencia es ancho y bajo: 11700x3100 son 36 Mpx, menos que un
+# cuadrado de 8000x8000. Mientras el tope se midió por el lado más largo, el
+# formato para el que existe el corte en piezas era justo el que no entraba.
+
+
+def test_a_sheet_longer_than_it_is_heavy_is_accepted(client: TestClient):
+    """Un arte muy ancho entra: lo que se mide es el área, no el lado."""
+    artwork = make_artwork(9000, 300)
+    response = client.post(
+        "/projects",
+        data={"name": "Pliego"},
+        files={"artwork": ("pliego.png", artwork, "image/png")},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["canvas"] == {"width": 9000, "height": 300}
+
+
+def test_the_canvas_accepts_the_size_that_used_to_be_rejected():
+    """11700x3100 es el pliego real que devolvía 'dimensiones demasiado grandes'."""
+    canvas = Canvas(width=11700, height=3100)
+    assert (canvas.width, canvas.height) == (11700, 3100)
+
+
+def test_too_many_pixels_is_rejected_with_its_own_message(monkeypatch):
+    """El rechazo por área dice cuántos Mpx trae y cuántos caben."""
+    monkeypatch.setattr(settings, "max_image_megapixels", 1)
+    payload = make_artwork(1600, 1000)  # 1,6 Mpx
+    with pytest.raises(FileValidationError) as excinfo:
+        validate_image_bytes(payload, "arte.png")
+    assert "Mpx" in str(excinfo.value)
+
+
+def test_the_canvas_and_the_upload_share_the_same_ceiling(monkeypatch):
+    """El lienzo no puede aceptar lo que la subida rechaza, ni al revés.
+
+    Eran dos números escritos por separado y esa es la avería que se arregla:
+    subir el de las subidas dejaba el arte aceptado y reventando después.
+    """
+    monkeypatch.setattr(settings, "max_image_megapixels", 1)
+    with pytest.raises(ValidationError):
+        Canvas(width=1600, height=1000)
