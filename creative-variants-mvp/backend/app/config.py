@@ -52,8 +52,12 @@ class Settings:
         self.max_projects_kept: int = _env_int("MAX_PROJECTS_KEPT", 60)
 
         # --- Límites de subida ---
-        # Los PSD de KV pesan 60-100 MB: el límite debe cubrirlos.
-        self.max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 250)
+        # Un KV suelto pesa 100-150 MB y un pliego con cinco encima se va a
+        # varios cientos. Este es el único tope de tamaño que queda: los proxys
+        # de delante van sin límite a propósito, porque tres números que hay que
+        # mantener iguales acaban siempre en uno que se quedó atrás. Aquí, en
+        # cambio, se puede contestar con un mensaje que se entiende.
+        self.max_upload_mb: int = _env_int("MAX_UPLOAD_MB", 4096)
         self.min_image_side: int = _env_int("MIN_IMAGE_SIDE", 200)
         # Lo que cuesta una imagen es su área, no su lado más largo. Medir por
         # el lado rechazaba un pliego de 11700x3100 (36 Mpx) y en cambio dejaba
@@ -65,9 +69,14 @@ class Settings:
         # forma queda acotada por los dos extremos y sobra el tercero, que era
         # además el que se desincronizaba con el del lienzo.
         #
-        # El techo es el mismo que la guarda de Pillow en imaging.py, para
-        # avisar con un mensaje entendible antes de su DecompressionBombError.
-        self.max_image_megapixels: int = _env_int("MAX_IMAGE_MEGAPIXELS", 80)
+        # Lo que queda no es un límite al trabajo: es la guarda contra las
+        # "bombas de descompresión", archivos de pocos KB que declaran miles de
+        # millones de píxeles para tumbar al que los abra. Está puesto en 400
+        # Mpx, unas diez veces el pliego más grande que se ha visto (11700x3100
+        # son 36), así que ningún arte real lo va a rozar. Pillow usa este mismo
+        # valor (ver imaging.py), para avisar en castellano en vez de reventar
+        # con DecompressionBombError.
+        self.max_image_megapixels: int = _env_int("MAX_IMAGE_MEGAPIXELS", 400)
 
         # --- Proveedores ---
         # auto | sam | local | manual

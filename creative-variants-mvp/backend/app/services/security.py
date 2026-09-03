@@ -160,26 +160,25 @@ def validate_image_path(
     path: Path,
     filename: str,
     *,
-    max_bytes: int | None = None,
     min_side: int | None = None,
     allow_psd: bool = False,
 ) -> tuple[str, int, int]:
     """Igual que `validate_image_bytes` pero sin cargar el archivo en memoria.
 
     Necesario para los PSD de KV, que pesan decenas de megabytes.
+
+    Aquí no se mira el tamaño. El tope de subida se aplica mientras los bytes
+    llegan, que es donde sirve de algo; repetirlo aquí no añadía nada y en
+    cambio se lo aplicaba también a los archivos de la carpeta de ingesta, que
+    no se han subido por ningún sitio: están puestos a mano en el servidor,
+    precisamente para los pliegos que no caben por el navegador.
     """
-    max_bytes = max_bytes or settings.max_upload_bytes
     min_side = settings.min_image_side if min_side is None else min_side
 
     if not path.exists() or not path.is_file():
         raise FileValidationError("El archivo no existe.")
-    size = path.stat().st_size
-    if size == 0:
+    if path.stat().st_size == 0:
         raise FileValidationError("El archivo está vacío.")
-    if size > max_bytes:
-        raise FileValidationError(
-            f"El archivo supera el límite de {max_bytes // (1024 * 1024)} MB."
-        )
 
     with path.open("rb") as handle:
         head = handle.read(1024)

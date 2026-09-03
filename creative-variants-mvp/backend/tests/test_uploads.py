@@ -200,3 +200,32 @@ def test_the_canvas_and_the_upload_share_the_same_ceiling(monkeypatch):
     monkeypatch.setattr(settings, "max_image_megapixels", 1)
     with pytest.raises(ValidationError):
         Canvas(width=1600, height=1000)
+
+
+def test_the_ingest_folder_ignores_the_upload_limit(client: TestClient, monkeypatch):
+    """Un archivo puesto a mano en el servidor no ha subido por ningún sitio.
+
+    Es el camino para los pliegos que no caben por el navegador, así que medirlo
+    contra el tope de subida dejaba sin salida justo el caso para el que existe.
+    """
+    monkeypatch.setattr(settings, "max_upload_mb", 0)  # nada cabría por subida
+    path = settings.ingest_dir / "pliego_ingesta.png"
+    path.write_bytes(make_artwork(900, 400))
+    try:
+        # Por el navegador no pasa ni un byte...
+        rejected = client.post(
+            "/projects",
+            data={"name": "Por subida"},
+            files={"artwork": ("arte.png", make_artwork(400, 400), "image/png")},
+        )
+        assert rejected.status_code == 400
+        assert "límite" in rejected.json()["detail"]
+
+        # ...y desde la carpeta del servidor entra igual.
+        accepted = client.post(
+            "/projects/from-ingest", json={"source": "pliego_ingesta.png"}
+        )
+        assert accepted.status_code == 201, accepted.text
+        assert accepted.json()["canvas"] == {"width": 900, "height": 400}
+    finally:
+        path.unlink(missing_ok=True)

@@ -32,11 +32,6 @@
 		lb_try_interval 250ms
 	}
 
-	# Los PSD llegan a 200 MB.
-	request_body {
-		max_size 300MB
-	}
-
 	log {
 		output stdout
 		format console

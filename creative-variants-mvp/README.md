@@ -351,8 +351,9 @@ La interfaz tiene **cuatro secciones**: *Campaña*, *Capas y KV*, *Generar* y
 
 ### Pantalla “Generar” — cuatro decisiones
 
-1. **Carga el KV maestro.** Tres pestañas: subir un PSD (hasta 300 MB),
-   tomarlo de la carpeta compartida (`data/ingest`, la vía para los PSD grandes) o abrir
+1. **Carga el KV maestro.** Tres pestañas: subir un PSD (hasta `MAX_UPLOAD_MB`,
+   4 GB de fábrica), tomarlo de la carpeta compartida (`data/ingest`, que no pasa por el
+   navegador ni por ese tope: es la vía para los pliegos grandes) o abrir
    un trabajo anterior. Las referencias opcionales (KV, logo, tipografía) están dentro de
    un desplegable, porque casi nunca hacen falta.
 2. **Revisa todas las capas.** El inventario recorre el árbol completo del PSD, incluidas

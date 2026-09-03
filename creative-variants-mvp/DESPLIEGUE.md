@@ -155,7 +155,7 @@ En `generador.misiva.com.ec` → **Apache & nginx Settings**:
 
 ```nginx
 location ~ ^/ {
-    client_max_body_size 300M;
+    client_max_body_size 0;
 
     proxy_pass http://127.0.0.1:8014;
     proxy_http_version 1.1;
@@ -176,11 +176,15 @@ Tres cosas de ahí no son opcionales:
 
 - **`Upgrade` y `Connection`**: ya no son necesarios para Astro, pero pueden
   conservarse sin efecto para mantener compatible el bloque del proxy.
-- **`client_max_body_size 300M`**: los PSD llegan a 200 MB y el límite por
-  defecto los corta. Va **dentro** del `location`: Plesk ya escribe esa misma
-  directiva en el vhost, y declararla otra vez arriba hace que nginx rechace
-  toda la configuración con «directive is duplicate». Conviene subir además el
-  campo *Maximum allowed HTTP request body size* de esa pantalla a 300 MB.
+- **`client_max_body_size 0`**: sin tope. Un pliego de agencia con cinco KV
+  pasa de 300 MB y el límite por defecto lo corta con un 413 seco, sin decir
+  por qué. Quien decide el tamaño máximo es el backend (`MAX_UPLOAD_MB`), que
+  contesta con un mensaje que se entiende; los proxys de en medio van sin
+  límite a propósito, porque tres números que hay que mantener iguales acaban
+  siempre en uno que se quedó atrás. Va **dentro** del `location`: Plesk ya
+  escribe esa misma directiva en el vhost, y declararla otra vez arriba hace
+  que nginx rechace toda la configuración con «directive is duplicate». Pon
+  además el campo *Maximum allowed HTTP request body size* de esa pantalla a 0.
 - **`location ~ ^/` y no `location /`**: Plesk ya define un `location /` en cada
   uno de sus dos bloques de servidor (el que reenvía a Apache), así que el
   nuestro daría «duplicate location». Los `location` de expresión regular van en
@@ -279,7 +283,8 @@ aplanado, los recortes de cada capa y cada variante generada.
 | Pide contraseña y la buena no entra | Los `$` del hash sin duplicar en el `.env` (solo aplica si se ha vuelto a activar el `basic_auth`) |
 | Plesk rechaza las directivas con «duplicate location "/"» | Hay que usar `location ~ ^/`, no `location /` |
 | La página carga y se cuelga al primer clic | Faltan `Upgrade`/`Connection` en las directivas de nginx |
-| «413» al subir un PSD | Falta `client_max_body_size 300M` |
+| «413» al subir un PSD | Falta `client_max_body_size 0` (y el campo *Maximum allowed HTTP request body size* de esa misma pantalla) |
+| «supera el límite de N MB» al subir un PSD | Es el backend: sube `MAX_UPLOAD_MB` en el `.env` del servidor. Para un pliego muy grande, mejor déjalo en `data/ingest`, que no pasa por el navegador ni por ese tope |
 | Plesk rechaza las directivas con «directive is duplicate» | `client_max_body_size` fuera del `location`: Plesk ya la pone en el vhost |
 | La tanda muere a los 60 s | Falta `proxy_read_timeout 600s` |
 | `cv-proxy` en crash-loop | El `security_opt` comentado del Paso 4 |

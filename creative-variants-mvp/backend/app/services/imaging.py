@@ -7,7 +7,12 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 
-Image.MAX_IMAGE_PIXELS = 80_000_000  # protección contra decompression bombs
+from ..config import settings
+
+#: Guarda contra "bombas de descompresión". Sale de la configuración para que
+#: sea el mismo número que rechaza la subida: si fueran dos, el archivo pasaría
+#: la puerta y reventaría al abrirlo, que es peor que no dejarlo entrar.
+Image.MAX_IMAGE_PIXELS = settings.max_image_pixels
 
 #: Color con el que se aplanan los PNG con transparencia. NUNCA usar negro:
 #: `Image.convert("RGB")` rellena el alfa con (0,0,0) y ensucia todo el pipeline
