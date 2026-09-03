@@ -9,7 +9,12 @@ from PIL import Image, ImageDraw
 
 from tests.conftest import await_task
 from app.services import storage
-from app.services.imaging import load_alpha, load_flat_rgb, read_bgr_flat
+from app.services.imaging import (
+    load_alpha,
+    load_flat_rgb,
+    read_bgr_flat,
+    resize_contain_canvas,
+)
 
 
 def make_cutout(width: int = 600, height: int = 600) -> bytes:
@@ -44,6 +49,22 @@ def test_load_alpha_returns_none_for_opaque_images(tmp_path):
     path = tmp_path / "opaco.png"
     Image.new("RGB", (300, 300), (10, 20, 30)).save(path)
     assert load_alpha(path) is None
+
+
+def test_contain_canvas_preserves_the_complete_artwork():
+    source = Image.new("RGB", (200, 100), (30, 40, 50))
+    draw = ImageDraw.Draw(source)
+    draw.rectangle((0, 0, 19, 99), fill=(255, 0, 0))
+    draw.rectangle((180, 0, 199, 99), fill=(0, 255, 0))
+
+    fitted = resize_contain_canvas(source, 200, 200, background=(1, 2, 3))
+
+    assert fitted.size == (200, 200)
+    assert fitted.getpixel((0, 0)) == (1, 2, 3)
+    # Ambos extremos sobreviven: no hubo crop horizontal ni deformación.
+    assert fitted.getpixel((5, 100))[0] > 240
+    assert fitted.getpixel((195, 100))[1] > 240
+    assert fitted.getpixel((100, 50)) == (30, 40, 50)
 
 
 def test_analyze_uses_alpha_channel_as_product_mask(client: TestClient):

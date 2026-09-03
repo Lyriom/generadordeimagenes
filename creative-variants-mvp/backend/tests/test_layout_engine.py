@@ -417,13 +417,13 @@ def test_faithful_only_used_when_aspect_matches():
     assert faithful_plan.background_style == "plate"
 
 
-def test_stretch_is_only_granted_to_scenery():
-    """El permiso de estirar nunca alcanza al producto ni al logo."""
+def test_faithful_never_stretches_even_full_bleed_scenery():
+    """Una reproducción fiel aplica el mismo factor proporcional a cada capa."""
     from app.services.layout_engine import FAITHFUL_LAYOUT, build_placements
 
     source = (900, 1350)
     layers = [
-        # Franja a sangre: escenografía, puede estirarse hasta el borde.
+        # Incluso una franja a sangre conserva su proporción y alineación.
         Layer(
             name="Franja",
             type=LayerType.IMAGE,
@@ -458,6 +458,9 @@ def test_stretch_is_only_granted_to_scenery():
         source_canvas=source,
     )
     by_name = {item.layer.name: item for item in placements}
-    assert by_name["Franja"].stretch is True
-    assert by_name["Franja"].x == 0 and by_name["Franja"].width == 1080
-    assert by_name["Producto ancho"].stretch is False
+    assert all(item.stretch is False for item in placements)
+    assert by_name["Franja"].x == 180
+    assert by_name["Franja"].width == 720
+    assert by_name["Franja"].height == 48
+    assert by_name["Producto ancho"].x == 180
+    assert by_name["Producto ancho"].width == 720

@@ -164,6 +164,10 @@ class ProjectReferences(BaseModel):
     kv: SourceImage | None = None
     logo: SourceImage | None = None
     font: str | None = None
+    #: Cara negrita de la tipografía de marca. Sin ella, un copy en negrita se
+    #: escribe con la redonda de marca, que se parece más al arte que una
+    #: negrita ajena.
+    font_bold: str | None = None
 
 
 class AnalysisInfo(BaseModel):

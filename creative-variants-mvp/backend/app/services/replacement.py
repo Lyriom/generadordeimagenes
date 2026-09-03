@@ -6,6 +6,7 @@ producto nuevo quepa donde estaba el viejo, sin deformarse.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from pathlib import Path
@@ -196,7 +197,13 @@ def replace_layer_image(
         layer.meta["replacement_box"] = [box_x, box_y, box_w, box_h]
     new_w, new_h = fit_contain(incoming.width, incoming.height, box_w, box_h)
 
-    rel = f"layers/{layer.category.value}_{layer.id[:8]}_swap.png"
+    # Cada producto recibe un asset inmutable. Reutilizar siempre ``*_swap.png``
+    # permitía que la siguiente tanda sobrescribiera los píxeles mientras un
+    # worker todavía exportaba la anterior, cruzando productos entre artes.
+    digest = hashlib.sha256(f"{incoming.width}x{incoming.height}:".encode("ascii"))
+    digest.update(incoming.tobytes())
+    fingerprint = digest.hexdigest()[:12]
+    rel = f"layers/{layer.category.value}_{layer.id[:8]}_swap_{fingerprint}.png"
     target = storage.abs_path(project.project_id, rel)
     target.parent.mkdir(parents=True, exist_ok=True)
     # Conserva todos los píxeles del recorte. El renderer hace una única reducción

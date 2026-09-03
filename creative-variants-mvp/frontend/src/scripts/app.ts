@@ -12,6 +12,8 @@ import {
   variantPngUrl,
 } from "./api";
 import type {
+  ArtTextLayer,
+  ArtTexts,
   Capabilities,
   FormatPreset,
   Layer,
@@ -207,6 +209,14 @@ interface State {
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
+  /** Copy y logos de cada KV, tal como los devuelve GET /texts. */
+  texts: Record<string, ArtTexts>;
+  /** KV sobre el que se definieron los textos por producto. */
+  copySource: string | null;
+  /** Elementos de ese KV cuyo texto cambia de un producto a otro. */
+  copyFields: Set<string>;
+  /** Texto de cada producto para cada uno de esos elementos. */
+  productTexts: Record<string, Record<string, string>>;
 }
 
 const state: State = {
@@ -227,6 +237,10 @@ const state: State = {
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
+  texts: {},
+  copySource: null,
+  copyFields: new Set(),
+  productTexts: {},
 };
 
 const ARRANGEMENT_OPTIONS: Record<string, string> = {
@@ -339,6 +353,10 @@ async function refreshProject(projectId: string): Promise<Project> {
   const index = state.campaign.findIndex((item) => item.project_id === projectId);
   if (index >= 0) state.campaign[index] = project;
   else state.campaign.push(project);
+  // El inventario de copy depende de las capas: confirmar roles, analizar o
+  // corregir un recorte lo cambia. Sin invalidar aquí se seguía enseñando el
+  // anterior, con categorías y nombres que ya no eran los de la capa.
+  delete state.texts[projectId];
   return project;
 }
 
@@ -915,6 +933,7 @@ async function renderLayers(): Promise<void> {
     state.selectedLayerId = project.layers.find((layer) => layer.category !== "background")?.id || null;
   }
   const layer = project.layers.find((item) => item.id === state.selectedLayerId) || null;
+  await loadTexts(project.project_id);
   const projectOptions = state.campaign.map((item) =>
     '<option value="' + attr(item.project_id) + '"' + selected(item.project_id === project.project_id) + ">" + esc(item.name) + "</option>"
   ).join("");
@@ -927,12 +946,13 @@ async function renderLayers(): Promise<void> {
         '<div class="layer-preview"><img id="mask-source" src="/api/projects/', attr(project.project_id),
         "/preview/mask/", attr(layer.id), '" alt="Máscara de ', attr(layer.name), '">',
         '<canvas id="mask-canvas" class="mask-canvas" hidden></canvas></div>',
-        '<div class="button-row" style="margin-top:12px"><button class="ghost-button" id="draw-mask">Dibujar máscara</button>',
+        '<div class="button-row" style="margin-top:12px"><button class="ghost-button" id="draw-mask">Corregir bordes con pincel</button>',
         '<button class="ghost-button" id="auto-segment">Auto-segmentar</button>',
         '<button class="ghost-button" id="reset-mask">Usar rectángulo</button></div>',
         '<div id="mask-tools" class="card soft" style="margin-top:12px" hidden>',
+        '<p class="muted tiny">La zona verde es el recorte actual. Añade partes faltantes o borra restos del fondo.</p>',
         '<div class="form-grid"><label class="field"><span>Pincel</span><input id="brush-size" type="range" min="2" max="60" value="16"></label>',
-        '<label class="field"><span>Modo</span><select id="brush-mode"><option value="add">Añadir</option><option value="subtract">Borrar</option></select></label></div>',
+        '<label class="field"><span>Modo</span><select id="brush-mode"><option value="add">Añadir al producto</option><option value="subtract">Quitar del producto</option></select></label></div>',
         '<div class="button-row" style="margin-top:12px"><button class="button" id="save-mask">Guardar máscara</button><button class="ghost-button" id="cancel-mask">Cancelar</button></div></div>',
       ].join("")
     : emptyState("◫", "No hay capas", "Analiza el arte o crea una capa manual.");
@@ -958,6 +978,9 @@ async function renderLayers(): Promise<void> {
     // La confirmación de roles va primero: es lo único obligatorio de este paso.
     reviewRoles(project, layers),
     '<div class="spacer"></div>',
+    // El copy va justo después: es lo que se cambia en casi todas las campañas.
+    copyEditor(project),
+    '<div class="spacer"></div>',
     '<details class="card" open><summary>Ajustes finos de la capa seleccionada · opcional</summary>',
     '<p class="muted tiny" style="margin-top:10px">Máscaras, geometría y permisos. Solo si algo salió mal en la importación.</p>',
     '<div class="button-row" style="margin:14px 0 16px"><label class="field" style="min-width:260px"><span>KV activo</span><select id="active-kv">', projectOptions, "</select></label>",
@@ -979,6 +1002,7 @@ async function renderLayers(): Promise<void> {
 
   bindStepBar();
   bindStepFooter("layers");
+  bindCopyEditor(project);
   bindLayerActions(project, layer, layers);
 }
 
@@ -1067,6 +1091,308 @@ function reviewRoles(project: Project, layers: Layer[]): string {
       : "",
     "</section>",
   ].join("");
+}
+
+/* ------------------------------------------------------ copy del arte
+   Un KV llega con el precio, el nombre del producto y el logo como píxeles.
+   Esto los vuelve editables: reescribir el texto respeta color, cuerpo y sitio
+   del original, y "quitar del arte" borra el elemento también del fondo cuando
+   venía aplanado, que es el caso en el que ocultarlo no quitaba nada. */
+
+const EMPTY_TEXTS: ArtTexts = { layers: [], brand_font: false, brand_font_bold: false };
+
+async function loadTexts(projectId: string, force = false): Promise<ArtTexts> {
+  if (!force && state.texts[projectId]) return state.texts[projectId];
+  try {
+    const response = await get<ArtTexts>("/projects/" + projectId + "/texts");
+    state.texts[projectId] = { ...EMPTY_TEXTS, ...response, layers: response.layers || [] };
+  } catch (error) {
+    toast(errorMessage(error), "error");
+    state.texts[projectId] = { ...EMPTY_TEXTS };
+  }
+  return state.texts[projectId];
+}
+
+/* La tipografía decide si el copy reescrito sirve para producción. El color, el
+   cuerpo y el sitio salen del arte, pero las letras son las de la fuente que
+   haya: sin la de marca, un precio de Marcimex sale en DejaVu. Antes solo se
+   podía subir al crear el proyecto —tres pasos antes de que hiciera falta—, así
+   que el aviso y el formulario viven aquí, donde se nota el problema. */
+function brandFontHtml(texts: ArtTexts): string {
+  if (texts.brand_font) {
+    return [
+      '<div class="notice success" style="margin-bottom:14px"><strong>Tipografía de marca cargada</strong>',
+      texts.brand_font_bold ? " (redonda y negrita)." : " (solo la redonda; la negrita usará esta misma cara).",
+      ' <button class="ghost-button small" id="open-brand-font" style="margin-left:8px">Cambiar</button></div>',
+      '<div id="brand-font-form" hidden>', brandFontFormHtml(), "</div>",
+    ].join("");
+  }
+  return [
+    '<div class="notice warning" style="margin-bottom:14px"><strong>Falta la tipografía de marca.</strong> ',
+    "El copy que reescribas saldrá con el color, el cuerpo y la posición del original, ",
+    "pero con las letras de la tipografía del sistema. Sube el .ttf/.otf de la marca ",
+    "para que el arte quede listo para producción.",
+    '<div style="margin-top:10px">', brandFontFormHtml(), "</div></div>",
+  ].join("");
+}
+
+function brandFontFormHtml(): string {
+  const others = state.campaign.length - 1;
+  return [
+    '<div class="form-grid"><label class="field"><span>Cara redonda</span>',
+    '<input id="brand-font" type="file" accept=".ttf,.otf"></label>',
+    '<label class="field"><span>Cara negrita · opcional</span>',
+    '<input id="brand-font-bold" type="file" accept=".ttf,.otf"></label></div>',
+    others > 0
+      ? '<label class="choice" style="margin-top:10px"><input id="brand-font-all" type="checkbox" checked> ' +
+        "Aplicar a los " + String(state.campaign.length) + " KV de la campaña</label>"
+      : "",
+    '<button class="button small" id="save-brand-font" style="margin-top:10px">Guardar tipografía</button>',
+  ].join("");
+}
+
+async function saveBrandFont(project: Project): Promise<void> {
+  const regular = query<HTMLInputElement>("#brand-font")?.files?.[0] || null;
+  const bold = query<HTMLInputElement>("#brand-font-bold")?.files?.[0] || null;
+  if (!regular && !bold) {
+    toast("Elige al menos un archivo de tipografía.", "error");
+    return;
+  }
+  const toAll = query<HTMLInputElement>("#brand-font-all")?.checked ?? false;
+  const targets = toAll ? state.campaign : [project];
+  busy("Guardando tipografía", "Aplicando la cara de marca al copy…", 20);
+  try {
+    for (let index = 0; index < targets.length; index += 1) {
+      const target = targets[index];
+      busyProgress(
+        20 + Math.round((index / Math.max(1, targets.length)) * 70),
+        target.name,
+      );
+      const data = new FormData();
+      if (regular) data.append("font", regular);
+      if (bold) data.append("font_bold", bold);
+      const result = await post<any>(
+        "/projects/" + target.project_id + "/references/font",
+        data,
+      );
+      (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+      await refreshProject(target.project_id);
+      await loadTexts(target.project_id, true);
+    }
+    toast(
+      "Tipografía aplicada a " + String(targets.length) + " KV. El copy ya reescrito se recalculó.",
+      "success",
+    );
+    await renderLayers();
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
+}
+
+/** Misma capa en otro KV de la campaña.
+ *
+ *  Los KV de una campaña suelen ser piezas del mismo PSD —el cuadrado y el
+ *  vertical del mismo aviso—, así que el precio es el enésimo elemento de su
+ *  categoría en ambos. No hay identificador compartido: los ids son por pieza. */
+function twinLayerId(source: Project, target: Project, layerId: string): string | null {
+  if (source.project_id === target.project_id) return layerId;
+  const layer = source.layers.find((item) => item.id === layerId);
+  if (!layer) return null;
+  const byCategory = (project: Project) =>
+    project.layers
+      .filter((item) => item.category === layer.category)
+      .sort((a, b) => a.z_index - b.z_index);
+  const index = byCategory(source).findIndex((item) => item.id === layerId);
+  return byCategory(target)[index]?.id || null;
+}
+
+function copyThumb(project: Project, item: ArtTextLayer): string {
+  if (item.src) {
+    return '<img class="copy-thumb" src="' + attr(fileUrl(project.project_id, item.src)) +
+      '" alt="' + attr(item.name) + '" loading="lazy" decoding="async">';
+  }
+  return '<span class="copy-thumb is-text">' + esc(item.text.slice(0, 28) || "◇") + "</span>";
+}
+
+function copyRow(project: Project, item: ArtTextLayer): string {
+  const lines = Math.max(1, Math.min(4, item.style?.lines || item.text.split("\n").length));
+  const editor = item.editable
+    ? [
+        '<textarea class="copy-text" rows="', String(lines), '" data-layer="', attr(item.id),
+        '" spellcheck="false">', esc(item.text), "</textarea>",
+      ].join("")
+    : '<p class="muted tiny copy-locked">Sus píxeles no contienen texto que se pueda medir ' +
+      "(es una forma, un sello o una foto). Se puede quitar del arte, pero no reescribir.</p>";
+  const notes = [
+    CATEGORY_LABELS[item.category] || item.category,
+    item.rewritten ? "reescrito" : "",
+    item.in_plate ? "aplanado en el fondo" : "",
+  ].filter(Boolean).join(" · ");
+  return [
+    '<div class="copy-row', item.removed ? " is-removed" : "", '">', copyThumb(project, item),
+    '<div class="copy-meta"><strong>', esc(item.name), "</strong><small>", esc(notes), "</small></div>",
+    '<div class="copy-edit">', editor, "</div>",
+    '<div class="copy-actions">',
+    item.editable
+      ? '<button class="button small save-copy" data-layer="' + attr(item.id) + '">Guardar texto</button>'
+      : "",
+    state.campaign.length > 1
+      ? '<button class="ghost-button small copy-to-all" data-layer="' + attr(item.id) +
+        '" title="Aplica el mismo cambio a la capa equivalente de las demás piezas del PSD">' +
+        "A los " + String(state.campaign.length) + " KV</button>"
+      : "",
+    item.rewritten
+      ? '<button class="ghost-button small restore-copy" data-layer="' + attr(item.id) + '">Volver al original</button>'
+      : "",
+    '<label class="check"><input class="remove-copy" type="checkbox" data-layer="', attr(item.id), '"',
+    checked(item.removed), "> Quitar del arte</label></div></div>",
+  ].join("");
+}
+
+function copyEditor(project: Project): string {
+  const texts = state.texts[project.project_id] || EMPTY_TEXTS;
+  const items = texts.layers;
+  if (!items.length) {
+    return [
+      '<section class="card" id="copy-editor"><div class="card-head"><div><h2>Textos y logos del arte</h2>',
+      "<p>Cambia el copy de la promoción o quita un elemento de la pieza</p></div></div>",
+      '<div class="notice">Este KV no tiene copy ni logos separados: todo llegó dentro del fondo. ',
+      "Crea la capa que quieras editar en <em>Ajustes finos</em> y volverá a aparecer aquí.</div></section>",
+    ].join("");
+  }
+  const editable = items.filter((item) => item.editable).length;
+  return [
+    '<section class="card elevated" id="copy-editor"><div class="card-head"><div><h2>Textos y logos del arte</h2>',
+    "<p>Cambia el copy de la promoción o quita un elemento de la pieza</p></div>",
+    '<span class="badge', editable ? " green" : "", '">', String(editable), " EDITABLES</span></div>",
+    '<p class="muted tiny" style="margin-bottom:14px">El texto nuevo se escribe con el color, el cuerpo y la ',
+    "posición del original. Si necesitas un texto distinto por producto, no lo cambies aquí: ",
+    "hazlo en el paso 3, donde cada producto lleva el suyo.</p>",
+    brandFontHtml(texts),
+    '<div class="copy-list">', items.map((item) => copyRow(project, item)).join(""), "</div></section>",
+  ].join("");
+}
+
+async function sendCopyEdit(project: Project, payload: Record<string, unknown>): Promise<void> {
+  busy("Guardando el arte", "Aplicando el cambio sobre el KV…", 30);
+  try {
+    const layerId = String(payload.layer_id);
+    delete payload.layer_id;
+    const response = await post<any>(
+      "/projects/" + project.project_id + "/layers/" + layerId + "/text",
+      payload,
+    );
+    (response.warnings || []).forEach((warning: string) => toast(warning, "info"));
+    await refreshProject(project.project_id);
+    await loadTexts(project.project_id, true);
+    await renderLayers();
+    toast("Arte actualizado.", "success");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
+}
+
+/** El mismo cambio en las demás piezas de la campaña.
+ *
+ *  Una campaña son ocho tamaños del mismo aviso; reescribir el precio ocho
+ *  veces a mano es justo el trabajo que esta aplicación existe para quitar. Se
+ *  traduce por categoría y posición, igual que los textos por producto. */
+async function copyEditToCampaign(
+  source: Project,
+  layerId: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const others = state.campaign.filter((item) => item.project_id !== source.project_id);
+  busy("Aplicando a la campaña", "Llevando el cambio a las demás piezas…", 15);
+  const sinPareja: string[] = [];
+  try {
+    for (let index = 0; index < others.length; index += 1) {
+      const target = others[index];
+      busyProgress(15 + Math.round((index / Math.max(1, others.length)) * 80), target.name);
+      const twin = twinLayerId(source, target, layerId);
+      if (!twin) {
+        sinPareja.push(target.name);
+        continue;
+      }
+      try {
+        const result = await post<any>(
+          "/projects/" + target.project_id + "/layers/" + twin + "/text",
+          payload,
+        );
+        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+      } catch (error) {
+        sinPareja.push(target.name);
+        toast(target.name + ": " + errorMessage(error), "error");
+      }
+      await refreshProject(target.project_id);
+      await loadTexts(target.project_id, true);
+    }
+    const hechos = others.length - sinPareja.length;
+    if (hechos) toast("Aplicado en " + String(hechos) + " KV más.", "success");
+    if (sinPareja.length) {
+      toast(
+        "Sin capa equivalente en: " + sinPareja.join(", ") + ". Cámbialo en cada uno.",
+        "info",
+      );
+    }
+  } finally {
+    idle();
+  }
+}
+
+function bindCopyEditor(project: Project): void {
+  query("#open-brand-font")?.addEventListener("click", () => {
+    const form = query<HTMLElement>("#brand-font-form");
+    if (form) form.hidden = !form.hidden;
+  });
+  query("#save-brand-font")?.addEventListener("click", () => void saveBrandFont(project));
+  queryAll<HTMLButtonElement>(".save-copy").forEach((button) => {
+    button.addEventListener("click", () => {
+      const id = button.dataset.layer!;
+      const field = query<HTMLTextAreaElement>('.copy-text[data-layer="' + id + '"]');
+      const content = (field?.value || "").trim();
+      if (!content) {
+        toast("Escribe el texto nuevo, o usa “Quitar del arte” si sobra.", "error");
+        return;
+      }
+      void sendCopyEdit(project, { layer_id: id, content });
+    });
+  });
+  queryAll<HTMLButtonElement>(".restore-copy").forEach((button) => {
+    button.addEventListener("click", () =>
+      void sendCopyEdit(project, { layer_id: button.dataset.layer!, restore: true }),
+    );
+  });
+  queryAll<HTMLInputElement>(".remove-copy").forEach((box) => {
+    box.addEventListener("change", () =>
+      void sendCopyEdit(project, { layer_id: box.dataset.layer!, removed: box.checked }),
+    );
+  });
+  queryAll<HTMLButtonElement>(".copy-to-all").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.layer!;
+      const item = (state.texts[project.project_id] || EMPTY_TEXTS).layers.find(
+        (entry) => entry.id === id,
+      );
+      const field = query<HTMLTextAreaElement>('.copy-text[data-layer="' + id + '"]');
+      const removed = query<HTMLInputElement>('.remove-copy[data-layer="' + id + '"]')?.checked;
+      const content = (field?.value || "").trim();
+      // Se manda lo que hay en pantalla: primero se guarda en este KV y después
+      // se replica, para que las piezas no queden con textos distintos.
+      if (item?.editable && content) {
+        await sendCopyEdit(project, { layer_id: id, content });
+        await copyEditToCampaign(project, id, { content, removed });
+      } else {
+        await sendCopyEdit(project, { layer_id: id, removed: Boolean(removed) });
+        await copyEditToCampaign(project, id, { removed: Boolean(removed) });
+      }
+      await renderLayers();
+    });
+  });
 }
 
 function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]): void {
@@ -1445,7 +1771,7 @@ function bindSingleLayer(project: Project, layer: Layer): void {
   query("#reset-mask")?.addEventListener("click", () => updateMask(project, {
     layer_id: layer.id, reset_from_box: true, re_extract: true,
   }));
-  query("#draw-mask")?.addEventListener("click", () => enableMaskCanvas(project, layer));
+  query("#draw-mask")?.addEventListener("click", () => void enableMaskCanvas(project, layer));
 }
 
 async function updateMask(project: Project, payload: any): Promise<void> {
@@ -1462,7 +1788,7 @@ async function updateMask(project: Project, payload: any): Promise<void> {
   }
 }
 
-function enableMaskCanvas(project: Project, layer: Layer): void {
+async function enableMaskCanvas(project: Project, layer: Layer): Promise<void> {
   const source = query<HTMLImageElement>("#mask-source")!;
   const canvas = query<HTMLCanvasElement>("#mask-canvas")!;
   const tools = query<HTMLElement>("#mask-tools")!;
@@ -1475,6 +1801,35 @@ function enableMaskCanvas(project: Project, layer: Layer): void {
   tools.hidden = false;
   const ctx = canvas.getContext("2d")!;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  // Se edita la máscara existente. Antes el canvas comenzaba transparente y al
+  // guardar reemplazaba todo por los últimos trazos; "Borrar" tampoco podía
+  // quitar nada de un lienzo vacío.
+  if (layer.mask) {
+    try {
+      const maskImage = new Image();
+      maskImage.src = fileUrl(project.project_id, layer.mask);
+      await maskImage.decode();
+      const raw = document.createElement("canvas");
+      raw.width = canvas.width;
+      raw.height = canvas.height;
+      const rawCtx = raw.getContext("2d")!;
+      rawCtx.drawImage(maskImage, 0, 0, raw.width, raw.height);
+      const pixels = rawCtx.getImageData(0, 0, raw.width, raw.height);
+      for (let index = 0; index < pixels.data.length; index += 4) {
+        const value = pixels.data[index];
+        pixels.data[index] = 0;
+        pixels.data[index + 1] = 255;
+        pixels.data[index + 2] = 120;
+        pixels.data[index + 3] = value;
+      }
+      ctx.putImageData(pixels, 0, 0);
+    } catch {
+      toast("No se pudo cargar la máscara actual; no se modificó el recorte.", "error");
+      canvas.hidden = true;
+      tools.hidden = true;
+      return;
+    }
+  }
   let drawing = false;
   const point = (event: PointerEvent) => {
     const bounds = canvas.getBoundingClientRect();
@@ -1683,10 +2038,152 @@ function productTarget(project: Project): Layer | null {
   return products.find((layer) => layer.replaceable) || products.sort((a, b) => b.width * b.height - a.width * a.height)[0] || null;
 }
 
+/* ------------------------------------------- copy que cambia por producto
+   La fila de artes de una promoción es el mismo KV ocho veces con otro producto
+   y, sobre todo, con otro nombre y otro precio. Aquí se elige qué elementos del
+   arte cambian de una salida a otra y qué dice cada uno en cada producto. */
+
+const COMBO_PREFIX = "combo::";
+
+/** KV sobre el que se escriben los textos por producto.
+ *
+ *  Deliberadamente **no** es el KV activo. Los ids de capa son por pieza, así
+ *  que si la referencia cambiara al cambiar de KV activo en el paso 2, la tabla
+ *  ya escrita se quedaba sin coincidencias: los campos aparecían vacíos y los
+ *  textos se descartaban en silencio al generar. Se ancla a una pieza y de ahí
+ *  se traduce al resto. */
+function copyReference(): Project | null {
+  const stored = state.campaign.find((item) => item.project_id === state.copySource);
+  if (stored) return stored;
+  // La referencia guardada ya no está en la campaña: lo escrito para ella no
+  // significa nada en las piezas nuevas.
+  if (state.copySource) {
+    state.copySource = null;
+    state.copyFields.clear();
+    state.productTexts = {};
+  }
+  const fallback = activeProject();
+  if (fallback) state.copySource = fallback.project_id;
+  return fallback;
+}
+
+function copyTargets(): Array<{ key: string; label: string }> {
+  return [
+    ...selectedProductFiles().map((file) => ({ key: productKey(file), label: productName(file) })),
+    ...validGroups().map((group) => ({ key: COMBO_PREFIX + group.id, label: group.name })),
+  ];
+}
+
+function copyValue(key: string, layerId: string, fallback: string): string {
+  const stored = state.productTexts[key];
+  const value = stored ? stored[layerId] : undefined;
+  return value === undefined ? fallback : value;
+}
+
+function setCopyValue(key: string, layerId: string, value: string): void {
+  const stored = state.productTexts[key] || (state.productTexts[key] = {});
+  stored[layerId] = value;
+}
+
+function productCopyHtml(project: Project): string {
+  const texts = state.texts[project.project_id] || EMPTY_TEXTS;
+  const items = texts.layers.filter((item) => item.editable);
+  const others = state.campaign.length - 1;
+  const targets = copyTargets();
+  if (!items.length) {
+    return [
+      '<section class="card"><div class="card-head"><div><h2>Textos por producto</h2>',
+      "<p>Un precio y un nombre distintos en cada arte</p></div></div>",
+      '<div class="notice">Este KV no tiene copy separado que se pueda reescribir. ',
+      'Revísalo en el <strong>paso 2</strong>, en “Textos y logos del arte”.</div></section>',
+    ].join("");
+  }
+
+  const chooser = items.map((item) =>
+    '<label class="choice"><input class="copy-field" type="checkbox" value="' + attr(item.id) + '"' +
+    checked(state.copyFields.has(item.id)) + "> " + esc(item.name) + " <small class=\"muted\">" +
+    esc((item.text || "").slice(0, 24)) + "</small></label>"
+  ).join("");
+
+  const chosen = items.filter((item) => state.copyFields.has(item.id));
+  let table = "";
+  if (chosen.length && targets.length) {
+    const head = chosen.map((item) => "<th>" + esc(item.name) + "</th>").join("");
+    const rows = targets.map((target) => [
+      "<tr><td><strong>", esc(target.label), "</strong></td>",
+      chosen.map((item) => [
+        '<td><input class="copy-cell" data-target="', attr(target.key), '" data-layer="', attr(item.id),
+        '" value="', attr(copyValue(target.key, item.id, item.text)), '"></td>',
+      ].join("")).join(""),
+      "</tr>",
+    ].join("")).join("");
+    table = [
+      '<div class="inventory" style="margin-top:16px"><table><thead><tr><th>Producto</th>',
+      head, "</tr></thead><tbody>", rows, "</tbody></table></div>",
+      '<p class="muted tiny" style="margin-top:10px">Un campo vacío deja el texto original del KV. ',
+      "Cada arte se genera con su propia fila, así que el precio de uno no se queda en el siguiente.</p>",
+    ].join("");
+  } else if (chosen.length) {
+    table = '<div class="notice" style="margin-top:16px">Marca arriba los productos que llevan arte individual para escribir su texto.</div>';
+  }
+
+  return [
+    '<section class="card"><div class="card-head"><div><h2>Textos por producto · opcional</h2>',
+    "<p>Qué parte del copy cambia en cada arte</p></div><span class=\"badge\">",
+    String(state.copyFields.size), " ELEMENTOS</span></div>",
+    // Quien salta directo aquí no ha visto el aviso del paso 2.
+    !texts.brand_font && state.copyFields.size
+      ? '<div class="notice warning" style="margin-bottom:14px">Este KV no tiene tipografía de marca: ' +
+        "el copy saldrá con las letras del sistema. Súbela en el <strong>paso 2</strong>, " +
+        "en “Textos y logos del arte”.</div>"
+      : "",
+    others > 0
+      ? '<p class="muted tiny" style="margin-bottom:12px">Los textos se escriben sobre <strong>' +
+        esc(project.name) + "</strong> y se traducen a los otros " + String(others) +
+        " KV por categoría y posición: las piezas de un mismo PSD repiten el diseño.</p>"
+      : "",
+    '<span class="label">Elementos que cambian de un producto a otro</span>',
+    '<div class="choice-row" style="margin-top:8px">', chooser, "</div>",
+    table,
+    "</section>",
+  ].join("");
+}
+
+function bindProductCopy(): void {
+  queryAll<HTMLInputElement>(".copy-field").forEach((box) => {
+    box.addEventListener("change", async () => {
+      if (box.checked) state.copyFields.add(box.value);
+      else state.copyFields.delete(box.value);
+      await renderProducts();
+    });
+  });
+  queryAll<HTMLInputElement>(".copy-cell").forEach((field) => {
+    field.addEventListener("input", () => {
+      setCopyValue(field.dataset.target!, field.dataset.layer!, field.value);
+    });
+  });
+}
+
+/** Copy de esta tanda, ya traducido a las capas del KV que se va a producir. */
+function textOverrides(project: Project, targetKey: string): Array<Record<string, string>> | null {
+  const source = copyReference();
+  if (!source || !state.copyFields.size) return null;
+  const overrides: Array<Record<string, string>> = [];
+  state.copyFields.forEach((layerId) => {
+    const value = (state.productTexts[targetKey] || {})[layerId];
+    if (value === undefined || !value.trim()) return;
+    const twin = twinLayerId(source, project, layerId);
+    if (twin) overrides.push({ layer_id: twin, content: value.trim() });
+  });
+  return overrides;
+}
+
 /* ---------------------------------------------------------------- paso 3
    Productos: qué se pone, si va individual o en combinación, y en qué posición.
    El paso 4 solo decide el cómo (modelo, contexto, formatos). */
 async function renderProducts(): Promise<void> {
+  const reference = copyReference();
+  if (reference) await loadTexts(reference.project_id);
   const missingTargets = state.campaign.filter((project) => !productTarget(project));
   const pendingReviews = state.campaign.filter((project) => !layersConfirmed(project));
   const productCards = state.products.map(productCard).join("");
@@ -1755,12 +2252,16 @@ async function renderProducts(): Promise<void> {
     groups ? '<div class="stack" style="margin-top:16px">' + groups + "</div>" : "",
     "</section>",
 
+    '<div class="spacer"></div>',
+    reference ? productCopyHtml(reference) : "",
+
     stepFooter("products", "Elegir modelo y generar"),
   ].join("");
 
   bindStepBar();
   bindStepFooter("products");
   bindProductStep();
+  bindProductCopy();
 }
 
 function bindProductStep(): void {
@@ -1795,6 +2296,13 @@ function bindProductStep(): void {
       members,
       arrangement: query<HTMLSelectElement>("#group-arrangement")!.value as ProductGroup["arrangement"],
     });
+    // Un combo es una única salida con todos sus miembros. Si el usuario también
+    // quiere piezas individuales puede volver a marcarlas explícitamente después.
+    members.forEach((key) => state.individualProducts.delete(key));
+    toast(
+      "Combinación creada. Sus productos saldrán juntos; se desmarcaron las salidas individuales.",
+      "success",
+    );
     await renderProducts();
   });
   queryAll<HTMLButtonElement>(".remove-group").forEach((button) => {
@@ -2089,6 +2597,7 @@ async function runCatalogGeneration(): Promise<void> {
           product_arrangement: "auto",
           template_mode: true,
           regenerate_background: settings.regenerate_background && firstBatch,
+          text_overrides: textOverrides(project, productKey(file)),
         });
         const result = await pollTask(project.project_id, task.task_id, (progress, detail) => {
           const batchProgress = (completed + progress / 100) / Math.max(1, total) * 100;
@@ -2120,6 +2629,7 @@ async function runCatalogGeneration(): Promise<void> {
           product_arrangement: group.arrangement,
           template_mode: true,
           regenerate_background: settings.regenerate_background && firstBatch,
+          text_overrides: textOverrides(project, COMBO_PREFIX + group.id),
         });
         const result = await pollTask(project.project_id, task.task_id, (progress, detail) => {
           const batchProgress = (completed + progress / 100) / Math.max(1, total) * 100;
@@ -2130,6 +2640,7 @@ async function runCatalogGeneration(): Promise<void> {
         completed += 1;
       }
       await refreshProject(project.project_id);
+      await loadTexts(project.project_id, true);
     }
     state.selectedVariants.clear();
     toast("Campaña generada correctamente.", "success");

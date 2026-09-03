@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import random
 from functools import lru_cache
+from pathlib import Path
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -28,6 +29,7 @@ from .imaging import (
     make_gradient,
     region_average_color,
     relative_luminance,
+    resize_contain_canvas,
     resize_cover,
     rounded_rect,
     style_palette,
@@ -42,6 +44,16 @@ FALLBACK_FONTS = (
     "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
     "/Library/Fonts/Arial.ttf",
     "/System/Library/Fonts/Supplemental/Arial.ttf",
+)
+
+#: La lista de respaldo tenía solo redondas, así que en un equipo sin DejaVu
+#: —cualquiera fuera del contenedor— una capa en negrita se pintaba redonda sin
+#: avisar. La negrita necesita su propia lista o no existe.
+FALLBACK_FONTS_BOLD = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/Library/Fonts/Arial Bold.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
 )
 
 
@@ -60,17 +72,52 @@ def _load_font(path: str | None, size: int):
     return ImageFont.load_default()
 
 
+def load_font(path: str | None, size: int):
+    """Tipografía cacheada. Pública para medir fuera del renderer."""
+    return _load_font(path, size)
+
+
+@lru_cache(maxsize=32)
+def font_family_name(path: str | None) -> str | None:
+    """Nombre de familia real del archivo, para declararlo en el SVG.
+
+    El SVG que se abre en Illustrator nombra la tipografía por familia. Sin
+    leerla del archivo se escribía siempre la del valor por defecto, así que un
+    arte pintado con la fuente de marca llegaba al diseñador pidiéndole DejaVu.
+    """
+    font = _load_font(path, 24)
+    try:
+        family, _ = font.getname()
+    except (AttributeError, OSError):
+        return None
+    return str(family) if family else None
+
+
 def resolve_font_path(project: Project, weight: str) -> str | None:
-    """Tipografía subida por el usuario > DejaVu (bold/regular) > default de PIL."""
-    ref_font = project.references.font
-    if ref_font:
+    """Tipografía de marca subida > DejaVu (bold/regular) > default de PIL."""
+    bold = weight == "bold"
+    # La cara pedida primero; si solo hay una subida, se usa para ambos pesos:
+    # la redonda de la marca se parece al arte más que una negrita ajena.
+    for ref_font in (
+        (project.references.font_bold, project.references.font)
+        if bold
+        else (project.references.font,)
+    ):
+        if not ref_font:
+            continue
         try:
             candidate = storage.abs_path(project.project_id, ref_font)
             if candidate.exists():
                 return str(candidate)
         except Exception:  # noqa: BLE001
-            pass
-    return settings.default_font_bold if weight == "bold" else settings.default_font
+            continue
+    configured = settings.default_font_bold if bold else settings.default_font
+    if configured and Path(configured).exists():
+        return configured
+    for fallback in FALLBACK_FONTS_BOLD if bold else FALLBACK_FONTS:
+        if Path(fallback).exists():
+            return fallback
+    return configured
 
 
 # ------------------------------------------------------------------- background
@@ -106,6 +153,12 @@ def build_background(project: Project, plan: VariantPlan) -> Image.Image:
     style = plan.background_style
     palette_image, palette_alpha = _palette_source(project) or (source, source_alpha)
     primary, secondary = style_palette(palette_image, alpha=palette_alpha)
+
+    # La reproducción fiel debe aplicar al fondo el mismo factor uniforme que a
+    # las capas. Antes ``cover`` ampliaba y recortaba el fondo mientras las capas
+    # usaban ``contain``, descuadrando el KV original.
+    if plan.layout == "faithful":
+        return resize_contain_canvas(source, width, height, hex_to_rgb(primary))
 
     if style == "solid":
         return Image.new("RGB", (width, height), hex_to_rgb(primary))
@@ -207,16 +260,25 @@ def draw_text_layer(
     draw = ImageDraw.Draw(canvas)
     font_path = resolve_font_path(project, layer.font_weight)
     start_size = placement.font_size or layer.font_size
-    font, lines, (block_w, block_h) = fit_text(
-        draw,
-        text,
-        font_path,
-        placement.width,
-        placement.height,
-        start_size,
-        layer.line_height,
-        max_lines=CATEGORY_MAX_LINES.get(layer.category, 3),
-    )
+    # Un copy reescrito del arte ya viene medido: su caja es exactamente el
+    # bloque que ocupa. Reajustarlo aquí lo encogería por un píxel de redondeo y
+    # lo partiría en dos líneas que el diseño no tenía.
+    art_text = bool(layer.meta.get("art_text"))
+    if art_text:
+        font = _load_font(font_path, start_size)
+        lines = text.split("\n")
+        block_w, block_h = _text_block_size(lines, font, draw, layer.line_height)
+    else:
+        font, lines, (block_w, block_h) = fit_text(
+            draw,
+            text,
+            font_path,
+            placement.width,
+            placement.height,
+            start_size,
+            layer.line_height,
+            max_lines=CATEGORY_MAX_LINES.get(layer.category, 3),
+        )
 
     # Posición vertical del bloque dentro de la caja asignada.
     if placement.valign == "top":
@@ -238,7 +300,7 @@ def draw_text_layer(
 
     pad = max(6, int(min(canvas.size) * 0.011))
     pill_drawn = False
-    if layer.category == LayerCategory.CTA and layer.meta.get("pill", True):
+    if not art_text and layer.category == LayerCategory.CTA and layer.meta.get("pill", True):
         # El CTA se dibuja como botón: es lo que se espera en un arte publicitario.
         fill_rgb = hex_to_rgb(layer.color)
         if relative_luminance(fill_rgb) > 0.5:  # color muy claro: no serviría de botón
@@ -255,7 +317,10 @@ def draw_text_layer(
 
     ratio = contrast_ratio(hex_to_rgb(color), bg_rgb)
     noisy = region_std(canvas, block_box) > 58
-    if not pill_drawn and (ratio < MIN_CONTRAST or noisy):
+    # El copy reescrito ocupa el sitio del original, sobre el mismo fondo y con
+    # el color que eligió el diseñador. Taparlo con un scrim sería añadir una
+    # caja gris sobre un precio que ya se leía perfectamente.
+    if not art_text and not pill_drawn and (ratio < MIN_CONTRAST or noisy):
         # Zona sin contraste suficiente: se añade un scrim translúcido legible.
         scrim_rgb = (18, 18, 18) if sum(hex_to_rgb(color)) > 384 else (245, 245, 245)
         scrim = rounded_rect(
@@ -464,6 +529,8 @@ def render_template_preview(project: Project) -> Image.Image:
             continue
         if not layer.visible or not layer.src:
             continue
+        if layer.type == LayerType.TEXT:
+            continue  # se escribe después, sobre el lienzo ya plano
         path = storage.abs_path(project.project_id, layer.src)
         if not path.exists():
             continue
@@ -479,7 +546,36 @@ def render_template_preview(project: Project) -> Image.Image:
     )
     if hueco is not None:
         _draw_product_slot(canvas, hueco)
-    return canvas.convert("RGB")
+
+    # El copy reescrito no tiene PNG que pegar: se dibuja como texto, igual que
+    # en la variante final. Sin esto la previsualización enseñaba el precio viejo.
+    flat = canvas.convert("RGB")
+    for layer in sorted(project.layers, key=lambda item: item.z_index):
+        if layer.type != LayerType.TEXT or not layer.visible:
+            continue
+        if layer.category in {LayerCategory.PRODUCT, LayerCategory.BACKGROUND}:
+            continue
+        if not (layer.content or "").strip():
+            continue
+        draw_text_layer(flat, _preview_placement(layer), project)
+    return flat
+
+
+def _preview_placement(layer) -> Placement:
+    """Coloca una capa de texto en su sitio del arte, sin recomponer nada."""
+    return Placement(
+        layer=layer,
+        x=layer.x,
+        y=layer.y,
+        width=max(1, layer.width),
+        height=max(1, layer.height),
+        z_index=layer.z_index,
+        align=layer.text_align,
+        valign="center",
+        pinned=True,
+        font_size=layer.font_size,
+        color=layer.color,
+    )
 
 
 def _draw_product_slot(canvas: Image.Image, layer) -> None:

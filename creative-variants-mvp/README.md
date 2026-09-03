@@ -110,7 +110,8 @@ Qué se obtiene y qué no:
   inteligente vectorial copia”), así que la categoría se deduce del nombre y, si no
   dice nada, de la geometría. **Revise las categorías en Ajustes finos → Revisar lo detectado.**
 - ⚠️ Solo las capas de tipo texto de Photoshop llegan como texto editable. Si el copy
-  está vectorizado o en un objeto inteligente, llega como imagen.
+  está vectorizado o en un objeto inteligente, llega como imagen —y entonces se
+  reescribe desde *Textos y logos del arte*, que lo mide y lo convierte en texto.
 - ⚠️ Las decoraciones importadas quedan **ancladas** a su posición relativa original:
   es lo que mantiene un CTA sobre su píldora. No participan en la reorganización.
 
@@ -174,6 +175,124 @@ POST /projects/{id}/layers/detect-product
 
 `force: true` repite el recorte en una pieza que ya lo tiene: retira la capa que
 puso el detector y arranca otra vez desde la foto guardada.
+
+### Cambiar el copy de la promoción y quitar elementos
+
+El copy de un KV llega como **píxeles**. El PSD trae el precio, el nombre del
+producto y el logo como objetos inteligentes, y el importador los conserva tal
+cual para no perder la tipografía de marca. Es lo correcto mientras el texto no
+cambie, y era justo lo que impedía producir la fila de artes de una promoción,
+donde cada producto lleva su nombre, su modelo y su precio.
+
+En **paso 2 → Textos y logos del arte** cada elemento se puede reescribir o
+retirar de la pieza:
+
+| Acción | Qué hace |
+| --- | --- |
+| Reescribir | La capa pasa a ser texto con el color, el peso, la interlínea y el sitio del original. Nada más se recoloca |
+| Quitar del arte | Lo oculta y, si sus píxeles venían aplanados en el fondo, **también los borra de la plancha**. Sin eso, ocultar un logo aplanado no quitaba nada |
+| Volver al original | Devuelve el PNG del arte importado. La plancha se rehace desde una copia anterior a cualquier edición, así que deshacer no deja restos |
+
+Qué se mide sobre los píxeles del original antes de escribir, y por qué:
+
+- **Color de la tinta**, por el cubo de color más repetido. La mediana por canal
+  inventa un color que no está en la imagen; cuantizar antes de contar agrupa el
+  antialias con el trazo al que pertenece.
+- **Alto de tinta**, para calcular el cuerpo. El texto nuevo se escribe al tamaño
+  que hace que su tinta mida lo mismo, así que un precio más largo no se ve más
+  pequeño.
+- **Alineación**, comparando los bordes de las líneas entre sí. Con una sola
+  línea no hay nada que comparar y se ancla hacia el lado del arte donde tiene
+  sitio para crecer.
+- **Grosor de trazo**, que decide redonda o negrita. Se escribe el texto **nuevo**
+  en cada cara disponible y se conserva la que da el mismo grosor. La densidad de
+  tinta no sirve: una línea de dígitos en negrita es menos densa que una de
+  mayúsculas en redonda, y las dos poblaciones se solapan.
+- **Cuántas líneas hay**, por los tramos horizontales con tinta. Solo se une al
+  tramo de al lado un **fragmento** —la tilde de una Á, el punto de una i—,
+  reconocido por ser mucho más bajo que una línea completa. Unir por cercanía
+  fue el primer intento y estaba mal: dos líneas de copy con la interlínea
+  normal de un KV están a menos de un tercio de su alto, así que se fusionaban
+  en una y el alto de tinta salía del doble. El texto nuevo se escribía
+  entonces a más del doble de cuerpo que el original.
+- **Paso entre líneas**, en píxeles, para reproducir la interlínea exacta.
+
+Dos garantías del render:
+
+- Un copy reescrito **no lleva scrim ni píldora**. El color es el que eligió el
+  diseñador sobre ese mismo fondo; taparlo con una caja gris sería estropear un
+  precio que ya se leía.
+- Crece **solo hacia donde su alineación se lo permite** y nunca dentro del
+  vecino. Si no cabe, se reduce el cuerpo y se avisa con cuánto.
+- **Quitar del arte le gana a reescribir**: escribir un texto para un elemento
+  retirado no lo devuelve a la pieza. Y si se mueve a mano en *Ajustes finos*,
+  la siguiente edición respeta el sitio nuevo en vez de devolverlo de un salto.
+
+En una campaña de varias piezas, cada fila lleva **«A los N KV»**: aplica el
+mismo cambio a la capa equivalente de las demás piezas del PSD. Reescribir el
+precio ocho veces a mano es justo el trabajo que esta aplicación quita.
+
+```bash
+GET  /projects/{id}/texts                      # qué dice cada elemento y si es editable
+POST /projects/{id}/layers/{layer_id}/text     # {"content": "$1.459,00"}
+POST /projects/{id}/layers/{layer_id}/text     # {"removed": true}  · quitar del arte
+POST /projects/{id}/layers/{layer_id}/text     # {"restore": true}  · volver al original
+```
+
+#### La tipografía es la mitad del resultado
+
+Color, cuerpo, peso, interlínea y posición salen del arte. **Las letras salen de
+la fuente que haya cargada**, así que sin la tipografía de marca un precio de la
+campaña se escribe con la del sistema: mide y pesa igual, pero no es la misma
+letra. Es lo único de esta función que no se puede deducir de los píxeles.
+
+Se sube desde **Textos y logos del arte**, con las dos caras, y se puede aplicar
+a los KV de la campaña de una vez:
+
+```bash
+POST /projects/{id}/references/font    # multipart: font=… font_bold=…
+```
+
+Tres detalles que importan:
+
+- Antes solo se podía subir **al crear el proyecto**, tres pasos antes de que
+  hiciera falta: cuando el usuario llegaba a reescribir el copy ya no había
+  dónde ponerla. Ahora se añade a un KV ya importado.
+- El copy **ya reescrito se recalcula** al subirla. El cuerpo y la caja de un
+  texto se midieron contra las métricas de la cara anterior, y esos números
+  dejan de valer; se rehacen desde el estilo del original, que es lo que se
+  guarda y no cambia.
+- Si solo se sube la redonda, se usa también para la negrita: la redonda de la
+  marca se parece al arte más que una negrita ajena. El archivo guardado lleva
+  la huella de su contenido en el nombre porque el renderer cachea la
+  tipografía por ruta, y reusar `font.ttf` devolvía la anterior.
+
+> El respaldo del sistema también tenía un fallo silencioso: la lista de
+> tipografías de reserva solo traía redondas, así que fuera del contenedor
+> —donde no hay DejaVu— una capa en negrita se pintaba redonda sin avisar.
+
+### Un texto distinto por producto
+
+Es el caso de la parrilla de una promoción: el mismo KV ocho veces, con otro
+producto y con otro precio. En **paso 3 → Textos por producto** se marca qué
+elementos cambian de una salida a otra y se escribe el valor de cada producto en
+una tabla. Cada tanda se genera con su propia fila.
+
+El juego de textos que viaja con la tanda es **completo, no un parche**: un
+elemento reescrito para el producto anterior y ausente en esta tanda vuelve a su
+texto original. Sin esa regla, el precio de la primera lavadora se quedaba
+pegado en los siete artes siguientes.
+
+```bash
+POST /projects/{id}/auto
+{"template_mode": true,
+ "text_overrides": [{"layer_id": "…", "content": "$539.00"}]}
+```
+
+Los KV de una campaña suelen ser piezas del mismo PSD —el cuadrado y el vertical
+del mismo aviso—, y sus capas no comparten identificador. La interfaz traduce
+cada texto a la capa equivalente de cada pieza por categoría y posición dentro de
+ella, que es lo que hace que una tabla sirva para toda la campaña.
 
 ## 2.c Tres reglas para obtener buenos resultados
 
@@ -239,7 +358,12 @@ La interfaz tiene **cuatro secciones**: *Campaña*, *Capas y KV*, *Generar* y
 2. **Revisa todas las capas.** El inventario recorre el árbol completo del PSD, incluidas
    rutas de grupo, capas ocultas, capas fuera de la pieza y capas que no se rasterizan por
    el límite de memoria. Las capas utilizables muestran miniatura y función editable.
-3. **Carga y organiza los productos.** Sube uno o varios PNG transparentes. El sistema retira
+   Debajo, **Textos y logos del arte** permite reescribir el copy —precio, nombre,
+   condiciones— o quitar un elemento de la pieza, borrándolo también del fondo cuando
+   venía aplanado.
+3. **Carga y organiza los productos.** Sube uno o varios PNG transparentes. En
+   **Textos por producto** se marca qué parte del copy cambia en cada arte y se escribe
+   el valor de cada producto. El sistema retira
    automáticamente todos los productos originales y usa el PSD como plantilla editable.
    Logo, copy, fondo y decoraciones se conservan, mientras cada producto nuevo participa
    en una recomposición completa del arte. Se pueden producir separados o juntos, con
@@ -390,7 +514,10 @@ Dos consecuencias más:
   sumar cuenta dos veces lo que se solapa (y en un KV importado casi todo se solapa), y
   la escenografía a sangre se excluye porque un fondo de color no es contenido.
 - Si el copy del PSD llegó **rasterizado** (lo habitual), no se penaliza la ausencia de
-  capas de texto: el texto está, como píxeles. Se avisa de que no se puede reescribir.
+  capas de texto: el texto está, como píxeles. Se avisa de que hay que reescribirlo
+  desde *Textos y logos del arte*.
+- Un elemento que el usuario **quitó a propósito** no cuenta como falta. Pedir de vuelta
+  el logo que se acaba de retirar sería discutirle la decisión.
 
 No hay modelo predictivo. La interfaz para conectar el **Predictor Creativo** está en
 `backend/app/services/predictor.py`:
@@ -693,9 +820,17 @@ del backend.
     (±18 %). Fuera de ahí, el motor reorganiza: no hay forma de "conservar" un banner
     1200×400 dentro de un 1080×1920.
 13. Illustrator se entrega como **SVG editable**, no como `.ai` nativo. Hay que abrir el
-    SVG en Illustrator, comprobar la tipografía y guardarlo como `.ai`. El legal solo se
-    convierte en texto visible cuando procede de una capa de texto real o el usuario lo
-    confirma; si no, permanece raster para evitar publicar un OCR contractual incorrecto.
+    SVG en Illustrator, comprobar la tipografía y guardarlo como `.ai`. Llegan como
+    texto real dos cosas y solo dos: el **legal** cuando procede de una capa de texto
+    o el usuario lo confirma, y el **copy reescrito** en *Textos y logos del arte*.
+    En los dos casos el contenido, la tipografía, el cuerpo, el color y el sitio los
+    conoce el sistema con exactitud. El resto del copy permanece raster a propósito:
+    de un objeto inteligente de Photoshop no se sabe con qué estaba escrito, y
+    convertirlo en texto sería publicar una imitación —o, en un legal, un OCR
+    contractual incorrecto—. El SVG declara la **familia real del archivo** con el
+    que se pintó; antes escribía siempre la del valor por defecto, así que un arte
+    hecho con la fuente de marca llegaba al diseñador pidiéndole DejaVu. El
+    manifiesto del ZIP lista lo editable en `editable_text_layers`.
 
 ## 13. Próximos pasos recomendados
 

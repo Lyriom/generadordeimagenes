@@ -1,6 +1,7 @@
 """Endpoints de proyectos: creación, análisis, capas, fondo, variantes y export."""
 from __future__ import annotations
 
+import hashlib
 import io
 import logging
 import mimetypes
@@ -26,6 +27,11 @@ from ..models import (
     AnalysisInfo,
     AnalyzeRequest,
     AnalyzeResponse,
+    ArtTextLayer,
+    ArtTextListResponse,
+    ArtTextRequest,
+    ArtTextResponse,
+    ArtTextStyle,
     AutoRequest,
     AutoResponse,
     Canvas,
@@ -34,6 +40,7 @@ from ..models import (
     DetectProductResponse,
     ExtractRequest,
     ExtractResponse,
+    FontReferenceResponse,
     GenerateRequest,
     GenerateResponse,
     Layer,
@@ -60,6 +67,7 @@ from ..models import (
 from ..models.project import CATEGORY_LABELS_ES
 from ..services import (
     analysis,
+    art_text,
     autopilot,
     psd_import,
     replacement,
@@ -821,6 +829,7 @@ def analyze(project_id: str, request: AnalyzeRequest | None = None) -> AnalyzeRe
 )
 def update_layers(project_id: str, request: LayersUpdateRequest) -> Project:
     project = load_project_or_404(project_id)
+    hidden_changed: list[Layer] = []
     try:
         for patch in request.updates:
             layer = project.layer_by_id(patch.id)
@@ -829,6 +838,9 @@ def update_layers(project_id: str, request: LayersUpdateRequest) -> Project:
             data = patch.model_dump(exclude_unset=True, exclude_none=True, exclude={"id"})
             geometry_changed = any(key in data for key in ("x", "y", "width", "height"))
             category_changed = "category" in data and data["category"] != layer.category
+            if "visible" in data and data["visible"] != layer.visible:
+                hidden_changed.append(layer)
+
 
             for field, value in data.items():
                 setattr(layer, field, value)
@@ -847,6 +859,22 @@ def update_layers(project_id: str, request: LayersUpdateRequest) -> Project:
                 layer.meta["role_confirmed"] = True
             if layer.type == LayerType.TEXT and not (layer.content or "").strip():
                 layer.content = layer.name
+            if geometry_changed and layer.meta.get("art_text"):
+                # El ancla de un copy reescrito es la caja de su TINTA, y la
+                # geometría de la capa es la del bloque, que empieza más arriba.
+                # Guardar una por la otra subía el texto un poco en cada
+                # edición posterior.
+                art = layer.meta["art_text"]
+                layer.meta["art_text"] = {
+                    **art,
+                    "box": [
+                        layer.x,
+                        layer.y + int(art.get("ink_top", 0)),
+                        layer.width,
+                        layer.height,
+                    ],
+                }
+
             if geometry_changed and not layer.meta.get("mask_edited"):
                 # La máscara sigue al rectángulo salvo que el usuario la haya pintado.
                 mask = box_mask(
@@ -855,6 +883,23 @@ def update_layers(project_id: str, request: LayersUpdateRequest) -> Project:
                 )
                 layer_extraction.write_mask(project, layer, mask)
                 layer.extracted = False
+
+        # "No usar" tiene que quitar el elemento de verdad. En un arte aplanado sus
+        # píxeles siguen dentro de la plancha, así que ocultar la capa no quitaba
+        # nada: el logo seguía saliendo en cada variante.
+        #
+        # "Parte del fondo" también oculta la capa, y ahí no hay que borrar nada:
+        # esos píxeles **son** el fondo. Vaciarlos dejaría un agujero.
+        removable = [
+            layer
+            for layer in hidden_changed
+            if layer.category != LayerCategory.BACKGROUND
+        ]
+        if removable:
+            for layer in removable:
+                art_text.set_removed(project, layer, not layer.visible, rebuild=False)
+            for warning in art_text.rebuild_plate(project):
+                logger.info("capas ocultas en %s: %s", project.project_id, warning)
 
         if request.delete:
             remove = set(request.delete)
@@ -1099,6 +1144,161 @@ async def replace_product(
         temp_path.unlink(missing_ok=True)
     return ReplaceProductResponse(
         project_id=project.project_id, layer=layer, warnings=warnings
+    )
+
+
+@router.post(
+    "/{project_id}/references/font",
+    response_model=FontReferenceResponse,
+    summary="Subir la tipografía de marca a un proyecto ya importado",
+)
+async def upload_brand_font(
+    project_id: str,
+    font: UploadFile | None = File(None, description="Cara redonda .ttf/.otf"),
+    font_bold: UploadFile | None = File(None, description="Cara negrita .ttf/.otf"),
+) -> FontReferenceResponse:
+    """Añade la tipografía de marca después de importar el KV.
+
+    Antes solo se podía subir al crear el proyecto, y el copy se reescribe tres
+    pasos después: cuando hacía falta la fuente ya no había dónde ponerla y el
+    precio salía en DejaVu.
+    """
+    project = load_project_or_404(project_id)
+    uploads = [("font", font), ("font_bold", font_bold)]
+    if not any(item is not None and item.filename for _, item in uploads):
+        raise bad_request("Suba al menos una de las dos caras (redonda o negrita).")
+
+    warnings: list[str] = []
+    try:
+        for field, upload in uploads:
+            if upload is None or not upload.filename:
+                continue
+            payload = await _read_upload(upload, 10 * 1024 * 1024)
+            suffix = validate_font_bytes(payload, upload.filename)
+            # El nombre lleva la huella del archivo: el renderer cachea la
+            # tipografía por ruta, así que reusar "font.ttf" devolvía la anterior.
+            digest = hashlib.sha256(payload).hexdigest()[:12]
+            rel = f"references/{field}_{digest}{suffix}"
+            storage.write_bytes(project.project_id, rel, payload)
+            setattr(project.references, field, rel)
+
+        # Lo ya reescrito se recalcula: su cuerpo y su caja venían medidos
+        # contra la cara anterior.
+        rewritten = sum(
+            1
+            for layer in project.layers
+            if (layer.meta.get("art_text") or {}).get("applied")
+        )
+        if rewritten:
+            warnings.extend(art_text.remeasure_all(project))
+            warnings.extend(art_text.rebuild_plate(project))
+        storage.save_project(project)
+    except Exception as exc:  # noqa: BLE001
+        raise as_http_error(exc) from exc
+
+    return FontReferenceResponse(
+        project_id=project.project_id,
+        font=project.references.font,
+        font_bold=project.references.font_bold,
+        rewritten=rewritten,
+        warnings=list(dict.fromkeys(warnings)),
+    )
+
+
+@router.get(
+    "/{project_id}/texts",
+    response_model=ArtTextListResponse,
+    summary="Copy y logos del arte: qué dice cada uno y si se puede reescribir",
+)
+def art_texts(project_id: str) -> ArtTextListResponse:
+    project = load_project_or_404(project_id)
+    items: list[ArtTextLayer] = []
+    # Una sola lectura del arte y de la plancha para todo el inventario.
+    in_plate = art_text.plate_map(project)
+    for layer in art_text.editable_layers(project):
+        origin = layer.meta.get("art_text") or {}
+        stored = origin.get("style")
+        style = art_text.TextStyle(**stored) if stored else art_text.measure(project, layer)
+        items.append(
+            ArtTextLayer(
+                id=layer.id,
+                name=layer.name,
+                category=layer.category,
+                z_index=layer.z_index,
+                text=art_text.current_text(layer),
+                # De un copy rasterizado no se conoce el texto original: el PSD
+                # solo lo trae cuando la capa era de tipo texto.
+                original_text=(
+                    str(origin.get("content") or "")
+                    if origin
+                    else art_text.current_text(layer)
+                ),
+                editable=style is not None,
+                rewritten=bool(origin),
+                removed=bool(layer.meta.get("removed_from_art")) or not layer.visible,
+                in_plate=in_plate.get(layer.id, False),
+                src=origin.get("src") or layer.src,
+                style=ArtTextStyle(**style.as_dict()) if style else None,
+            )
+        )
+    return ArtTextListResponse(
+        project_id=project.project_id,
+        layers=items,
+        brand_font=bool(project.references.font),
+        brand_font_bold=bool(project.references.font_bold),
+    )
+
+
+@router.post(
+    "/{project_id}/layers/{layer_id}/text",
+    response_model=ArtTextResponse,
+    summary="Reescribir el copy de un elemento, quitarlo del arte o devolverlo",
+)
+def edit_art_text(
+    project_id: str, layer_id: str, request: ArtTextRequest | None = None
+) -> ArtTextResponse:
+    project = load_project_or_404(project_id)
+    request = request or ArtTextRequest()
+    layer = project.layer_by_id(layer_id)
+    if layer is None:
+        raise bad_request(f"Capa inexistente: {layer_id}")
+    if layer.category in art_text.EXCLUDED_CATEGORIES:
+        raise bad_request(
+            "Producto, persona y fondo tienen su propio flujo: use reemplazar producto "
+            "o la corrección de recorte."
+        )
+
+    warnings: list[str] = []
+    try:
+        if request.restore:
+            warnings.extend(art_text.restore(project, layer))
+        elif request.content is not None:
+            warnings.extend(
+                art_text.apply(
+                    project,
+                    layer,
+                    request.content,
+                    color=request.color,
+                    align=request.align,
+                    weight=request.weight,
+                    font_size=request.font_size,
+                    erase=request.erase_background,
+                )
+            )
+        if request.removed is not None:
+            warnings.extend(
+                art_text.set_removed(
+                    project,
+                    layer,
+                    request.removed,
+                    erase=request.erase_background,
+                )
+            )
+        storage.save_project(project)
+    except Exception as exc:  # noqa: BLE001
+        raise as_http_error(exc) from exc
+    return ArtTextResponse(
+        project_id=project.project_id, layer=layer, warnings=list(dict.fromkeys(warnings))
     )
 
 

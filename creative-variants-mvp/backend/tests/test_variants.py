@@ -200,6 +200,12 @@ def test_batch_generation_appends_and_labels_each_product(client: TestClient, pr
         "Zapato azul",
         "Zapato rojo",
     }
+    assert all(item["meta"]["product_assets"] for item in stored)
+    assert all(
+        asset["layer_id"] and asset["src"]
+        for item in stored
+        for asset in item["meta"]["product_assets"]
+    )
 
 
 def test_export_zip_contains_selected_variants(client: TestClient, project: dict):

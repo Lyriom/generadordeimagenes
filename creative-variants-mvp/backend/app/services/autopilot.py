@@ -16,7 +16,14 @@ from ..models import (
     Project,
     Variant,
 )
-from . import analysis, inpainting, layer_extraction, storage, variants as variants_service
+from . import (
+    analysis,
+    art_text,
+    inpainting,
+    layer_extraction,
+    storage,
+    variants as variants_service,
+)
 from .layout_engine import FAITHFUL_LAYOUT
 
 logger = logging.getLogger(__name__)
@@ -148,6 +155,23 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
                 "No se pudo reconstruir el fondo; las variantes usan el arte original y "
                 "pueden mostrar restos de los elementos movidos."
             )
+
+    # 3.b · Copy de esta tanda. Cada producto de un catálogo lleva su nombre y su
+    # precio: sin esto la fila entera salía con el copy del primero.
+    overrides = getattr(request, "text_overrides", None)
+    if overrides is not None:
+        text_warnings = art_text.apply_batch(
+            project, {item.layer_id: item.content for item in overrides}
+        )
+        warnings.extend(text_warnings)
+        escritos = sum(1 for item in overrides if item.content.strip())
+        steps.append(
+            _step(
+                "Escribir el copy",
+                f"{escritos} texto(s) del arte reescritos para esta tanda",
+                ok=True,
+            )
+        )
 
     # 4 · Componer.
     formats = (

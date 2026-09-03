@@ -45,11 +45,11 @@ def _empty_room() -> bytes:
     return buffer.getvalue()
 
 
-def _subject_on_white() -> bytes:
+def _subject_on_white(color=(90, 60, 40)) -> bytes:
     """El mueble sobre fondo plano: lo que devuelve la edición que aísla."""
     image = Image.new("RGB", CANVAS, (255, 255, 255))
     x0, y0, x1, y1 = SUBJECT_BOX
-    image.paste(Image.new("RGB", (x1 - x0, y1 - y0), (90, 60, 40)), (x0, y0))
+    image.paste(Image.new("RGB", (x1 - x0, y1 - y0), color), (x0, y0))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     return buffer.getvalue()
@@ -65,7 +65,13 @@ def _cutout_png(box=SUBJECT_BOX, size=CANVAS) -> bytes:
     return buffer.getvalue()
 
 
-def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None, vacio: bytes | None = None):
+def _mock_magnific(
+    monkeypatch,
+    cutout_bytes,
+    calls: list | None = None,
+    vacio: bytes | None = None,
+    aislado: bytes | None = None,
+):
     """Simula subida → remove-background → descarga, y las ediciones de escena.
 
     `cutout_bytes` puede ser una lista: cada llamada a remove-background consume
@@ -75,6 +81,7 @@ def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None, vacio: 
     real_client = httpx.Client
     recortes = list(cutout_bytes) if isinstance(cutout_bytes, list) else [cutout_bytes]
     escena_vacia = _empty_room() if vacio is None else vacio
+    producto_aislado = _subject_on_white() if aislado is None else aislado
     pedidos = {"cut": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -115,7 +122,7 @@ def _mock_magnific(monkeypatch, cutout_bytes, calls: list | None = None, vacio: 
         if str(request.url) == "https://cdn.test/vacio.png":
             return httpx.Response(200, content=escena_vacia)
         if str(request.url) == "https://cdn.test/aislado.png":
-            return httpx.Response(200, content=_subject_on_white())
+            return httpx.Response(200, content=producto_aislado)
         return httpx.Response(404, json={"message": f"sin ruta {request.url}"})
 
     def factory(*args, **kwargs):
@@ -407,6 +414,34 @@ def test_an_ambience_photo_is_separated_instead_of_rejected(
     assert abs(layer["x"] - x0) <= 30 and abs(layer["y"] - y0) <= 30
     assert abs(layer["width"] - (x1 - x0)) <= 60
     assert abs(layer["height"] - (y1 - y0)) <= 60
+
+
+def test_scene_cutout_uses_original_product_pixels_not_generated_ones(
+    client: TestClient, flat_project: dict, monkeypatch
+):
+    """Magnific define la silueta, pero no puede redibujar el producto final."""
+    project_id = flat_project["project_id"]
+    # El modelo cambia el mueble marrón a azul deliberadamente. El PNG final
+    # tiene que conservar el marrón (90, 60, 40) de la foto original.
+    _mock_magnific(
+        monkeypatch,
+        [_cutout_png(box=(0, 100, 400, 400)), _cutout_png()],
+        aislado=_subject_on_white(color=(20, 80, 230)),
+    )
+
+    payload = client.post(
+        f"/projects/{project_id}/layers/detect-product", json={}
+    ).json()
+
+    assert payload["detected"] is True, payload["warnings"]
+    path = storage.abs_path(project_id, payload["layer"]["src"])
+    with Image.open(path) as product:
+        centre = product.convert("RGBA").getpixel(
+            (product.width // 2, product.height // 2)
+        )
+    assert centre[:3] == (90, 60, 40)
+    assert centre[3] > 240
+    assert any("píxeles, colores y detalles" in item for item in payload["warnings"])
 
 
 def test_an_ambience_product_is_pinned_so_it_keeps_touching_the_floor(

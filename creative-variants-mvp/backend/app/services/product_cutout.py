@@ -174,6 +174,12 @@ def detect_product(
         )
         warnings.extend(avisos)
         coverage = float((alpha > 24).mean())
+    else:
+        # Magnific decide la transparencia, pero los colores y el detalle se
+        # toman del KV. Así el servicio de recorte nunca puede alterar textura,
+        # tono, etiquetas o geometría visible del producto original.
+        rgba.close()
+        rgba = _pixels_from_original(plate, alpha, size)
 
     if coverage < MIN_AREA_RATIO:
         rgba.close()
@@ -273,6 +279,30 @@ def _cut(
         raw.unlink(missing_ok=True)
 
 
+def _pixels_from_original(
+    source: Path, alpha: np.ndarray, size: tuple[int, int]
+) -> Image.Image:
+    """Aplica una silueta al RGB original, sin conservar píxeles generados.
+
+    Magnific aporta únicamente la máscara. Esto elimina el defecto más grave del
+    camino de escenas: el producto aislado podía venir redibujado y cambiar de
+    color, material o forma aunque visualmente pareciera un buen recorte.
+    """
+    width, height = size
+    with Image.open(source) as opened:
+        original = opened.convert("RGB")
+        if original.size != size:
+            original = original.resize(size, Image.Resampling.LANCZOS)
+        rgba = original.convert("RGBA")
+    if alpha.shape != (height, width):
+        alpha = np.asarray(
+            Image.fromarray(alpha, mode="L").resize(size, Image.Resampling.LANCZOS),
+            dtype=np.uint8,
+        )
+    rgba.putalpha(Image.fromarray(alpha.astype(np.uint8), mode="L"))
+    return rgba
+
+
 def _scene_pass(
     cutter: MagnificCutoutProvider,
     plate: Path,
@@ -289,9 +319,8 @@ def _scene_pass(
 
     Se le piden dos ediciones —el cuarto sin muebles y los muebles sin cuarto— y
     con ellas se arma la máscara de lo que hay que borrar: la unión de lo que
-    cambió al vaciar y de la silueta del producto aislado. Se pega el vaciado
-    dentro de esa máscara y **se verifica** que ahí ya no quede nada del original.
-    Si queda, el vaciado no sirvió y se rellena con OpenCV, que no inventa nada.
+    cambió al vaciar y de la silueta del producto aislado. El producto generado
+    no se usa como arte: esa máscara se aplica a los píxeles originales del KV.
 
     Fuera de la máscara no se toca un píxel: perspectiva, línea del piso y
     gráficos del KV quedan como estaban.
@@ -309,14 +338,14 @@ def _scene_pass(
     emptied = Path(scene.empty(str(plate), output_path=str(workdir / "vacio.png")))
     isolated = Path(scene.isolate(str(plate), output_path=str(workdir / "aislado.png")))
     try:
-        alpha, rgba = _cut(cutter, isolated, size, workdir)
+        alpha, generated = _cut(cutter, isolated, size, workdir)
     finally:
         isolated.unlink(missing_ok=True)
 
     hueco = _subject_mask(plate, emptied, photo_alpha, alpha)
     if hueco is None:
         emptied.unlink(missing_ok=True)
-        rgba.close()
+        generated.close()
         raise NoProductFoundError(
             "No se pudo aislar un producto de la fotografía: ni al vaciarla cambió "
             "nada reconocible ni el recorte encontró un sujeto. Márquelo a mano en "
@@ -325,8 +354,8 @@ def _scene_pass(
 
     avisos = [
         "La foto era de ambiente: el producto se separó del decorado con "
-        f"{scene.model_id}. El producto se regenera, así que es fiel al original en "
-        "estilo y color, pero no idéntico píxel a píxel."
+        f"{scene.model_id}. Magnific aporta la silueta, pero el recorte conserva "
+        "los píxeles, colores y detalles del KV original."
     ]
     limpia = _clear_hole(plate, emptied, hueco, workdir)
     emptied.unlink(missing_ok=True)
@@ -336,7 +365,9 @@ def _scene_pass(
         "algo, «Rehacer este recorte» parte otra vez de la foto intacta."
     )
 
-    alpha, rgba = _place_product(rgba, alpha, hueco, size)
+    alpha = _align_subject_alpha(alpha, hueco, size)
+    generated.close()
+    rgba = _pixels_from_original(plate, alpha, size)
     return alpha, rgba, limpia, avisos
 
 
@@ -428,37 +459,40 @@ def _clear_hole(plate: Path, emptied: Path, hole: np.ndarray, workdir: Path) -> 
     return target
 
 
-def _place_product(
-    cut: Image.Image, alpha: np.ndarray, hole: np.ndarray, size: tuple[int, int]
-) -> tuple[np.ndarray, Image.Image]:
-    """Deja el recorte donde estaba el producto.
+def _align_subject_alpha(
+    alpha: np.ndarray, hole: np.ndarray, size: tuple[int, int]
+) -> np.ndarray:
+    """Deja la silueta en el lugar original del producto.
 
     Si el modelo lo redibujó en su sitio —se comprueba contra el hueco— se respeta
     tal cual. Si lo movió, se encaja en el hueco apoyado abajo: un mueble tiene que
-    pisar el suelo, y centrarlo verticalmente lo dejaría flotando.
+    pisar el suelo. Solo se mueve la máscara; el RGB siempre viene del KV original.
     """
     dentro = (alpha > 24) & (hole > 24)
     total = max(int((alpha > 24).sum()), 1)
     if dentro.sum() / total >= SCENE_ALIGNED_MIN:
-        return alpha, cut
+        return alpha
 
     ys, xs = np.nonzero(hole > 24)
     hx0, hx1 = int(xs.min()), int(xs.max())
     hy0, hy1 = int(ys.min()), int(ys.max())
     box_w, box_h = hx1 - hx0 + 1, hy1 - hy0 + 1
 
-    recorte = cut.crop(cut.getchannel("A").getbbox() or (0, 0, *cut.size))
+    source_box = mask_bbox(alpha, threshold=24)
+    if source_box is None:
+        return alpha
+    sx, sy, sw, sh = source_box
+    recorte = Image.fromarray(alpha[sy : sy + sh, sx : sx + sw], mode="L")
     escala = min(box_w / recorte.width, box_h / recorte.height)
     nuevo = recorte.resize(
         (max(1, round(recorte.width * escala)), max(1, round(recorte.height * escala))),
         Image.Resampling.LANCZOS,
     )
-    lienzo = Image.new("RGBA", size, (0, 0, 0, 0))
+    lienzo = Image.new("L", size, 0)
     lienzo.paste(nuevo, (hx0 + (box_w - nuevo.width) // 2, hy1 - nuevo.height + 1))
     recorte.close()
     nuevo.close()
-    cut.close()
-    return np.asarray(lienzo.getchannel("A"), dtype=np.uint8), lienzo
+    return np.asarray(lienzo, dtype=np.uint8)
 
 
 def _adopt_plate(project: Project, generated: Path, used: str) -> list[str]:

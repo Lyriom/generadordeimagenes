@@ -338,6 +338,107 @@ class DetectProductResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ArtTextStyle(BaseModel):
+    """Cómo estaba escrito el original, medido sobre sus propios píxeles."""
+
+    color: str
+    align: Literal["left", "center", "right"]
+    lines: int
+    ink_height: int
+    line_height: float
+    stroke: float = Field(
+        default=0.0,
+        description="Grosor de trazo relativo al alto de tinta: decide redonda o negrita.",
+    )
+    line_pitch: int = Field(
+        default=0, description="Distancia entre líneas en píxeles del arte original."
+    )
+
+
+class ArtTextLayer(BaseModel):
+    """Un elemento del arte que se puede reescribir o quitar."""
+
+    id: str
+    name: str
+    category: LayerCategory
+    z_index: int
+    text: str = Field(description="Lo que dice hoy el elemento.")
+    original_text: str = Field(default="", description="Lo que decía el arte importado.")
+    editable: bool = Field(description="Sus píxeles tienen texto que se puede medir.")
+    rewritten: bool = False
+    removed: bool = False
+    in_plate: bool = Field(
+        default=False,
+        description="Sus píxeles siguen aplanados en el fondo: quitarlo exige borrarlo de ahí.",
+    )
+    src: str | None = None
+    style: ArtTextStyle | None = None
+
+
+class ArtTextListResponse(BaseModel):
+    project_id: str
+    layers: list[ArtTextLayer] = Field(default_factory=list)
+    brand_font: bool = Field(
+        default=False,
+        description=(
+            "Hay tipografía de marca subida. Sin ella el copy reescrito sale con "
+            "la del sistema: el color y el cuerpo son los del arte, las letras no."
+        ),
+    )
+    brand_font_bold: bool = Field(
+        default=False, description="Además hay una cara negrita de marca."
+    )
+
+
+class ArtTextRequest(BaseModel):
+    """Reescribir el copy de un elemento, quitarlo del arte o devolverlo."""
+
+    content: str | None = Field(default=None, max_length=400)
+    color: str | None = None
+    align: Literal["left", "center", "right"] | None = None
+    weight: Literal["normal", "bold"] | None = None
+    font_size: int | None = Field(default=None, gt=0, le=600)
+    removed: bool | None = Field(
+        default=None, description="True lo quita del arte; False lo devuelve."
+    )
+    restore: bool = Field(
+        default=False, description="Vuelve a los píxeles originales del elemento."
+    )
+    erase_background: bool | None = Field(
+        default=None,
+        description=(
+            "Borrar sus píxeles de la plancha. Por defecto se decide solo: solo "
+            "hace falta cuando el elemento venía aplanado en el fondo."
+        ),
+    )
+
+
+class ArtTextResponse(BaseModel):
+    project_id: str
+    layer: Layer
+    warnings: list[str] = Field(default_factory=list)
+
+
+class FontReferenceResponse(BaseModel):
+    """Tipografía de marca del proyecto después de subirla."""
+
+    project_id: str
+    font: str | None = None
+    font_bold: str | None = None
+    rewritten: int = Field(
+        default=0,
+        description="Textos ya reescritos que se recalcularon con la cara nueva.",
+    )
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TextOverride(BaseModel):
+    """Texto que una tanda concreta debe escribir en un elemento del arte."""
+
+    layer_id: str
+    content: str = Field(max_length=400)
+
+
 class ReplaceProductResponse(BaseModel):
     project_id: str
     layer: Layer
@@ -376,6 +477,14 @@ class AutoRequest(BaseModel):
     )
     background_prompt: str | None = Field(default=None, max_length=800)
     regenerate_background: bool = False
+    text_overrides: list[TextOverride] | None = Field(
+        default=None,
+        description=(
+            "Copy de esta tanda. Es el juego completo: un elemento reescrito antes "
+            "y ausente aquí vuelve a su texto original, así que el precio de un "
+            "producto no se queda pegado en el arte del siguiente."
+        ),
+    )
 
     @field_validator("formats")
     @classmethod

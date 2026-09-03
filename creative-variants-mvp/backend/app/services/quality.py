@@ -243,7 +243,13 @@ def evaluate_variant(
 
     # 8. Elementos obligatorios ------------------------------------------
     present = {p.layer.category for p in placements}
-    project_categories = {layer.category for layer in project.layers}
+    # Lo que el usuario quitó del arte a propósito no es una falta: pedir el
+    # logo de vuelta después de haberlo retirado sería discutirle la decisión.
+    project_categories = {
+        layer.category
+        for layer in project.layers
+        if not layer.meta.get("removed_from_art")
+    }
 
     # Una pieza publicitaria necesita varias piezas: sin esto una composición casi
     # vacía obtenía 100/100 y ocultaba el problema real.
@@ -261,8 +267,8 @@ def evaluate_variant(
         if project.analysis.segmentation_provider == "psd":
             # El copy del PSD llegó rasterizado: el texto está, pero como imagen.
             warnings.append(
-                "El copy viene del PSD como imagen, no como texto editable: se conserva "
-                "tal cual, pero no se puede reescribir."
+                "El copy viene del PSD como imagen, no como texto: se conserva tal cual. "
+                "Para cambiarlo, reescríbalo en «Textos y logos del arte»."
             )
         else:
             penalties += 12

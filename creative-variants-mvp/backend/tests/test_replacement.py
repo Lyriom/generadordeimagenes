@@ -89,6 +89,8 @@ def test_repeated_replacements_keep_the_original_kv_slot(client: TestClient, pro
         data={"layer_id": original["id"]},
         files={"image": ("vertical.png", cutout(100, 800), "image/png")},
     ).json()["layer"]
+    first_asset = storage.abs_path(project["project_id"], first["src"])
+    first_bytes = first_asset.read_bytes()
     second = client.post(
         endpoint,
         data={"layer_id": original["id"]},
@@ -99,6 +101,8 @@ def test_repeated_replacements_keep_the_original_kv_slot(client: TestClient, pro
         original["x"], original["y"], original["width"], original["height"]
     ]
     assert second["width"] == original["width"]
+    assert first["src"] != second["src"]
+    assert first_asset.read_bytes() == first_bytes
 
 
 def test_replace_without_layer_id_uses_largest_product(client: TestClient, project: dict):

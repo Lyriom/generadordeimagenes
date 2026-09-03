@@ -906,6 +906,11 @@ def build_placements(
                 x, y, width, height, stretch = _pinned_box(
                     layer, source_canvas, canvas_w, canvas_h
                 )
+                # Un copy reescrito del arte trae su cuerpo ya medido contra la
+                # tinta original: recalcularlo por la altura de la caja lo dejaría
+                # a otro tamaño que el resto del diseño. Solo se escala.
+                art_text = layer.is_text and bool(layer.meta.get("art_text"))
+                scale = _uniform_scale(source_canvas, canvas_w, canvas_h)
                 placements.append(
                     Placement(
                         layer=layer,
@@ -914,14 +919,18 @@ def build_placements(
                         width=width,
                         height=height,
                         z_index=layer.z_index,
-                        align=base_align,
+                        align=layer.text_align if art_text else base_align,
                         valign="center",
                         pinned=True,
                         stretch=stretch,
                         font_size=(
-                            _fit_font_size(layer, width, height, canvas_h)
-                            if layer.is_text
-                            else None
+                            max(6, int(round(layer.font_size * scale)))
+                            if art_text
+                            else (
+                                _fit_font_size(layer, width, height, canvas_h)
+                                if layer.is_text
+                                else None
+                            )
                         ),
                         color=layer.color,
                     )
@@ -1057,9 +1066,12 @@ def build_placements(
     return placements, notes
 
 
-#: Un elemento que cubre casi todo el arte original va a sangre: al cambiar de
-#: formato debe seguir cubriendo (escala "cover"), no encogerse con el grupo.
-FULL_BLEED_RATIO = 0.92
+def _uniform_scale(
+    source_canvas: tuple[int, int], canvas_w: int, canvas_h: int
+) -> float:
+    """El único factor con el que viaja todo el diseño anclado."""
+    source_w, source_h = source_canvas
+    return min(canvas_w / max(1, source_w), canvas_h / max(1, source_h))
 
 
 def _pinned_box(
@@ -1072,30 +1084,19 @@ def _pinned_box(
     dentro de su píldora y una franja no tapa el logo que tenía debajo. Mezclar
     factores —posición con uno y tamaño con otro— es lo que descuadraba las piezas.
 
-    Excepción: lo que abarcaba un eje entero (un fondo, una franja de lado a lado) se
-    estira en ese eje hasta el borde. Es escenografía: un degradado o un listón
-    repetido no acusan el estirado, y en cambio un hueco blanco a los lados se ve
-    como un error.
+    No hay excepciones por categoría: incluso una franja o decoración a sangre usa
+    el mismo factor uniforme. Estirar una sola capa altera el KV aprobado.
     """
     source_w, source_h = source_canvas
-    scale = min(canvas_w / max(1, source_w), canvas_h / max(1, source_h))
+    scale = _uniform_scale(source_canvas, canvas_w, canvas_h)
     offset_x = (canvas_w - source_w * scale) / 2
     offset_y = (canvas_h - source_h * scale) / 2
 
-    stretch = False
-    if layer.width >= source_w * FULL_BLEED_RATIO and not layer.pixel_critical:
-        x, width, stretch = 0, canvas_w, True
-    else:
-        width = max(1, int(round(layer.width * scale)))
-        x = int(round(offset_x + layer.x * scale))
-
-    if layer.height >= source_h * FULL_BLEED_RATIO and not layer.pixel_critical:
-        y, height, stretch = 0, canvas_h, True
-    else:
-        height = max(1, int(round(layer.height * scale)))
-        y = int(round(offset_y + layer.y * scale))
-
-    return x, y, width, height, stretch
+    width = max(1, int(round(layer.width * scale)))
+    height = max(1, int(round(layer.height * scale)))
+    x = int(round(offset_x + layer.x * scale))
+    y = int(round(offset_y + layer.y * scale))
+    return x, y, width, height, False
 
 
 def _relative_zone(layer: Layer, source_canvas: tuple[int, int]) -> Zone:

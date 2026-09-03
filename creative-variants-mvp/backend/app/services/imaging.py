@@ -258,6 +258,36 @@ def resize_cover(image: Image.Image, width: int, height: int) -> Image.Image:
     return resized.crop((left, top, left + width, top + height))
 
 
+def resize_contain_canvas(
+    image: Image.Image,
+    width: int,
+    height: int,
+    background: tuple[int, int, int] | None = None,
+) -> Image.Image:
+    """Encaja el arte completo en el lienzo sin recortarlo ni deformarlo."""
+    source = image.convert("RGB")
+    scale = min(width / max(1, source.width), height / max(1, source.height))
+    new_w = max(1, int(round(source.width * scale)))
+    new_h = max(1, int(round(source.height * scale)))
+    resized = source.resize((new_w, new_h), Image.Resampling.LANCZOS)
+    if background is None:
+        # El color de las esquinas integra mejor el espacio sobrante que una
+        # franja blanca cuando la proporción de salida cambia ligeramente.
+        corners = np.asarray(
+            [
+                source.getpixel((0, 0)),
+                source.getpixel((source.width - 1, 0)),
+                source.getpixel((0, source.height - 1)),
+                source.getpixel((source.width - 1, source.height - 1)),
+            ],
+            dtype=np.uint8,
+        )
+        background = tuple(int(value) for value in np.median(corners, axis=0))
+    canvas = Image.new("RGB", (width, height), background)
+    canvas.paste(resized, ((width - new_w) // 2, (height - new_h) // 2))
+    return canvas
+
+
 def make_gradient(
     width: int, height: int, start: str, end: str, direction: str = "vertical"
 ) -> Image.Image:

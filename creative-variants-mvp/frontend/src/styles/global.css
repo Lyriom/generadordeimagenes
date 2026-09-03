@@ -676,7 +676,8 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   border-radius: var(--radius);
   background: var(--surface-2);
 }
-.role-thumb {
+.role-thumb,
+.copy-thumb {
   grid-area: thumb;
   align-self: center;
   width: 64px;
@@ -688,7 +689,8 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
     conic-gradient(var(--surface-3) 25%, var(--surface) 0 50%,
       var(--surface-3) 0 75%, var(--surface) 0) 0 0 / 12px 12px;
 }
-.role-thumb.is-text {
+.role-thumb.is-text,
+.copy-thumb.is-text {
   display: grid;
   place-items: center;
   padding: 4px;
@@ -701,15 +703,65 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   word-break: break-word;
 }
 .role-copy { grid-area: copy; min-width: 0; align-self: end; }
-.role-copy strong {
+.copy-meta { grid-area: meta; min-width: 0; }
+.role-copy strong,
+.copy-meta strong {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--fs-sm);
 }
-.role-copy small { color: var(--fg-muted); font-size: var(--fs-2xs); }
+.role-copy small,
+.copy-meta small { color: var(--fg-muted); font-size: var(--fs-2xs); }
 .role-row select { grid-area: select; align-self: start; min-height: 38px; }
+
+/* Copy del arte: miniatura, qué es, el texto y las acciones. Se edita mirando
+   el recorte real; sin la miniatura no se sabe cuál de tres precios es cuál. */
+.copy-list { display: grid; gap: 10px; }
+.copy-row {
+  display: grid;
+  /* Con áreas nombradas: las miniaturas y el rótulo se comparten con la
+     revisión de roles, que ya declara su `grid-area`. Sin nombrarlas aquí, el
+     navegador las colocaba en filas implícitas y la fila salía descuadrada. */
+  grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1.7fr) minmax(200px, auto);
+  grid-template-areas: "thumb meta edit actions";
+  gap: 6px 12px;
+  align-items: center;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.copy-row.is-removed { opacity: .55; }
+.copy-edit { grid-area: edit; min-width: 0; }
+.copy-edit textarea {
+  width: 100%;
+  min-height: 42px;
+  resize: vertical;
+  font-family: inherit;
+}
+.copy-locked { margin: 0; }
+.copy-actions {
+  grid-area: actions;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.button.small,
+.ghost-button.small {
+  padding: 7px 12px;
+  font-size: var(--fs-2xs);
+  min-height: 0;
+}
+
+@media (max-width: 980px) {
+  .copy-row {
+    grid-template-columns: 64px minmax(0, 1fr);
+    grid-template-areas: "thumb meta" "edit edit" "actions actions";
+  }
+}
 
 @media (max-width: 820px) {
   .role-list { grid-template-columns: 1fr; }

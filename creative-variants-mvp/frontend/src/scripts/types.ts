@@ -83,6 +83,7 @@ export interface Project {
     kv?: { path: string } | null;
     logo?: { path: string } | null;
     font?: string | null;
+    font_bold?: string | null;
   };
   layers: Layer[];
   variants: Variant[];
@@ -117,6 +118,38 @@ export interface Capabilities {
   format_catalog: FormatPreset[];
   layouts: Array<{ key: string; label: string }>;
   intensities: string[];
+}
+
+/** Un elemento del arte que se puede reescribir o quitar de la pieza. */
+export interface ArtTextLayer {
+  id: string;
+  name: string;
+  category: string;
+  z_index: number;
+  text: string;
+  original_text: string;
+  editable: boolean;
+  rewritten: boolean;
+  removed: boolean;
+  /** Sus píxeles siguen aplanados en el fondo: quitarlo exige borrarlo de ahí. */
+  in_plate: boolean;
+  src?: string | null;
+  style?: {
+    color: string;
+    align: "left" | "center" | "right";
+    lines: number;
+    ink_height: number;
+    line_height: number;
+    stroke: number;
+    line_pitch: number;
+  } | null;
+}
+
+/** Copy del arte de un KV, con el estado de su tipografía de marca. */
+export interface ArtTexts {
+  layers: ArtTextLayer[];
+  brand_font: boolean;
+  brand_font_bold: boolean;
 }
 
 export interface ProductGroup {

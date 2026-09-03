@@ -82,6 +82,19 @@ def generate_variants(project: Project, request) -> tuple[list[Variant], list[st
                 meta={
                     "format": format_spec(plan.format),
                     "product_arrangement": getattr(request, "product_arrangement", "auto"),
+                    # Trazabilidad exacta del producto o combo usado en esta
+                    # salida. Los assets de reemplazo son inmutables, por lo que
+                    # esta lista también permite auditar que no hubo cruces.
+                    "product_assets": [
+                        {
+                            "layer_id": placement.layer.id,
+                            "src": placement.layer.src,
+                            "source_name": placement.layer.meta.get("replaced_from"),
+                            "group_id": placement.layer.meta.get("product_group_id"),
+                        }
+                        for placement in plan.placements
+                        if placement.layer.category.value == "product"
+                    ],
                     **(
                         {"product_label": request.product_label}
                         if getattr(request, "product_label", None)

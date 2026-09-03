@@ -207,16 +207,27 @@ def _append_editable_text(parent, project: Project, placement: Placement) -> Non
     layer = placement.layer
     dummy = Image.new("RGB", (max(1, placement.width), max(1, placement.height)), "white")
     draw = ImageDraw.Draw(dummy)
-    font, lines, (_block_w, block_h) = renderer.fit_text(
-        draw,
-        (layer.content or "").strip(),
-        renderer.resolve_font_path(project, layer.font_weight),
-        placement.width,
-        placement.height,
-        placement.font_size or layer.font_size,
-        layer.line_height,
-        max_lines=20,
-    )
+    contenido = (layer.content or "").strip()
+    font_path = renderer.resolve_font_path(project, layer.font_weight)
+    start_size = placement.font_size or layer.font_size
+    if layer.meta.get("art_text"):
+        # El copy del arte ya viene medido y su caja es el bloque exacto. Volver
+        # a ajustarlo aquí lo partiría en líneas que el PNG no tiene, y el SVG
+        # dejaría de coincidir con la imagen que acompaña.
+        font = renderer.load_font(font_path, start_size)
+        lines = contenido.split("\n")
+        _block_w, block_h = renderer._text_block_size(lines, font, draw, layer.line_height)
+    else:
+        font, lines, (_block_w, block_h) = renderer.fit_text(
+            draw,
+            contenido,
+            font_path,
+            placement.width,
+            placement.height,
+            start_size,
+            layer.line_height,
+            max_lines=20,
+        )
     font_size = int(getattr(font, "size", placement.font_size or layer.font_size))
     ascent, descent = font.getmetrics() if hasattr(font, "getmetrics") else (font_size, 0)
     line_px = int((ascent + descent) * layer.line_height)
@@ -264,13 +275,21 @@ def _append_svg_layer(
     canvas_size: tuple[int, int],
 ) -> None:
     layer = placement.layer
-    editable_legal = (
-        layer.category == LayerCategory.LEGAL
-        and bool((layer.content or "").strip())
+    # Un copy reescrito en «Textos y logos del arte» se conoce exacto: contenido,
+    # tipografía, cuerpo, color y sitio los puso el sistema. Eso es justo lo que
+    # el diseñador quiere retocar en Illustrator, así que sale como texto y no
+    # como píxeles. El resto del copy sigue rasterizado, porque de un objeto
+    # inteligente de Photoshop no se sabe con qué estaba escrito.
+    editable_text = (
+        bool((layer.content or "").strip())
         and layer.text_verified
         and (layer.type == LayerType.TEXT or layer.export_as_text)
+        and (
+            layer.category == LayerCategory.LEGAL
+            or bool(layer.meta.get("art_text"))
+        )
     )
-    if editable_legal:
+    if editable_text:
         # Referencia exacta oculta para poder comparar/recuperar el arte original.
         if layer.src:
             reference = placement.layer.model_copy(deep=True)
@@ -437,13 +456,18 @@ def build_zip(
             )
             svg_arcname = str(Path(arcname).with_suffix(".svg"))
             archive.write(svg_path, svg_arcname)
+            editable_texts = [
+                placement.name
+                for placement in variant.placements
+                if bool((placement.content or "").strip())
+                and placement.text_verified
+                and (placement.type == LayerType.TEXT or placement.export_as_text)
+            ]
             editable_legals = [
                 placement.name
                 for placement in variant.placements
                 if placement.category == LayerCategory.LEGAL
-                and bool((placement.content or "").strip())
-                and placement.text_verified
-                and (placement.type == LayerType.TEXT or placement.export_as_text)
+                and placement.name in set(editable_texts)
             ]
             manifest["variants"].append(
                 {
@@ -451,7 +475,9 @@ def build_zip(
                     "file": arcname,
                     "psd": psd_arcname,
                     "svg_illustrator": svg_arcname,
+                    # Se conserva la clave anterior: hay ZIP ya entregados que la leen.
                     "editable_legal_layers": editable_legals,
+                    "editable_text_layers": editable_texts,
                     "layout": variant.layout,
                     "layout_label": variant.layout_label,
                     "format": variant.format,
