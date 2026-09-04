@@ -17,7 +17,17 @@ from PIL import Image, UnidentifiedImageError
 
 from ..config import settings
 
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+#: Además de JPG y PNG, los tres que llegan de verdad hoy: WEBP es lo que
+#: descarga cualquiera de una ficha de producto, TIFF lo que manda una imprenta
+#: y AVIF lo que sirven ya los e-commerce. Los tres los descodifica Pillow con
+#: los códecs que trae la imagen (comprobado), y a partir de ahí el recorte y la
+#: separación por capas trabajan igual que con un PNG: todo el pipeline opera
+#: sobre píxeles, no sobre el archivo.
+#:
+#: GIF y BMP se quedan fuera a propósito: el primero es de paleta y puede traer
+#: animación, y decidir en silencio con qué fotograma se trabaja es peor que no
+#: admitirlo. SVG tampoco: es código, no una imagen.
+ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".avif"}
 #: El PSD solo se admite como arte/KV de origen (se aplana al importarlo).
 ALLOWED_PSD_EXTENSIONS = {".psd"}
 ALLOWED_FONT_EXTENSIONS = {".ttf", ".otf"}
@@ -26,7 +36,19 @@ _MAGIC_SIGNATURES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xd8\xff", "JPEG"),
     (b"\x89PNG\r\n\x1a\n", "PNG"),
     (b"8BPS", "PSD"),
+    (b"II*\x00", "TIFF"),
+    (b"MM\x00*", "TIFF"),
 )
+
+#: WEBP y AVIF no se reconocen por el principio del archivo sino por una marca
+#: unos bytes más adentro, así que van aparte de la tabla de prefijos.
+def _container_format(payload: bytes) -> str | None:
+    if payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return "WEBP"
+    # ISO-BMFF: "....ftypavif" (imagen suelta) o "ftypavis" (secuencia).
+    if payload[4:8] == b"ftyp" and payload[8:12] in (b"avif", b"avis"):
+        return "AVIF"
+    return None
 
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
@@ -52,7 +74,14 @@ def safe_stored_name(original_filename: str, image_format: str | None = None) ->
     suffix = Path(original_filename or "").suffix.lower()
     if image_format:
         fmt = image_format.upper()
-        suffix = {"JPEG": ".jpg", "JPG": ".jpg", "PSD": ".psd"}.get(fmt, ".png")
+        suffix = {
+            "JPEG": ".jpg",
+            "JPG": ".jpg",
+            "PSD": ".psd",
+            "WEBP": ".webp",
+            "TIFF": ".tif",
+            "AVIF": ".avif",
+        }.get(fmt, ".png")
     allowed = ALLOWED_IMAGE_EXTENSIONS | ALLOWED_PSD_EXTENSIONS | ALLOWED_FONT_EXTENSIONS
     if suffix not in allowed:
         suffix = ".bin"
@@ -63,11 +92,15 @@ def detect_image_format(payload: bytes) -> str:
     for signature, fmt in _MAGIC_SIGNATURES:
         if payload.startswith(signature):
             return fmt
+    contenedor = _container_format(payload)
+    if contenedor:
+        return contenedor
     head = payload[:1024].lstrip().lower()
     if head.startswith(b"<?xml") or b"<svg" in head:
         raise FileValidationError("SVG no está permitido en este MVP.")
     raise FileValidationError(
-        "Formato no soportado. Se aceptan JPG/JPEG, PNG y PSD (solo como arte de origen)."
+        "Formato no soportado. Se aceptan JPG/JPEG, PNG, WEBP, TIFF y AVIF, "
+        "y PSD como arte de origen."
     )
 
 
@@ -84,7 +117,7 @@ def _check_decoded(
     Vive aparte porque los dos validadores (en memoria y por ruta) hacían lo
     mismo copiado, y una copia se queda atrás en cuanto se toca la otra.
     """
-    accepted = {"JPEG", "PNG"} | ({"PSD"} if allow_psd else set())
+    accepted = {"JPEG", "PNG", "WEBP", "TIFF", "AVIF"} | ({"PSD"} if allow_psd else set())
     if real_format not in accepted:
         raise FileValidationError(f"Formato interno no soportado: {real_format}.")
     if real_format != magic_format:

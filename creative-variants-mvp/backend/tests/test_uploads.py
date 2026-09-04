@@ -229,3 +229,80 @@ def test_the_ingest_folder_ignores_the_upload_limit(client: TestClient, monkeypa
         assert accepted.json()["canvas"] == {"width": 900, "height": 400}
     finally:
         path.unlink(missing_ok=True)
+
+
+# ------------------------------------------------------------ otros formatos
+# El selector de productos ya ofrecía WEBP y el servidor lo rechazaba. Ahora
+# entra, junto con TIFF (lo que manda una imprenta) y AVIF (lo que sirven los
+# e-commerce). Todo el pipeline trabaja sobre píxeles, así que desde que Pillow
+# los descodifica el recorte y la separación funcionan igual que con un PNG.
+
+
+@pytest.mark.parametrize(
+    "fmt, filename, mime",
+    [
+        ("WEBP", "producto.webp", "image/webp"),
+        ("TIFF", "arte.tif", "image/tiff"),
+        ("AVIF", "ficha.avif", "image/avif"),
+    ],
+)
+def test_the_other_formats_are_accepted(client: TestClient, fmt, filename, mime):
+    payload = make_artwork(640, 480, fmt=fmt)
+    response = client.post(
+        "/projects",
+        data={"name": f"Desde {fmt}"},
+        files={"artwork": (filename, payload, mime)},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["canvas"] == {"width": 640, "height": 480}
+    assert body["source"]["format"] == fmt
+
+
+def test_a_webp_still_separates_into_layers(client: TestClient):
+    """Que entre no basta: tiene que poder separarse como cualquier otro arte."""
+    payload = make_artwork(900, 700, fmt="WEBP")
+    project = client.post(
+        "/projects",
+        data={"name": "WEBP con capas"},
+        files={"artwork": ("kv.webp", payload, "image/webp")},
+    ).json()
+    analysed = client.post(
+        f"/projects/{project['project_id']}/analyze", json={}
+    )
+    assert analysed.status_code == 200, analysed.text
+    assert analysed.json()["layers"], "no detectó ninguna capa en el WEBP"
+
+
+def test_the_name_never_decides_the_format(client: TestClient):
+    """Manda lo que hay dentro, no cómo se llama el archivo.
+
+    Un PNG llamado .webp entra —firma y contenido coinciden, solo miente el
+    nombre— pero se guarda como PNG. Lo que no entra es un archivo cuyo
+    contenido no sea una imagen de verdad, se llame como se llame.
+    """
+    response = client.post(
+        "/projects",
+        data={"name": "Nombre equivocado"},
+        files={"artwork": ("mentira.webp", make_artwork(400, 400, fmt="PNG"), "image/webp")},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["source"]["format"] == "PNG"
+    assert body["source"]["path"].endswith(".png")
+
+    basura = client.post(
+        "/projects",
+        data={"name": "Basura"},
+        files={"artwork": ("falso.webp", b"RIFF" + b"\x00" * 4 + b"WEBPnada", "image/webp")},
+    )
+    assert basura.status_code == 400
+
+
+def test_svg_is_still_refused(client: TestClient):
+    """Ampliar formatos no abre la puerta a lo que es código y no una imagen."""
+    svg = b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"></svg>'
+    response = client.post(
+        "/projects", data={"name": "SVG"}, files={"artwork": ("x.svg", svg, "image/svg+xml")}
+    )
+    assert response.status_code == 400

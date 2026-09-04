@@ -523,7 +523,7 @@ async function renderCampaign(): Promise<void> {
     pageHead(
       "Creative workspace",
       state.campaign.length ? "Tu campaña está lista" : "Empieza con tus key visuals",
-      "Carga uno o varios KV. El PSD conserva sus capas reales; PNG y JPG también funcionan con separación asistida.",
+      "Carga uno o varios KV. El PSD conserva sus capas reales; PNG, JPG, WEBP, TIFF y AVIF también funcionan con separación asistida.",
       state.campaign.length
         ? '<button class="ghost-button" id="clear-campaign">Cambiar campaña</button>'
         : "",
@@ -542,10 +542,10 @@ async function renderCampaign(): Promise<void> {
       : [
           '<div class="grid two">',
           '<section class="card elevated"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div><span class="badge">RECOMENDADO</span></div>',
-          '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg">',
-          '<span class="drop-icon">⇧</span><strong>Arrastra tus KV aquí</strong><span>PSD, PSB, PNG o JPG · puedes elegir varios</span></label>',
+          '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
+          '<span class="drop-icon">⇧</span><strong>Arrastra tus KV aquí</strong><span>PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
           '<div id="upload-file-list" class="file-list"></div>',
-          '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Logo opcional</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg"></label>',
+          '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Logo opcional</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
           '<label class="field"><span>Tipografía opcional</span><input id="font-file" type="file" accept=".ttf,.otf"></label></div>',
           '<label class="check" style="margin:14px 0"><input id="import-layers" type="checkbox" checked> Importar todas las capas reales del PSD</label>',
           '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button></section>',
@@ -2450,7 +2450,7 @@ async function renderProducts(): Promise<void> {
       : "",
     '<section class="card elevated"><div class="card-head"><div><h2>Catálogo de productos</h2><p>PNG con transparencia da el mejor recorte</p></div><span class="badge green">',
     String(state.products.length), " CARGADOS</span></div>",
-    '<label class="dropzone compact"><input id="product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp"><span class="drop-icon">⇧</span><strong>Sube los productos</strong><span>PNG, JPG o WEBP · puedes elegir varios a la vez</span></label>',
+    '<label class="dropzone compact"><input id="product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"><span class="drop-icon">⇧</span><strong>Sube los productos</strong><span>PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios a la vez</span></label>',
     productCards
       ? '<div class="product-grid" style="margin-top:16px">' + productCards + "</div>"
       : '<div class="notice" style="margin-top:16px">Aún no has cargado productos.</div>',
