@@ -1,11 +1,15 @@
-# OCR opcional (PaddleOCR). Pesa ~1 GB y descarga modelos en el primer uso.
+# OCR. Se instala en la imagen (INSTALL_OCR=true en el Dockerfile).
 #
-# Habilitar en el build:
-#   docker compose build --build-arg INSTALL_OCR=true backend
-# o localmente:
-#   pip install -r requirements-ocr.txt
+# RapidOCR ejecuta los modelos PP-OCR sobre onnxruntime. Son los mismos modelos
+# de PaddleOCR, pero sin arrastrar paddlepaddle: 125 MB en vez de 1,1 GB, se
+# carga en menos de un segundo y no obliga a bajar de versión numpy ni a meter
+# el OpenCV de escritorio en un servidor sin pantalla.
 #
-# Sin estos paquetes la app sigue funcionando: /analyze devuelve una advertencia
-# y las capas de texto se crean manualmente en el paso 3.
-paddlepaddle>=2.6,<4.0
-paddleocr>=2.7,<4.0
+# El reconocedor es `latin_PP-OCRv5_rec_mobile`, que sí lleva las tildes y la ñ.
+# El modelo chino/inglés que viene por omisión las pierde: leía "Camara
+# Ecuatoriana" y "VALIDO", y juntaba las palabras de la línea legal.
+#
+# Sin estos paquetes la app sigue funcionando: /analyze avisa y las capas de
+# texto se crean a mano en el paso 3.
+rapidocr>=3.4,<4.0
+onnxruntime>=1.18,<2.0

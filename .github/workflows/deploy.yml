@@ -42,6 +42,45 @@ jobs:
             cv-backend-ci \
             python -m pytest tests/ -p no:cacheprovider --tb=short
 
+      - name: Comprobar que el OCR y SAM van dentro de la imagen
+        # La suite se salta estas pruebas si los paquetes no están, así que sin
+        # esta comprobación un fallo al instalarlos pasaría desapercibido y el
+        # servidor se quedaría otra vez con "PaddleOCR no está instalado".
+        run: |
+          docker run --rm -i -e DATA_DIR=/tmp/d -e INGEST_DIR=/tmp/d/i cv-backend-ci python - <<'PY'
+          from pathlib import Path
+
+          import rapidocr
+
+          from app.providers import provider_status
+          from app.providers.rapid_ocr import modelos_invalidos
+
+          estado = provider_status()
+          ocr, seg = estado["ocr"], estado["segmentation"]
+          assert ocr["available"], f"OCR no disponible: {ocr['detail']}"
+          assert seg["sam_available"], f"SAM no disponible: {seg['sam_detail']}"
+          assert seg["active"] == "sam", f"segmentación activa: {seg['active']}"
+
+          # La precarga del reconocedor latino no corta la construcción si falla
+          # (un problema de red no debería dejar sin imagen). Aquí sí se exige:
+          # sin él, el primer análisis se queda esperando una descarga, y en un
+          # servidor sin salida a internet no llega nunca.
+          modelos = Path(rapidocr.__file__).parent / "models"
+          latinos = sorted(p.name for p in modelos.glob("latin_*.onnx"))
+          assert latinos, f"el reconocedor latino no vino en la imagen: {sorted(p.name for p in modelos.glob('*.onnx'))}"
+
+          # Y que estén completos: una descarga cortada deja un .onnx a medias
+          # que RapidOCR da por bueno hasta que lo va a usar.
+          malos = modelos_invalidos()
+          assert not malos, f"modelos incompletos en la imagen: {malos}"
+
+          checkpoint = Path("/models/sam2.1_hiera_small.pt")
+          assert checkpoint.exists(), "el checkpoint de SAM no vino en la imagen"
+
+          print(f"OCR: {ocr['active']} ({ocr['lang']}) · {latinos[0]}")
+          print(f"segmentación: {seg['active']} · {checkpoint.stat().st_size // 1024 // 1024} MB")
+          PY
+
       - name: Construir la imagen de la interfaz y comprobar que carga
         # El Dockerfile ejecuta astro check y astro build. Después verificamos
         # que la imagen final de Nginx contiene el HTML y sus assets compilados.
@@ -130,6 +169,31 @@ jobs:
       # Reconstruye y recrea los contenedores. Se pasan los dos archivos porque
       # este proyecto tiene dos modos: en local cada servicio publica su puerto
       # y en el servidor solo lo hace el proxy del 8014.
+      # La imagen del backend pasó de 0,9 a unos 2 GB al meter dentro el OCR y
+      # SAM, y este servidor es compartido con los demás proyectos de la casa.
+      # Si el disco se llena a mitad de un `build`, no cae solo este sitio.
+      # Mejor abortar aquí, con el servidor todavía en pie y sirviendo la
+      # versión anterior, que quedarse sin espacio a medias.
+      - name: Comprobar que hay disco para reconstruir
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            bash -s <<'REMOTO'
+          set -eu
+          RAIZ=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)
+          echo "--- memoria ---"; free -m 2>/dev/null || true
+          echo "--- disco de docker ($RAIZ) ---"; df -h "$RAIZ"
+          echo "--- imágenes y capas ---"; docker system df 2>/dev/null || true
+          LIBRE=$(df -Pm "$RAIZ" | awk 'NR==2 {print $4}')
+          echo "libres: ${LIBRE} MB"
+          if [ "$LIBRE" -lt 6000 ]; then
+            echo "ERROR: hacen falta unos 6 GB libres para reconstruir la imagen del backend"
+            echo "(el OCR y SAM ocupan ~1,3 GB, y durante el build conviven la vieja y la nueva)."
+            echo "Libere espacio con: docker system prune -af --volumes   (borra imágenes sin usar de TODOS los proyectos, revíselo antes)"
+            exit 1
+          fi
+          REMOTO
+
       - name: Reconstruir y reiniciar contenedores
         run: |
           ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
@@ -161,4 +225,20 @@ jobs:
             401) echo "ERROR: pide contraseña y el Caddyfile ya no la lleva. Revise CV_PASSWORD_HASH en el .env del servidor."; exit 1 ;;
             *)   echo "ERROR: se esperaba 200. Revise: docker compose logs proxy"; exit 1 ;;
           esac
+          REMOTO
+
+      # Que la imagen los lleve dentro no basta: el .env del servidor podría
+      # apagarlos. Esto lo pregunta al contenedor que acaba de arrancar.
+      - name: Comprobar que el OCR y SAM quedaron activos
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            bash -s <<'REMOTO'
+          set -eu
+          salud=$(curl -fsS http://127.0.0.1:8014/api/health)
+          echo "$salud" | grep -q '"active":"rapidocr"' || {
+            echo "ERROR: el OCR no quedó activo. Respuesta:"; echo "$salud" | head -c 600; exit 1; }
+          echo "$salud" | grep -q '"sam_available":true' || {
+            echo "ERROR: SAM no quedó activo. Respuesta:"; echo "$salud" | head -c 600; exit 1; }
+          echo "correcto: OCR y SAM activos"
           REMOTO

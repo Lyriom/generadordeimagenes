@@ -2,7 +2,7 @@
 
 Orden de preferencia:
 - Segmentación: SAM (si está habilitado y el checkpoint existe) → local OpenCV → manual.
-- OCR: PaddleOCR (si está instalado) → ninguno (advertencia + creación manual).
+- OCR: RapidOCR (si está instalado) → ninguno (advertencia + creación manual).
 - Inpainting: Magnific / OpenAI / FLUX / Adobe (si hay credenciales) → OpenCV.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ from .magnific import MagnificInpaintProvider, model_catalog as magnific_catalog
 from .manual_segmentation import ManualSegmentationProvider
 from .opencv_inpaint import OpenCVInpaintProvider
 from .openai_inpaint import OpenAIInpaintProvider
-from .paddle_ocr import PaddleOcrProvider
+from .rapid_ocr import RapidOcrProvider
 from .sam_segmentation import SamSegmentationProvider
 
 logger = logging.getLogger(__name__)
@@ -65,8 +65,8 @@ def get_local_segmentation_provider() -> LocalSegmentationProvider:
 
 
 @lru_cache(maxsize=1)
-def get_ocr_provider() -> PaddleOcrProvider:
-    return PaddleOcrProvider()
+def get_ocr_provider() -> RapidOcrProvider:
+    return RapidOcrProvider()
 
 
 def get_inpainting_provider(

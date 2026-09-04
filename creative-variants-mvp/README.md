@@ -9,7 +9,8 @@ como flujo alternativo para ajustes finos.
 - **Backend:** FastAPI (toda la lógica de negocio) · Python 3.11
 - **Frontend:** Astro + TypeScript, servido por Nginx (solo presentación, consume la API)
 - **Procesamiento:** Pillow + OpenCV + NumPy
-- **Funciona sin GPU y sin claves externas.** OpenAI Images, SAM, PaddleOCR, FLUX y Adobe Firefly son
+- **Funciona sin GPU y sin claves externas.** SAM y el OCR van dentro de la imagen y corren en
+  CPU; OpenAI Images, Magnific, FLUX y Adobe Firefly son
   proveedores **opcionales** que degradan a alternativas locales.
 
 ---
@@ -21,7 +22,7 @@ separación perfecta: implementa una **descomposición asistida**.
 
 | Etapa | Qué hace | Qué esperar |
 |---|---|---|
-| Detección automática | Segmentación por contraste/bordes (OpenCV) o SAM, OCR con PaddleOCR, rostros con Haar cascade | Aproximada; cada capa trae confianza y advertencias |
+| Detección automática | Segmentación con SAM 2.1 (OpenCV de respaldo), OCR con RapidOCR, rostros con Haar cascade | Aproximada; cada capa trae confianza y advertencias |
 | Corrección manual | Rectángulos, pincel add/subtract, re-segmentación, cambio de categoría y comportamiento | Es el paso que decide la calidad final |
 | Extracción | PNG RGBA con los **píxeles originales** y bordes suavizados | Sin reescalado: se conserva la resolución |
 | Reconstrucción de fondo | OpenCV local u OpenAI/FLUX/Adobe con credenciales | OpenAI genera un fondo premium una vez y lo reutiliza en el lote |
@@ -673,38 +674,63 @@ data/projects/{project_id}/
 
 ---
 
-## 9. Proveedores opcionales
+## 9. Proveedores
 
-Todos son **opcionales** y de carga diferida: nada se descarga al iniciar la aplicación.
+El OCR y SAM **vienen dentro de la imagen** y se usan solos. Los de IA generativa
+(Magnific, OpenAI, FLUX, Adobe) son opcionales y necesitan clave. Todos son de carga
+diferida: nada se descarga ni se carga en memoria al iniciar la aplicación.
 
-### Segmentación: SAM 2 / SAM
+### Segmentación: SAM 2.1 (incluido)
 
-```bash
-pip install -r backend/requirements-sam.txt
-# descargue el checkpoint a mano, p. ej.:
-#   https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_small.pt
-```
+Recortar un producto con el proveedor local de OpenCV deja fondo y, cuando dos productos
+se tocan, se lleva pedazos del vecino. SAM entiende qué objeto hay dentro del rectángulo:
+sobre un arte real, la visera salía con un trozo de cielo y otro de la camiseta con
+OpenCV, y limpia con SAM; y al recortar la camiseta, OpenCV incluía el balón que la tapa
+y SAM lo excluye.
+
+Va instalado y con el checkpoint dentro de la imagen, así que `SEGMENTATION_PROVIDER=auto`
+lo elige solo:
 
 ```env
-SEGMENTATION_PROVIDER=sam
+SEGMENTATION_PROVIDER=auto      # sam si el checkpoint está, si no el local
 SAM_VARIANT=sam2
 SAM_CHECKPOINT=/models/sam2.1_hiera_small.pt
 SAM_MODEL_TYPE=configs/sam2.1/sam2.1_hiera_s.yaml
 ```
 
-Descomente el volumen `./models:/models:ro` en `docker-compose.yml`. Si el checkpoint no
-existe, el sistema avisa y usa el proveedor local de OpenCV.
+Corre en CPU: codificar el arte tarda unos 2 s y cada máscara son milisegundos. La imagen
+codificada se guarda, así que recortar varias capas del mismo arte solo paga esos 2 s una
+vez. Si el checkpoint no existe, el sistema avisa y sigue con OpenCV.
 
-### OCR: PaddleOCR
+Para construir sin él (imagen 1,1 GB más ligera):
 
 ```bash
-docker compose build --build-arg INSTALL_OCR=true backend
-docker compose up -d backend
+docker compose build --build-arg INSTALL_SAM=false backend
 ```
 
-Sin PaddleOCR, `/analyze` devuelve una advertencia clara y las capas de texto se crean a
-mano en Ajustes finos. No se intenta identificar la tipografía real: se usa una fuente por
-defecto (DejaVu) modificable, o la tipografía que suba el usuario.
+### OCR: RapidOCR (incluido)
+
+Son los modelos PP-OCR de siempre, ejecutados con onnxruntime en vez de con
+paddlepaddle: 125 MB en lugar de 1,1 GB, y menos de un segundo de arranque en vez de
+medio minuto.
+
+El reconocedor es el **latino** (`latin_PP-OCRv5_rec_mobile`), no el chino/inglés que
+traen por omisión. La diferencia sobre un arte real: el de por omisión leía «Camara
+Ecuatoriana», «Electronico» y «VALIDO», y devolvía la línea legal con las palabras
+pegadas; el latino devuelve «Cámara Ecuatoriana de», «Comercio Electrónico» y «VÁLIDO»,
+con sus espacios.
+
+```env
+ENABLE_OCR=true
+OCR_LANG=es       # es, pt, fr, it, de, en → reconocedor latino
+```
+
+El modelo viene descargado dentro de la imagen: no hay espera en el primer análisis ni
+dependencia de que el servidor tenga salida a internet. Sin OCR, `/analyze` devuelve una
+advertencia clara y las capas de texto se crean a mano en Ajustes finos.
+
+No se intenta identificar la tipografía real: se usa una fuente por defecto (DejaVu)
+modificable, o la tipografía que suba el usuario.
 
 ### Generación con IA: Magnific (recomendado)
 
@@ -823,10 +849,14 @@ del backend.
 
 ## 12. Limitaciones actuales
 
-1. La segmentación local (OpenCV) es heurística: en fondos complejos o degradados suele
-   proponer regiones amplias. **Habilite SAM** o corrija a mano para mejores resultados.
+1. SAM recorta lo que hay dentro del rectángulo, pero no decide qué rectángulo dibujar:
+   las regiones que se **proponen** solas siguen saliendo de la heurística de OpenCV y en
+   fondos complejos o degradados suelen ser amplias. Corrija el rectángulo y el recorte
+   sale limpio.
 2. El inpainting con OpenCV es difuso cuando la zona borrada es grande o texturada.
-3. Sin PaddleOCR no hay detección de texto: hay que crear las capas de texto a mano.
+3. El OCR lee bien el copy y la línea legal, pero se le escapan los números muy
+   estilizados (un «%» dibujado como bloques) y las tipografías muy deformadas. Se
+   revisa y se corrige en el paso 3.
 4. La tipografía original no se identifica. En artes aplanados se usa DejaVu o la fuente
    que suba el usuario; los PSD conservan la tipografía real si el copy viene como objeto
    inteligente. Las fuentes de Adobe Fonts (p. ej. **Obviously**) no se pueden empaquetar
@@ -860,7 +890,6 @@ del backend.
 
 ## 13. Próximos pasos recomendados
 
-1. Habilitar SAM 2 y evaluar la mejora de las máscaras frente al proveedor local.
 2. Añadir un detector de logos y personas entrenado (p. ej. YOLO) para clasificar mejor.
 3. Conectar FLUX Fill para fondos de calidad de producción.
 4. Implementar el Predictor Creativo real sobre la interfaz ya provista.

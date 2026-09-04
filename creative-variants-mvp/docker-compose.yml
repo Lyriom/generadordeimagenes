@@ -3,8 +3,12 @@ services:
     build:
       context: ./backend
       args:
-        # OCR opcional: docker compose build --build-arg INSTALL_OCR=true backend
-        INSTALL_OCR: ${INSTALL_OCR:-false}
+        # Van fijos, no como ${VAR}: el .env es del servidor y el despliegue no
+        # lo toca, así que una variable vieja de allí podía dejar la imagen sin
+        # OCR ni SAM sin que se notara. Para construir sin ellos:
+        #   docker compose build --build-arg INSTALL_SAM=false backend
+        INSTALL_OCR: "true"
+        INSTALL_SAM: "true"
     image: creative-variants-backend:latest
     container_name: cv-backend
     env_file:
@@ -20,11 +24,21 @@ services:
       # entrar por SSH. `environment` gana a `env_file`, así que esto manda.
       MAX_UPLOAD_MB: "4096"
       MAX_IMAGE_MEGAPIXELS: "400"
+      # Lo mismo con el OCR y con SAM: van dentro de la imagen, y aquí se fija
+      # que se usen. Si esto viviera solo en el .env del servidor, un valor
+      # viejo de allí los dejaría apagados con todo instalado.
+      ENABLE_OCR: "true"
+      OCR_LANG: "es"
+      SEGMENTATION_PROVIDER: "auto"
+      SAM_VARIANT: "sam2"
+      SAM_CHECKPOINT: /models/sam2.1_hiera_small.pt
+      SAM_MODEL_TYPE: configs/sam2.1/sam2.1_hiera_s.yaml
     ports:
       - "8000:8000"
     volumes:
       - ./data:/app/data
-      # Descomente para habilitar SAM con checkpoints locales:
+      # El checkpoint de SAM viene dentro de la imagen (/models). Para probar
+      # otro tamaño sin reconstruir: descomente y cambie SAM_CHECKPOINT.
       # - ./models:/models:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
@@ -63,7 +77,8 @@ services:
     build:
       context: ./backend
       args:
-        INSTALL_OCR: ${INSTALL_OCR:-false}
+        INSTALL_OCR: "true"
+        INSTALL_SAM: "true"
     image: creative-variants-backend:latest
     container_name: cv-worker
     command: celery -A app.worker.celery_app worker --loglevel=info
@@ -89,6 +104,15 @@ services:
       # entrar por SSH. `environment` gana a `env_file`, así que esto manda.
       MAX_UPLOAD_MB: "4096"
       MAX_IMAGE_MEGAPIXELS: "400"
+      # Lo mismo con el OCR y con SAM: van dentro de la imagen, y aquí se fija
+      # que se usen. Si esto viviera solo en el .env del servidor, un valor
+      # viejo de allí los dejaría apagados con todo instalado.
+      ENABLE_OCR: "true"
+      OCR_LANG: "es"
+      SEGMENTATION_PROVIDER: "auto"
+      SAM_VARIANT: "sam2"
+      SAM_CHECKPOINT: /models/sam2.1_hiera_small.pt
+      SAM_MODEL_TYPE: configs/sam2.1/sam2.1_hiera_s.yaml
     volumes:
       - ./data:/app/data
     depends_on:

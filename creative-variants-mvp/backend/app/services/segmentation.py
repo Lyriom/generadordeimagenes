@@ -39,9 +39,17 @@ def detect_regions(image_path: str, max_regions: int = 12) -> tuple[list[Detecti
         local = get_local_segmentation_provider()
         try:
             detections = local.detect(image_path, max_regions=max_regions)
-            warnings.append(
-                "El proveedor activo no propuso regiones; se usó la detección local OpenCV."
-            )
+            if getattr(provider, "name", "") == "sam":
+                # No es un fallo: SAM recorta lo que se le señala, pero no sale
+                # a buscar objetos por su cuenta. El reparto es ese, y conviene
+                # decirlo así y no como si algo hubiera ido mal.
+                warnings.append(
+                    "Las zonas las propone OpenCV; SAM afina el recorte de cada una."
+                )
+            else:
+                warnings.append(
+                    "El proveedor activo no propuso regiones; se usó la detección local OpenCV."
+                )
         except Exception as exc:  # noqa: BLE001
             warnings.append(f"La detección local también falló: {exc}")
 
@@ -77,6 +85,29 @@ def segment_box(
             return mask.astype(np.uint8), name, warnings
         warnings.append(f"{name} devolvió una máscara vacía.")
     raise ProviderUnavailableError("Ningún proveedor de segmentación produjo una máscara.")
+
+
+def refine_box(image_path: str, box: tuple[int, int, int, int]) -> np.ndarray | None:
+    """Afina con SAM la máscara de una zona ya propuesta. None si SAM no está.
+
+    La detección automática la hace OpenCV, que devuelve la silueta por
+    contraste: se deja fondo alrededor y, cuando dos productos se tocan, se
+    lleva pedazos del vecino. SAM, sobre ese mismo rectángulo, entiende qué
+    objeto hay dentro. Codificar el arte cuesta unos 2 s la primera vez y el
+    proveedor la guarda, así que afinar veinte zonas del mismo arte no son
+    veinte codificaciones.
+    """
+    provider = get_segmentation_provider()
+    if getattr(provider, "name", "") != "sam":
+        return None
+    try:
+        mask = provider.segment(image_path, box=box)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("SAM no pudo afinar la zona %s: %s", box, exc)
+        return None
+    if mask is None or int((mask > 127).sum()) == 0:
+        return None
+    return mask.astype(np.uint8)
 
 
 def apply_mask_operations(mask: np.ndarray, operations: list) -> np.ndarray:

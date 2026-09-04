@@ -267,8 +267,18 @@ tar czf respaldo-$(date +%F).tgz -C /var/www/vhosts/misiva.com.ec/GENERADOR data
 ```
 
 **Espacio.** Con los cuatro contenedores y un PSD de 150 MB en vuelo hacen falta
-unos **4 GB de RAM**. El disco lo come `data/`: cada proyecto guarda el arte
-aplanado, los recortes de cada capa y cada variante generada.
+unos **4 GB de RAM**. La imagen del backend ocupa unos **2 GB** desde que el OCR
+y SAM van dentro (antes 0,9 GB), y durante un despliegue conviven la vieja y la
+nueva: el flujo comprueba que haya **6 GB libres** antes de reconstruir y aborta
+si no los hay, dejando el sitio en pie con la versión anterior. Si aborta:
+
+```bash
+docker system df                      # ver qué ocupa
+docker system prune -af --volumes     # OJO: borra imágenes sin usar de TODOS los proyectos
+```
+
+El disco lo come `data/`: cada proyecto guarda el arte aplanado, los recortes de
+cada capa y cada variante generada.
 
 **Añadir personas.** Una línea por persona dentro del bloque `basic_auth` del
 `Caddyfile`, cada una con su hash.
@@ -284,7 +294,9 @@ aplanado, los recortes de cada capa y cada variante generada.
 | Plesk rechaza las directivas con «duplicate location "/"» | Hay que usar `location ~ ^/`, no `location /` |
 | La página carga y se cuelga al primer clic | Faltan `Upgrade`/`Connection` en las directivas de nginx |
 | «413» al subir un PSD | Falta `client_max_body_size 0` (y el campo *Maximum allowed HTTP request body size* de esa misma pantalla) |
-| «supera el límite de N MB» al subir un PSD | Es el backend: sube `MAX_UPLOAD_MB` en el `.env` del servidor. Para un pliego muy grande, mejor déjalo en `data/ingest`, que no pasa por el navegador ni por ese tope |
+| «supera el límite de N MB» al subir un PSD | Es el backend: el tope vive en `docker-compose.yml` (`MAX_UPLOAD_MB`), no en el `.env`. Para un pliego muy grande, mejor déjalo en `data/ingest`, que no pasa por el navegador ni por ese tope |
+| El despliegue aborta en *Comprobar que hay disco* | El servidor no tiene 6 GB libres. Mire la salida del paso: trae `df -h` y `docker system df` |
+| El despliegue aborta en *Comprobar que el OCR y SAM quedaron activos* | La imagen se construyó sin ellos, o el `.env` del servidor los apaga. `docker compose logs backend` y `curl -s localhost:8014/api/health` |
 | Plesk rechaza las directivas con «directive is duplicate» | `client_max_body_size` fuera del `location`: Plesk ya la pone en el vhost |
 | La tanda muere a los 60 s | Falta `proxy_read_timeout 600s` |
 | `cv-proxy` en crash-loop | El `security_opt` comentado del Paso 4 |

@@ -40,7 +40,7 @@ Un arte aplanado no contiene las capas originales, por lo que el flujo es una
 6. `POST /projects/{id}/generate` — variantes reorganizando la composición.
 7. `GET /projects/{id}/export` — ZIP con las variantes.
 
-Funciona sin GPU y sin APIs externas: los proveedores opcionales (SAM, PaddleOCR,
+Funciona sin GPU y sin APIs externas: los proveedores opcionales (SAM, RapidOCR,
 FLUX, Adobe) degradan a alternativas locales.
 """
 

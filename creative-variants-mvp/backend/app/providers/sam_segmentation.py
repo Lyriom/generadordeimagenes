@@ -1,10 +1,12 @@
-"""Proveedor SAM 2 / SAM opcional.
+"""Proveedor SAM 2 / SAM.
 
 No se descarga ningún modelo al iniciar la aplicación: la carga es diferida y
 solo ocurre si `SEGMENTATION_PROVIDER=sam` (o `auto` con checkpoint presente) y
 existe el archivo indicado en `SAM_CHECKPOINT`.
 
-Habilitación (ver README):
+En la imagen de este proyecto viene instalado y con el checkpoint dentro
+(`/models/sam2.1_hiera_small.pt`), así que `auto` lo elige solo. Para montarlo
+por fuera (ver README):
     pip install -r requirements-sam.txt
     export SAM_CHECKPOINT=/models/sam2.1_hiera_small.pt
     export SAM_VARIANT=sam2          # o "sam" para segment-anything v1
@@ -23,6 +25,29 @@ from .base import Detection, ProviderUnavailableError
 
 logger = logging.getLogger(__name__)
 
+# Cada checkpoint de SAM 2.1 tiene su archivo de configuración; el nombre del
+# archivo de pesos dice cuál. Sin este mapa habría que acertar a mano con
+# SAM_MODEL_TYPE, y el valor por omisión ("vit_b") es de SAM 1: pasárselo a
+# SAM 2 lo hace fallar al construir el modelo.
+_SAM2_CONFIGS = {
+    "tiny": "configs/sam2.1/sam2.1_hiera_t.yaml",
+    "small": "configs/sam2.1/sam2.1_hiera_s.yaml",
+    "base_plus": "configs/sam2.1/sam2.1_hiera_b+.yaml",
+    "large": "configs/sam2.1/sam2.1_hiera_l.yaml",
+}
+_SAM2_CONFIG_POR_DEFECTO = _SAM2_CONFIGS["small"]
+
+
+def _sam2_config(model_type: str | None, checkpoint: str | None) -> str:
+    """Configuración de SAM 2: la indicada, o la que diga el nombre del checkpoint."""
+    if model_type and model_type.endswith((".yaml", ".yml")):
+        return model_type
+    nombre = Path(checkpoint or "").stem.lower()
+    for tamano, config in _SAM2_CONFIGS.items():
+        if tamano in nombre:
+            return config
+    return _SAM2_CONFIG_POR_DEFECTO
+
 
 class SamSegmentationProvider:
     name = "sam"
@@ -38,6 +63,11 @@ class SamSegmentationProvider:
         self.variant = (variant or settings.sam_variant).lower()
         self._predictor = None
         self._load_error: str | None = None
+        # Codificar la imagen es lo que cuesta (unos 2 s); sacar cada máscara son
+        # milisegundos. Recortar varias capas del mismo arte es lo normal, así
+        # que se guarda la última codificada.
+        self._image_key: tuple[str, int, int] | None = None
+        self._image_shape: tuple[int, int] | None = None
 
     # --------------------------------------------------------------- lifecycle
     def available(self) -> bool:
@@ -78,7 +108,7 @@ class SamSegmentationProvider:
                 from sam2.build_sam import build_sam2  # type: ignore
                 from sam2.sam2_image_predictor import SAM2ImagePredictor  # type: ignore
 
-                config = settings.sam_model_type or "configs/sam2.1/sam2.1_hiera_s.yaml"
+                config = _sam2_config(self.model_type, self.checkpoint)
                 model = build_sam2(config, self.checkpoint, device="cpu")
                 self._predictor = SAM2ImagePredictor(model)
             else:
@@ -97,6 +127,24 @@ class SamSegmentationProvider:
         """SAM no clasifica: sin prompts no proponemos regiones."""
         return []
 
+    def _encode(self, predictor, image_path: str) -> tuple[int, int]:
+        """Codifica la imagen si no es la misma de la llamada anterior."""
+        try:
+            info = Path(image_path).stat()
+            key = (str(image_path), info.st_mtime_ns, info.st_size)
+        except OSError:
+            key = None
+        if key is not None and key == self._image_key and self._image_shape is not None:
+            return self._image_shape
+
+        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
+        if image is None:
+            raise ProviderUnavailableError(f"No se pudo leer la imagen: {image_path}")
+        predictor.set_image(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        self._image_key = key
+        self._image_shape = (int(image.shape[0]), int(image.shape[1]))
+        return self._image_shape
+
     def segment(
         self,
         image_path: str,
@@ -105,11 +153,7 @@ class SamSegmentationProvider:
         text_prompt: str | None = None,
     ) -> np.ndarray:
         predictor = self._ensure_predictor()
-        image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
-        if image is None:
-            raise ProviderUnavailableError(f"No se pudo leer la imagen: {image_path}")
-        rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        predictor.set_image(rgb)
+        alto, ancho = self._encode(predictor, image_path)
 
         box_arr = None
         if box is not None:
@@ -128,9 +172,7 @@ class SamSegmentationProvider:
             multimask_output=False,
         )
         best = int(np.argmax(scores)) if scores is not None and len(scores) else 0
-        mask = np.asarray(masks[best]).astype(np.uint8) * 255
-        if mask.shape[:2] != image.shape[:2]:  # pragma: no cover - defensivo
-            mask = cv2.resize(
-                mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST
-            )
+        mask = (np.asarray(masks[best]) > 0).astype(np.uint8) * 255
+        if mask.shape[:2] != (alto, ancho):  # pragma: no cover - defensivo
+            mask = cv2.resize(mask, (ancho, alto), interpolation=cv2.INTER_NEAREST)
         return mask

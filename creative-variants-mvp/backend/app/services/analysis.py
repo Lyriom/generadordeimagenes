@@ -295,7 +295,16 @@ def analyze_project(
             confidence=confidence,
             source="auto",
         )
-        mask = det.mask if det.mask is not None else box_mask(shape, box)
+        # La zona la propuso OpenCV por contraste; si SAM está, se le pide la
+        # silueta de lo que hay dentro de ese rectángulo. Es la diferencia entre
+        # un recorte con fondo alrededor —y con un pedazo del producto de al
+        # lado— y el objeto solo. Si SAM no está o no ve nada, se queda la de
+        # OpenCV, que es lo que había antes.
+        mask = seg_service.refine_box(image_path, box)
+        if mask is not None:
+            layer.meta["segmented_with"] = "sam"
+        else:
+            mask = det.mask if det.mask is not None else box_mask(shape, box)
         if mask.shape[:2] != shape:  # pragma: no cover - defensivo
             mask = cv2.resize(mask, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
         layer_extraction.write_mask(project, layer, mask.astype(np.uint8))
@@ -361,7 +370,7 @@ def analyze_project(
     if not any(layer.type == LayerType.TEXT for layer in layers):
         warnings.append(
             "No hay capas de texto: las variantes saldrán sin titular, precio ni CTA. "
-            "Escriba los textos en Ajustes finos (o habilite PaddleOCR)."
+            "Escriba los textos en Ajustes finos (o habilite el OCR)."
         )
     warnings.append(
         "La separación desde un arte aplanado es aproximada: revise máscaras y "
