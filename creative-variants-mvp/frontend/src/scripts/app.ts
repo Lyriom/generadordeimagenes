@@ -217,6 +217,12 @@ interface State {
   copyFields: Set<string>;
   /** Texto de cada producto para cada uno de esos elementos. */
   productTexts: Record<string, Record<string, string>>;
+  /** Lo escrito y todavía sin guardar en cada casilla de copy, por capa.
+   *
+   * La lista se vuelve a pintar entera cada vez que algo cambia en el KV
+   * —separar una capa, quitar un elemento, cambiar de pieza—, y con ella se
+   * perdía sin avisar lo que hubiera escrito y no hubiera guardado. */
+  copyDrafts: Record<string, string>;
 }
 
 const state: State = {
@@ -238,6 +244,7 @@ const state: State = {
   autoFormats: true,
   resultOrder: "score",
   texts: {},
+  copyDrafts: {},
   copySource: null,
   copyFields: new Set(),
   productTexts: {},
@@ -1270,6 +1277,11 @@ function copyThumb(project: Project, item: ArtTextLayer): string {
 
 function copyRow(project: Project, item: ArtTextLayer): string {
   const lines = Math.max(1, Math.min(4, item.style?.lines || item.text.split("\n").length));
+  // Lo escrito y sin guardar manda sobre lo que hay en el arte: si no, cualquier
+  // repintado de la lista lo borraba y había que volver a escribirlo.
+  const draft = state.copyDrafts[item.id];
+  const pending = draft !== undefined && draft !== item.text;
+  const shown = draft !== undefined ? draft : item.text;
   const editor = item.editable
     ? [
         '<textarea class="copy-text" rows="', String(lines), '" data-layer="', attr(item.id),
@@ -1277,7 +1289,10 @@ function copyRow(project: Project, item: ArtTextLayer): string {
         item.text
           ? ""
           : "Lee la miniatura de la izquierda y escribe aquí el texto que la reemplaza",
-        '">', esc(item.text), "</textarea>",
+        '">', esc(shown), "</textarea>",
+        pending
+          ? '<small class="copy-pending">Sin guardar todavía: pulsa «Guardar texto».</small>'
+          : "",
       ].join("")
     : '<p class="muted tiny copy-locked">Sus píxeles no contienen texto que se pueda medir ' +
       "(es una forma, un sello o una foto). Se puede quitar del arte, pero no reescribir.</p>";
@@ -1458,6 +1473,11 @@ function bindCopyEditor(project: Project): void {
       if (panel) panel.hidden = !panel.hidden;
     });
   });
+  queryAll<HTMLTextAreaElement>(".copy-text").forEach((field) => {
+    field.addEventListener("input", () => {
+      state.copyDrafts[field.dataset.layer!] = field.value;
+    });
+  });
   queryAll<HTMLButtonElement>(".save-copy").forEach((button) => {
     button.addEventListener("click", () => {
       const id = button.dataset.layer!;
@@ -1467,18 +1487,36 @@ function bindCopyEditor(project: Project): void {
         toast("Escribe el texto nuevo, o usa “Quitar del arte” si sobra.", "error");
         return;
       }
+      delete state.copyDrafts[id];
       void sendCopyEdit(project, { layer_id: id, content });
     });
   });
   queryAll<HTMLButtonElement>(".restore-copy").forEach((button) => {
-    button.addEventListener("click", () =>
-      void sendCopyEdit(project, { layer_id: button.dataset.layer!, restore: true }),
-    );
+    button.addEventListener("click", () => {
+      delete state.copyDrafts[button.dataset.layer!];
+      void sendCopyEdit(project, { layer_id: button.dataset.layer!, restore: true });
+    });
   });
   queryAll<HTMLButtonElement>(".split-copy").forEach((button) => {
-    button.addEventListener("click", () =>
-      void sendCopySplit(project, button.dataset.layer!, false),
-    );
+    button.addEventListener("click", () => {
+      const id = button.dataset.layer!;
+      // Al separar, la capa madre deja de existir y con ella su casilla. Si
+      // había texto escrito sin guardar se perdía en silencio.
+      const draft = state.copyDrafts[id];
+      const item = (state.texts[project.project_id] || EMPTY_TEXTS).layers
+        .find((entry) => entry.id === id);
+      if (draft !== undefined && item && draft !== item.text) {
+        const seguir = window.confirm(
+          "Tienes texto escrito sin guardar en «" + item.name + "».\n\n" +
+          "Al separarla en partes esa casilla desaparece y el texto se pierde: " +
+          "cada parte se reescribe por su cuenta.\n\n" +
+          "Cancela para guardarlo primero, o acepta para separar de todas formas.",
+        );
+        if (!seguir) return;
+        delete state.copyDrafts[id];
+      }
+      void sendCopySplit(project, id, false);
+    });
   });
   queryAll<HTMLButtonElement>(".unsplit-copy").forEach((button) => {
     button.addEventListener("click", () =>

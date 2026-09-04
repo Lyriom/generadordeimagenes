@@ -464,3 +464,83 @@ def test_faithful_never_stretches_even_full_bleed_scenery():
     assert by_name["Franja"].height == 48
     assert by_name["Producto ancho"].x == 180
     assert by_name["Producto ancho"].width == 720
+
+
+# --------------------------------------------------- hueco de lo que se quita
+# Quitar un elemento de un lienzo de tamaño fijo no puede "no dejar sitio": el
+# espacio sigue ahí. Lo que no vale es que quede todo junto en un claro donde
+# estaba el elemento, que era lo que salía.
+
+
+def _pinned(name, x, y, w, h, category=LayerCategory.DECORATION):
+    layer = Layer(name=name, category=category, x=x, y=y, width=w, height=h, src=f"{name}.png")
+    layer.meta["mandatory_art"] = True
+    return layer
+
+
+def test_removing_an_element_spreads_its_space_instead_of_leaving_a_hole():
+    """El aire liberado se reparte; arriba y abajo no se despegan de su borde."""
+    canvas = (1000, 2000)
+    logo = _pinned("logo", 400, 100, 200, 100)
+    producto = _pinned("producto", 300, 400, 400, 600, LayerCategory.PRODUCT)
+    bloque = _pinned("bloque", 350, 1100, 300, 200)
+    precio = _pinned("precio", 350, 1400, 300, 200)
+    legal = _pinned("legal", 300, 1800, 400, 60, LayerCategory.LEGAL)
+    visibles = [logo, producto, bloque, precio, legal]
+
+    con_todo, _ = build_placements(
+        visibles, "faithful", canvas[0], canvas[1], random.Random(3), source_canvas=canvas
+    )
+    sitio = {p.layer.name: p.y for p in con_todo}
+    assert sitio["bloque"] == 1100
+
+    # Se quita el bloque del medio.
+    sin_bloque, notas = build_placements(
+        [logo, producto, precio, legal], "faithful", canvas[0], canvas[1],
+        random.Random(3), source_canvas=canvas, removed=[bloque],
+    )
+    ahora = {p.layer.name: p.y for p in sin_bloque}
+
+    # Los extremos no se mueven: arriba va la marca y abajo el legal.
+    assert ahora["logo"] == sitio["logo"]
+    assert ahora["legal"] == sitio["legal"]
+    # Y el claro no se queda entero donde estaba: el hueco entre el producto y
+    # el precio era de 400 px con el bloque dentro; sin él tiene que encogerse.
+    hueco_antes = sitio["precio"] - (sitio["producto"] + 600)
+    hueco_ahora = ahora["precio"] - (ahora["producto"] + 600)
+    assert hueco_ahora < hueco_antes
+    assert any("repartió" in nota for nota in notas)
+
+
+def test_without_removals_nothing_moves():
+    """La recomposición solo entra cuando se ha quitado algo."""
+    canvas = (1000, 2000)
+    visibles = [
+        _pinned("logo", 400, 100, 200, 100),
+        _pinned("producto", 300, 400, 400, 600, LayerCategory.PRODUCT),
+        _pinned("legal", 300, 1800, 400, 60, LayerCategory.LEGAL),
+    ]
+    sin, _ = build_placements(
+        visibles, "faithful", canvas[0], canvas[1], random.Random(3), source_canvas=canvas
+    )
+    con, _ = build_placements(
+        visibles, "faithful", canvas[0], canvas[1], random.Random(3),
+        source_canvas=canvas, removed=[],
+    )
+    assert {p.layer.name: p.box for p in sin} == {p.layer.name: p.box for p in con}
+
+
+def test_a_removal_far_from_a_column_does_not_move_it():
+    """El hueco de un elemento de la derecha no recoloca el de la izquierda."""
+    canvas = (1000, 1000)
+    izquierda = _pinned("izquierda", 40, 300, 200, 100)
+    derecha_arriba = _pinned("derecha-arriba", 700, 200, 200, 100)
+    derecha_abajo = _pinned("derecha-abajo", 700, 700, 200, 100)
+    quitada = _pinned("derecha-medio", 700, 420, 200, 100)
+
+    coloc, _ = build_placements(
+        [izquierda, derecha_arriba, derecha_abajo], "faithful", canvas[0], canvas[1],
+        random.Random(5), source_canvas=canvas, removed=[quitada],
+    )
+    sitio = {p.layer.name: p.y for p in coloc}
+    assert sitio["izquierda"] == 300

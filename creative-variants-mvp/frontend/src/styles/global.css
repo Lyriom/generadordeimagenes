@@ -790,6 +790,12 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   font-family: inherit;
 }
 .copy-locked { margin: 0; }
+.copy-pending {
+  display: block;
+  margin-top: 4px;
+  color: var(--warning);
+  font-size: 11px;
+}
 .copy-thumb-btn {
   grid-area: thumb;
   position: relative;

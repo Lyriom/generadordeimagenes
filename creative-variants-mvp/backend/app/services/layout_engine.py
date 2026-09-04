@@ -765,8 +765,14 @@ def build_placements(
     source_canvas: tuple[int, int] | None = None,
     safe_area: dict[str, float] | None = None,
     product_arrangement: str = "auto",
+    removed: Iterable[Layer] | None = None,
 ) -> tuple[list[Placement], list[str]]:
-    """Coloca cada capa en la zona del layout con variación determinista."""
+    """Coloca cada capa en la zona del layout con variación determinista.
+
+    `removed` son las capas que el usuario quitó del arte. No se dibujan, pero
+    el hueco que dejan hay que repartirlo: si no, el diseño anclado queda con un
+    claro en medio donde antes había un elemento.
+    """
     layout = LAYOUTS.get(layout_key, LAYOUTS["product_left"])
     zones = zones_for_format(layout_key, canvas_w, canvas_h)
     preset = INTENSITY_PRESETS.get(intensity, INTENSITY_PRESETS["moderate"])
@@ -1066,6 +1072,11 @@ def build_placements(
                 placement.z_index = z_value
             notes.append("Orden visual de capas reorganizado.")
 
+    if source_canvas is not None and removed:
+        notes.extend(
+            _redistribute_gaps(placements, list(removed), source_canvas, canvas_w, canvas_h)
+        )
+
     notes.extend(_resolve_overlaps(placements, canvas_w, canvas_h, margin))
     # Decoraciones pueden ir a sangre. Producto, marca y textos deben permanecer
     # dentro del área que cada plataforma deja libre de controles y overlays.
@@ -1081,6 +1092,95 @@ def build_placements(
                     )
     placements.sort(key=lambda p: (p.z_index, PRIORITY.get(p.layer.category, 10)))
     return placements, notes
+
+
+#: Cuánto tienen que solaparse en horizontal un hueco y un elemento para que se
+#: consideren de la misma columna. Por debajo de esto son cosas de sitios
+#: distintos del arte y el hueco de una no debe mover a la otra.
+COLUMN_OVERLAP = 0.25
+
+
+def _horizontal_overlap(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    """Solape horizontal de dos cajas, sobre el ancho de la más estrecha."""
+    left = max(a[0], b[0])
+    right = min(a[0] + a[2], b[0] + b[2])
+    if right <= left:
+        return 0.0
+    return (right - left) / max(1, min(a[2], b[2]))
+
+
+def _redistribute_gaps(
+    placements: list[Placement],
+    removed: list[Layer],
+    source_canvas: tuple[int, int],
+    canvas_w: int,
+    canvas_h: int,
+) -> list[str]:
+    """Reparte el espacio que deja una capa quitada entre los huecos que quedan.
+
+    Quitar un elemento de un lienzo de tamaño fijo no puede "no dejar sitio":
+    el espacio sigue ahí. Lo que no vale es que quede todo junto en un claro
+    donde estaba el elemento, que es lo que se veía. Así que se reparte.
+
+    El primer elemento de la columna y el último no se mueven —arriba está la
+    marca y abajo el legal, y ninguno de los dos debe despegarse de su borde—, y
+    el aire liberado se distribuye entre los huecos restantes en proporción al
+    que ya tenían. Es lo que hace un diseñador al borrar una línea: recompone el
+    ritmo, no deja el agujero ni empuja todo hacia arriba.
+    """
+    notes: list[str] = []
+    holes = [
+        _pinned_box(layer, source_canvas, canvas_w, canvas_h)[:4] for layer in removed
+    ]
+    if not holes:
+        return notes
+
+    column = sorted(
+        (p for p in placements if p.pinned), key=lambda p: (p.y, p.x)
+    )
+    if len(column) < 2:
+        return notes
+
+    for hole in holes:
+        # Solo la columna del hueco: un precio quitado a la derecha no debe
+        # mover el logo de la izquierda.
+        stack = [p for p in column if _horizontal_overlap(hole, p.box) >= COLUMN_OVERLAP]
+        if len(stack) < 2:
+            continue
+        stack.sort(key=lambda p: p.y)
+        top = stack[0].y
+        bottom = stack[-1].y + stack[-1].height
+        heights = sum(p.height for p in stack)
+        free = bottom - top - heights
+        if free <= 0:
+            continue
+
+        # El peso de cada hueco es el que tendría si la capa quitada no hubiera
+        # existido nunca: al que la contenía se le descuenta su alto. Sin eso, el
+        # claro se lleva la mayor parte del reparto y sigue estando ahí.
+        weights: list[float] = []
+        for previous, following in zip(stack, stack[1:]):
+            gap = following.y - (previous.y + previous.height)
+            inside = (
+                hole[1] >= previous.y + previous.height - 1
+                and hole[1] + hole[3] <= following.y + 1
+            )
+            weights.append(max(1.0, gap - (hole[3] if inside else 0)))
+
+        total = sum(weights)
+        if total <= 0:
+            continue
+        cursor = top
+        for index, placement in enumerate(stack):
+            placement.y = int(round(cursor))
+            cursor += placement.height
+            if index < len(weights):
+                cursor += free * weights[index] / total
+        notes.append(
+            f"Se repartió el espacio de '{removed[holes.index(hole)].name}' entre los "
+            f"{len(stack)} elementos de su columna."
+        )
+    return notes
 
 
 def _uniform_scale(
@@ -1198,10 +1298,16 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     reorderable_set = set(reorderable) if reorderable is not None else None
 
     working_layers: list[Layer] = []
+    # Las que el usuario quitó del arte no se dibujan, pero su hueco hay que
+    # repartirlo: hasta ahora se descartaban aquí y el layout ni se enteraba,
+    # así que el diseño anclado salía con un claro donde estaba el elemento.
+    removed_layers: list[Layer] = []
     for layer in project.layers:
         if layer.category == LayerCategory.BACKGROUND:
             continue
         if layer.id in hidden or not layer.visible:
+            if layer.src or (layer.content or "").strip():
+                removed_layers.append(layer.model_copy(deep=True))
             continue
         clone = layer.model_copy(deep=True)
         if clone.id in locked:
@@ -1270,6 +1376,7 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
             source_canvas=(project.canvas.width, project.canvas.height),
             safe_area=format_safe_area(fmt),
             product_arrangement=getattr(request, "product_arrangement", "auto"),
+            removed=removed_layers,
         )
         plans.append(
             VariantPlan(
