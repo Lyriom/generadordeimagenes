@@ -359,6 +359,14 @@ npm run dev
 Astro enruta `/api` hacia `http://localhost:8000` durante el desarrollo; con
 Docker Compose, esa misma ruta la resuelve Nginx dentro de la red interna.
 
+**Aunque solo vaya a editar, instale las dependencias de los dos lados.** Todo
+se construye en Docker, así que es fácil no tenerlas nunca en la máquina, y
+entonces el editor marca en rojo un proyecto que funciona: sin `node_modules`,
+el `tsconfig.json` no encuentra `astro/tsconfigs/strict`; sin el entorno de
+Python, Pylance no resuelve numpy, cv2, PIL ni fastapi. Las dos carpetas
+(`backend/.venv` y `frontend/node_modules`) están en el `.gitignore`, y
+[.vscode/settings.json](../.vscode/settings.json) ya apunta a la primera.
+
 ---
 
 ## 4. Flujo de trabajo en la interfaz

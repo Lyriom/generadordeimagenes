@@ -122,6 +122,7 @@ jobs:
             --exclude='.git' --exclude='.github' \
             --exclude='.env' --exclude='data' \
             --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.DS_Store' \
+            --exclude='node_modules' --exclude='dist' --exclude='.astro' --exclude='.venv' \
             -e "ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new" \
             ./creative-variants-mvp/ \
             "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:$DEPLOY_PATH/"

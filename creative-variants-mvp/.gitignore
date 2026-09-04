@@ -8,3 +8,11 @@ __pycache__/
 .env
 .pytest_cache/
 .venv/
+
+# El frontend se construye en Docker, así que nadie había instalado las
+# dependencias aquí y estas tres líneas faltaban. En cuanto alguien edita el
+# frontend con VS Code hacen falta: sin `node_modules` el tsconfig no encuentra
+# `astro/tsconfigs/strict` y el editor marca en rojo el proyecto entero.
+node_modules/
+dist/
+.astro/
