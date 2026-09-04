@@ -12,6 +12,14 @@
   "python.testing.pytestEnabled": true,
   "python.testing.cwd": "${workspaceFolder}/creative-variants-mvp/backend",
   "python.testing.pytestArgs": ["tests"],
+  // El editor tiene que type-checkear con el MISMO TypeScript que el build.
+  // VS Code trae el suyo empaquetado (5.x) y el proyecto usa 6.0.3: con dos
+  // versiones distintas, el editor puede marcar errores que la CI no ve, y al
+  // revés. Apuntar al del proyecto además reinicia el servidor de TypeScript,
+  // que es lo que hace falta cuando `node_modules` aparece después de haber
+  // abierto la carpeta: el servidor se queda con que no existía.
+  "typescript.tsdk": "creative-variants-mvp/frontend/node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
   "files.exclude": {
     "**/__pycache__": true,
     "**/.pytest_cache": true
