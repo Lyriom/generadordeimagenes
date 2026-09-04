@@ -202,7 +202,23 @@ jobs:
           set -eu
           cd "$1"
           docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build --remove-orphans
+
+          # Cada despliegue deja atrás la imagen anterior (sin etiqueta, porque
+          # la etiqueta se la queda la nueva) y una capa de caché de
+          # construcción. Con la imagen en 2,6 GB eso se acumula rápido, y el
+          # disco es de todos los proyectos del servidor.
+          #
+          #   image prune -f      → solo imágenes SIN etiqueta y que ningún
+          #                         contenedor usa. No toca las de nadie.
+          #   builder prune 48h   → caché de construcción de más de dos días.
+          #                         La reciente se deja: es la que hace que el
+          #                         siguiente despliegue no vuelva a bajarse
+          #                         torch entero.
           docker image prune -f
+          docker builder prune -f --filter until=48h
+          echo "--- espacio de docker tras limpiar ---"
+          docker system df
+          df -h "$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
           docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
           REMOTO
 

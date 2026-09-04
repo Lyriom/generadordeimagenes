@@ -238,8 +238,10 @@ Cada push a `main`:
 1. Construye las imágenes y corre las 159 pruebas. **Si algo falla, no despliega.**
 2. Comprueba que el build-context es el correcto y que el `.env` está.
 3. Sincroniza el código, respetando `.env` y `data/`.
-4. Reconstruye los contenedores y limpia imágenes viejas.
-5. Comprueba que el proxy responde 200.
+4. Comprueba que hay 6 GB de disco libres; si no, aborta sin tocar nada.
+5. Reconstruye los contenedores, borra la imagen anterior y la caché de
+   construcción de más de dos días, e imprime cuánto espacio queda.
+6. Comprueba que el proxy responde 200 y que el OCR y SAM quedaron activos.
 
 Los despliegues a `main` **se encolan, no se cancelan**: un rsync cortado a la
 mitad dejaría el servidor con medio repositorio.
@@ -277,8 +279,15 @@ docker system df                      # ver qué ocupa
 docker system prune -af --volumes     # OJO: borra imágenes sin usar de TODOS los proyectos
 ```
 
+Nada se acumula solo. Cada despliegue borra la imagen anterior (queda sin
+etiqueta al reconstruir) y la caché de construcción de más de dos días; la
+reciente se deja a propósito, que es la que evita volver a bajar torch entero
+en el siguiente despliegue.
+
 El disco lo come `data/`: cada proyecto guarda el arte aplanado, los recortes de
-cada capa y cada variante generada.
+cada capa y cada variante generada. Tampoco crece sin fin: la aplicación borra
+sola los proyectos sin tocar en **8 horas** (`PROJECT_RETENTION_HOURS`) y nunca
+guarda más de **60** (`MAX_PROJECTS_KEPT`).
 
 **Añadir personas.** Una línea por persona dentro del bloque `basic_auth` del
 `Caddyfile`, cada una con su hash.
