@@ -276,6 +276,21 @@ def evaluate_variant(
                 "La variante no tiene texto: sin titular, precio ni CTA no es una pieza "
                 "publicitaria utilizable."
             )
+    # Un copy reescrito con la letra del sistema se ve distinto del resto del
+    # arte. Es lo primero que salta en una revisión, así que se dice aquí, que es
+    # lo que se lee antes de aprobar una pieza.
+    rewritten = [
+        p.layer.name
+        for p in placements
+        if p.layer.meta.get("art_text", {}).get("applied")
+    ]
+    if rewritten and not project.references.font:
+        penalties += 8
+        warnings.append(
+            f"{len(rewritten)} texto(s) reescrito(s) con la tipografía del sistema y no "
+            "con la de marca: suba el .ttf/.otf y se recalculan solos."
+        )
+
     for required, message in (
         (LayerCategory.LOGO, "Falta el logo en la variante."),
         (LayerCategory.CTA, "Falta el CTA en la variante."),

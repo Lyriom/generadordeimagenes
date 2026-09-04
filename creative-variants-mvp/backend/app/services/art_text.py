@@ -598,6 +598,16 @@ def apply(
     layer.width = max(1, block_w)
     layer.height = max(1, block_h)
 
+    # Sin la tipografía de marca el texto nuevo sale con la del sistema, y eso
+    # no es publicable. El aviso va aquí, en el momento del cambio, y no solo en
+    # el recuadro del principio de la pantalla: ahí se pasa por alto.
+    if not project.references.font:
+        warnings.append(
+            f"'{layer.name}' se reescribió con la tipografía del sistema: falta la de "
+            "marca. Suba el .ttf/.otf en «Textos y logos del arte» y el texto se "
+            "recalcula solo; hasta entonces el arte no está listo para producción."
+        )
+
     warnings.extend(_sync_plate(project, layer, erase=erase, rebuild=rebuild))
     return warnings
 

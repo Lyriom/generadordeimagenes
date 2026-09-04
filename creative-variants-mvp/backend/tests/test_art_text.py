@@ -1091,3 +1091,44 @@ def test_a_single_piece_layer_refuses_to_split(client: TestClient, tmp_path):
     )
     assert response.status_code == 400
     assert "una sola pieza" in response.json()["detail"]
+
+
+def test_rewriting_without_the_brand_font_says_so(client: TestClient, tmp_path):
+    """El aviso llega al guardar, no solo en el recuadro del principio.
+
+    Es el fallo que se vio en producción: se reescribe, sale con la letra del
+    sistema y nadie se enteró hasta ver el arte terminado.
+    """
+    project = psd_project(client, tmp_path)
+    price = price_layer(project)
+    response = client.post(
+        f"/projects/{project['project_id']}/layers/{price['id']}/text",
+        json={"content": "$99.00"},
+    )
+    assert response.status_code == 200, response.text
+    assert any("tipografía del sistema" in w for w in response.json()["warnings"])
+
+
+def test_with_the_brand_font_there_is_no_such_warning(client: TestClient, tmp_path):
+    project = psd_project(client, tmp_path)
+    project_id = project["project_id"]
+    face = _face("bold")
+    assert face, "el entorno de pruebas no tiene ninguna cara instalada"
+    with open(face, "rb") as handle:
+        payload = handle.read()
+    saved = client.post(
+        f"/projects/{project_id}/references/font",
+        files={"font": ("marca.ttf", payload, "font/ttf")},
+    )
+    assert saved.status_code == 200, saved.text
+
+    price = price_layer(project)
+    response = client.post(
+        f"/projects/{project_id}/layers/{price['id']}/text",
+        json={"content": "$99.00"},
+    )
+    assert response.status_code == 200, response.text
+    assert not any("tipografía del sistema" in w for w in response.json()["warnings"])
+    # Y la capa declara la familia del archivo subido, que es lo que el SVG
+    # le pide a Illustrator al abrirlo.
+    assert response.json()["layer"]["font_family"]
