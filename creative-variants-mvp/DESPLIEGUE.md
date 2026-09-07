@@ -239,8 +239,8 @@ Cada push a `main`:
 2. Comprueba que el build-context es el correcto y que el `.env` está.
 3. Sincroniza el código, respetando `.env` y `data/`.
 4. Comprueba que hay 6 GB de disco libres; si no, aborta sin tocar nada.
-5. Reconstruye los contenedores, borra la imagen anterior y la caché de
-   construcción de más de dos días, e imprime cuánto espacio queda.
+5. Reconstruye los contenedores, borra la imagen anterior, acota la caché de
+   construcción a 10 GB e imprime cuánto espacio queda.
 6. Comprueba que el proxy responde 200 y que el OCR y SAM quedaron activos.
 
 Los despliegues a `main` **se encolan, no se cancelan**: un rsync cortado a la
@@ -280,9 +280,14 @@ docker system prune -af --volumes     # OJO: borra imágenes sin usar de TODOS l
 ```
 
 Nada se acumula solo. Cada despliegue borra la imagen anterior (queda sin
-etiqueta al reconstruir) y la caché de construcción de más de dos días; la
-reciente se deja a propósito, que es la que evita volver a bajar torch entero
-en el siguiente despliegue.
+etiqueta al reconstruir) y **acota la caché de construcción a 10 GB**. La
+primera vez que corrió esa limpieza había **33 GB** acumulados de todos los
+proyectos del servidor, y liberarla dejó el disco en 356 GB usados en vez de
+387.
+
+Se acota en vez de vaciarla a propósito: esa caché es la que evita volver a
+bajar torch entero. Sin ella, construir la imagen del backend son unos **40
+minutos**; con ella, un par.
 
 El disco lo come `data/`: cada proyecto guarda el arte aplanado, los recortes de
 cada capa y cada variante generada. Tampoco crece sin fin: la aplicación borra

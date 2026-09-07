@@ -208,14 +208,26 @@ jobs:
           # construcción. Con la imagen en 2,6 GB eso se acumula rápido, y el
           # disco es de todos los proyectos del servidor.
           #
-          #   image prune -f      → solo imágenes SIN etiqueta y que ningún
-          #                         contenedor usa. No toca las de nadie.
-          #   builder prune 48h   → caché de construcción de más de dos días.
-          #                         La reciente se deja: es la que hace que el
-          #                         siguiente despliegue no vuelva a bajarse
-          #                         torch entero.
+          #   image prune -f   → solo imágenes SIN etiqueta y que ningún
+          #                      contenedor usa. No toca las de nadie.
+          #   builder prune    → acota la caché de construcción a 10 GB. La
+          #                      primera vez que corrió esto había 33 GB
+          #                      acumulados de todos los proyectos.
+          #
+          # Se acota en vez de vaciarla porque es la que hace que el siguiente
+          # despliegue no vuelva a bajarse torch entero: sin caché, construir
+          # la imagen del backend son ~40 minutos; con ella, un par.
+          #
+          # --keep-storage se llama --reserved-space en las versiones nuevas de
+          # Docker; si ninguna de las dos existe, se limpia por antigüedad. Y
+          # pase lo que pase no corta el despliegue: los contenedores ya están
+          # arriba, y quedarse sin limpiar la caché no es motivo para dar por
+          # fallado un despliegue que funcionó.
           docker image prune -f
-          docker builder prune -f --filter until=48h
+          docker builder prune -f --keep-storage 10GB 2>/dev/null \
+            || docker builder prune -f --reserved-space 10GB 2>/dev/null \
+            || docker builder prune -f --filter until=168h 2>/dev/null \
+            || echo "AVISO: no se pudo acotar la caché de construcción"
           echo "--- espacio de docker tras limpiar ---"
           docker system df
           df -h "$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || echo /var/lib/docker)"
