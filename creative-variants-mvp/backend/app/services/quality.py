@@ -9,6 +9,7 @@ import numpy as np
 from PIL import Image
 
 from ..models import LayerCategory, LayerType, Project, QualityReport
+from . import product_scale
 from .imaging import contrast_ratio, hex_to_rgb
 from .layout_engine import SAFE_MARGIN, Placement, VariantPlan, overlap_ratio
 
@@ -340,6 +341,26 @@ def evaluate_variant(
     elif filled > high:
         penalties += 6
         warnings.append("La composición está saturada: falta aire entre elementos.")
+
+    # 11. Proporciones entre productos ------------------------------------
+    # Un combo con el cilindro de gas más alto que la cocina es una pieza que no
+    # se puede publicar, y hasta aquí sacaba 98/100 porque ninguna regla miraba el
+    # tamaño de un producto en relación con el de al lado. Solo se juzgan las
+    # parejas cuyo tamaño real se conoce: sobre lo demás, callar.
+    scale_conflicts = product_scale.proportion_conflicts(
+        [
+            (p.layer.name, product_scale.measure_layer(p.layer), p.height)
+            for p in products
+        ]
+    )
+    metrics["product_scale_conflicts"] = float(len(scale_conflicts))
+    if scale_conflicts:
+        # Al frente: la lista se recorta a diez y este es el aviso por el que se
+        # descarta una pieza, no uno más.
+        warnings[:0] = scale_conflicts
+        # La primera pesa lo que pesa un defecto que invalida la pieza; las demás
+        # son el mismo problema visto desde otra pareja y no deben contarse enteras.
+        penalties += 22 + 8 * (len(scale_conflicts) - 1)
 
     for warning in extra_warnings or []:
         if warning not in warnings:

@@ -19,6 +19,7 @@ from typing import Any, Iterable
 from ..models import Layer, LayerCategory, LayerType, Project
 from ..models.formats import format_safe_area
 from ..models.schemas import SUPPORTED_FORMATS
+from . import product_scale
 from .imaging import fit_contain
 
 Zone = tuple[float, float, float, float]
@@ -533,6 +534,78 @@ def _split_zone(
     return [(x, y + i * (slot_h_v + gap), w, slot_h_v) for i in range(count)]
 
 
+def _harmonise_product_scale(
+    entries: list[tuple[Placement, Zone]],
+) -> list[str]:
+    """Pone a escala entre sí los productos de un combo.
+
+    Repartir la zona en casillas iguales y ajustar cada recorte a la suya deja el
+    tamaño en manos de la proporción de cada foto: el producto más estrecho llena
+    el alto de su casilla y el más ancho se queda corto. Así salía un cilindro de
+    gas más alto que la cocina, que es lo que hace que la pieza no sirva.
+
+    Aquí se decide el alto de cada uno con una sola regla para todo el grupo:
+    su tamaño real (`product_scale`) y, cuando no se reconoce el producto, altos
+    iguales. Solo se reduce, nunca se agranda, así que ninguna pieza se sale de
+    la casilla que ya tenía y no aparecen solapes nuevos.
+    """
+    if len(entries) < 2:
+        return []
+
+    measurements = [product_scale.measure_layer(p.layer) for p, _ in entries]
+    ratios, from_real = product_scale.relative_heights(measurements)
+
+    # El alto común más grande que respeta las casillas de todos: cada producto
+    # se queda como está o baja, nunca sube.
+    unit = min(
+        placement.height / ratio
+        for (placement, _), ratio in zip(entries, ratios)
+        if ratio > 0
+    )
+    # Los productos se apoyan en el mismo suelo cuando van uno al lado del otro;
+    # centrarlos verticalmente los dejaría flotando a distintas alturas.
+    same_row = len({round(slot[1], 4) for _, slot in entries}) == 1
+    floor = max(placement.y + placement.height for placement, _ in entries)
+
+    changed = False
+    for (placement, _), ratio in zip(entries, ratios):
+        aspect = placement.width / max(1, placement.height)
+        new_h = max(8, int(round(ratio * unit)))
+        new_w = max(8, int(round(new_h * aspect)))
+        before = placement.box
+        placement.x += (placement.width - new_w) // 2
+        # El suelo se aplica también al que no cambia de tamaño: si no, el grande
+        # se queda en su sitio y solo el pequeño baja, que es el defecto de antes
+        # visto al revés.
+        if same_row:
+            placement.y = floor - new_h
+        else:
+            placement.y += (placement.height - new_h) // 2
+        placement.width = new_w
+        placement.height = new_h
+        changed = changed or placement.box != before
+
+    if not changed:
+        return []
+    if not from_real:
+        return [
+            "Sin datos del tamaño de los productos: se igualan los altos. Nombre "
+            "los archivos con el producto (cocina, cilindro, televisor…) y se "
+            "escalan por su medida real."
+        ]
+    familias = ", ".join(
+        item.family for item in measurements if item is not None
+    )
+    notes = [f"Productos escalados por su tamaño real ({familias})."]
+    smallest = min(ratios)
+    if smallest <= product_scale.MIN_RELATIVE_HEIGHT + 1e-6:
+        notes.append(
+            "El producto más pequeño se subió al mínimo legible: a escala exacta "
+            "quedaría casi invisible."
+        )
+    return notes
+
+
 def _clamp_box(
     x: int, y: int, w: int, h: int, canvas_w: int, canvas_h: int, margin: int
 ) -> tuple[int, int, int, int]:
@@ -924,6 +997,9 @@ def build_placements(
                 ),
             )
 
+        # Las piezas de un combo se colocan una a una, pero su tamaño solo tiene
+        # sentido comparado con el de las demás: se reúnen para ajustarlas juntas.
+        group_entries: list[tuple[Placement, Zone]] = []
         for layer, slot in zip(group, slots):
             if relative is not None:
                 x, y, width, height, stretch = _pinned_box(
@@ -1029,21 +1105,24 @@ def build_placements(
             x, y, width, height = _clamp_box(
                 x, y, width, height, canvas_w, canvas_h, box_margin
             )
-            placements.append(
-                Placement(
-                    layer=layer,
-                    x=x,
-                    y=y,
-                    width=width,
-                    height=height,
-                    z_index=layer.z_index,
-                    align=align,
-                    valign=valign,
-                    pinned=relative is not None or learned_zone is not None,
-                    font_size=font_size,
-                    color=layer.color,
-                )
+            placement = Placement(
+                layer=layer,
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                z_index=layer.z_index,
+                align=align,
+                valign=valign,
+                pinned=relative is not None or learned_zone is not None,
+                font_size=font_size,
+                color=layer.color,
             )
+            placements.append(placement)
+            if category == LayerCategory.PRODUCT:
+                group_entries.append((placement, slot))
+
+        notes.extend(_harmonise_product_scale(group_entries))
 
     # ------------------------------------------------- reordenamiento de capas
     if preset["allow_reorder"]:

@@ -1324,6 +1324,11 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 }
 .field small { color: var(--fg-muted); font-size: var(--fs-2xs); }
 
+/* Nota corta al lado de una fila de botones. Se usa para decir qué se está
+   dejando fuera: un filtro que esconde piezas sin avisar parece una generación
+   que produjo menos de lo que produjo. */
+.hint { color: var(--fg-muted); font-size: var(--fs-xs); }
+
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .form-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 

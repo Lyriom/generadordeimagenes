@@ -210,6 +210,8 @@ interface State {
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
+  /** Qué propuestas se pintan. "clean" deja solo las que no traen avisos. */
+  resultFilter: "all" | "clean";
   /** Copy y logos de cada KV, tal como los devuelve GET /texts. */
   texts: Record<string, ArtTexts>;
   /** KV sobre el que se definieron los textos por producto. */
@@ -244,6 +246,7 @@ const state: State = {
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
+  resultFilter: "all",
   texts: {},
   copyDrafts: {},
   copySource: null,
@@ -3249,23 +3252,40 @@ async function renderResults(): Promise<void> {
   const ordenar = (list: Variant[]) => [...list].sort(state.resultOrder === "score"
     ? (a, b) => (b.quality?.score || 0) - (a.quality?.score || 0)
     : (a, b) => a.index - b.index);
+  // El filtro trabaja sobre los avisos, no sobre el puntaje: un aviso dice qué
+  // está mal y por qué, y un número no. "Sin avisos" es lo que se puede publicar
+  // sin volver a mirarlo.
+  const pasaFiltro = (variant: Variant) =>
+    state.resultFilter === "all" || !(variant.quality?.warnings || []).length;
+  const mostrar = (list: Variant[]) => ordenar(list).filter(pasaFiltro);
+  const shown = projects.reduce((sum, project) => sum + mostrar(project.variants).length, 0);
+  const hidden = total - shown;
   // El recorrido del visor se fija aquí, con el mismo orden con el que se
   // pintan las tarjetas: las flechas siguen lo que el usuario está viendo.
   viewerItems = projects
     .filter((project) => project.variants.length)
     .flatMap((project) =>
-      ordenar(project.variants).map((variant) => ({
+      mostrar(project.variants).map((variant) => ({
         projectId: project.project_id,
         projectName: project.name,
         variantId: variant.id,
       })),
     );
-  const sections = projects.filter((project) => project.variants.length).map((project) => {
-    const variants = ordenar(project.variants);
+  const sections = projects.filter((project) => mostrar(project.variants).length).map((project) => {
+    const variants = mostrar(project.variants);
     const picked = variants.filter((variant) => state.selectedVariants.has(resultKey(project.project_id, variant.id))).map((variant) => variant.id);
+    // El ZIP tiene que traer lo que se está viendo. Sin esto, "Descargar todas"
+    // con el filtro puesto metía en el paquete justo las que el filtro escondió.
+    const bajar = picked.length ? picked : variants.map((variant) => variant.id);
+    const etiqueta = picked.length
+      ? String(picked.length) + " elegidas"
+      : state.resultFilter === "clean" ? "las " + String(variants.length) + " sin avisos" : "todas";
+    const cuenta = project.variants.length === variants.length
+      ? String(variants.length) + " propuestas"
+      : String(variants.length) + " de " + String(project.variants.length) + " propuestas";
     return [
-      '<section style="margin-top:28px"><div class="card-head"><div><h2>', esc(project.name), '</h2><p>', String(variants.length), ' propuestas</p></div>',
-      '<button class="button export-project" data-project="', attr(project.project_id), '" data-ids="', attr(picked.join(",")), '">Descargar ', picked.length ? String(picked.length) + " elegidas" : "todas", " · ZIP</button></div>",
+      '<section style="margin-top:28px"><div class="card-head"><div><h2>', esc(project.name), '</h2><p>', cuenta, '</p></div>',
+      '<button class="button export-project" data-project="', attr(project.project_id), '" data-ids="', attr(bajar.join(",")), '">Descargar ', etiqueta, " · ZIP</button></div>",
       '<div class="result-grid">', variants.map((variant) => resultCard(project, variant)).join(""), "</div></section>",
     ].join("");
   }).join("");
@@ -3277,7 +3297,13 @@ async function renderResults(): Promise<void> {
     String(Math.round(Math.max(...allScores))), '</strong><span>Mejor puntaje</span></div><div class="stat"><strong id="selected-count">', String(selectedCount), '</strong><span>Elegidas</span></div></div>',
     '<div class="button-row" style="margin-top:18px"><span class="label">Orden:</span><button class="platform-filter result-order', state.resultOrder === "score" ? " is-active" : "", '" data-order="score">Mejores primero</button>',
     '<button class="platform-filter result-order', state.resultOrder === "generation" ? " is-active" : "", '" data-order="generation">Orden de generación</button><button class="ghost-button right" id="refresh-results">↻ Actualizar</button></div>',
-    sections,
+    '<div class="button-row" style="margin-top:10px"><span class="label">Mostrar:</span><button class="platform-filter result-filter', state.resultFilter === "all" ? " is-active" : "", '" data-filter="all">Todas</button>',
+    '<button class="platform-filter result-filter', state.resultFilter === "clean" ? " is-active" : "", '" data-filter="clean">Sin avisos</button>',
+    // Nunca se esconde nada en silencio: si el filtro se come propuestas, se dice
+    // cuántas, porque si no parece que la generación produjo menos de lo que produjo.
+    hidden ? '<span class="hint">' + String(hidden) + (hidden === 1 ? " propuesta oculta por traer avisos" : " propuestas ocultas por traer avisos") + "</span>" : "",
+    "</div>",
+    shown ? sections : emptyState("✓", "Ninguna propuesta está limpia", "Las " + String(total) + " tienen algún aviso. Mira el detalle de cada tarjeta en «Todas» para saber qué corregir.", '<button class="button" id="show-all-results">Ver todas</button>'),
   ].join("");
   bindStepBar();
   bindResults();
@@ -3402,6 +3428,16 @@ function bindResults(): void {
       state.resultOrder = button.dataset.order as State["resultOrder"];
       await renderResults();
     });
+  });
+  queryAll<HTMLButtonElement>(".result-filter").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.resultFilter = button.dataset.filter as State["resultFilter"];
+      await renderResults();
+    });
+  });
+  query("#show-all-results")?.addEventListener("click", async () => {
+    state.resultFilter = "all";
+    await renderResults();
   });
   query("#refresh-results")?.addEventListener("click", () => renderResults());
   queryAll<HTMLButtonElement>(".export-project").forEach((button) => {
