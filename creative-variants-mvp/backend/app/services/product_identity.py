@@ -40,8 +40,25 @@ SOURCE_LABELS = {
 }
 
 
+#: Lo reconocido por recorte, con la huella del PNG como clave. Un lote pone el
+#: mismo producto en todos los KV de la campaña: sin esto se preguntaba una vez
+#: por cada KV, y con veinte productos y tres KV son sesenta consultas para
+#: veinte imágenes distintas. Vive en memoria del proceso a propósito: es una
+#: caché, no un dato, y perderla al reiniciar no rompe nada.
+_CACHE: dict[str, dict] = {}
+_CACHE_MAX = 512
+
+
 def _provider() -> OpenAIVisionProvider:
     return OpenAIVisionProvider()
+
+
+def _recordar(clave: str | None, record: dict) -> None:
+    if not clave:
+        return
+    if len(_CACHE) >= _CACHE_MAX:
+        _CACHE.clear()
+    _CACHE[clave] = record
 
 
 def _anotar(diagnostics: list[str] | None, mensaje: str) -> None:
@@ -88,6 +105,7 @@ def identify(
     *,
     use_vision: bool = True,
     diagnostics: list[str] | None = None,
+    cache_key: str | None = None,
 ) -> dict | None:
     """Reconoce el producto de `layer` y deja el resultado en `layer.meta`.
 
@@ -100,6 +118,12 @@ def identify(
     dos en un solo aviso deja al usuario sin saber cuál de las dos le pasó.
     """
     meta = layer.meta
+    clave = cache_key or meta.get("asset_fingerprint")
+    guardado = _CACHE.get(clave) if clave else None
+    if guardado is not None:
+        meta["product_size"] = dict(guardado)
+        return meta["product_size"]
+
     nombre_archivo = meta.get("replaced_from")
     texto_arte = artwork_text(project)
     hints = [nombre_archivo, getattr(layer, "name", None), meta.get("psd_name"), texto_arte]
@@ -147,6 +171,7 @@ def identify(
         "source_label": SOURCE_LABELS.get(source, source),
     }
     meta["product_size"] = record
+    _recordar(clave, record)
     logger.info(
         "producto identificado en %s: capa %s -> %s (%s cm, %s)",
         project.project_id,

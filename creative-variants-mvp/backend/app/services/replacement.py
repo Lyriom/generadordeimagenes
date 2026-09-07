@@ -212,6 +212,10 @@ def replace_layer_image(
 
     layer.meta.setdefault("original_src", layer.src)
     layer.meta["replaced_from"] = source.name[:120]
+    # La huella identifica al recorte, no a la capa. Un lote pone el mismo
+    # producto en varios KV: reconocerlo una vez y reutilizarlo es la diferencia
+    # entre una consulta y una por cada KV.
+    layer.meta["asset_fingerprint"] = fingerprint
     for key in ("product_group_id", "product_group_name", "product_arrangement"):
         layer.meta.pop(key, None)
     if group_id:
@@ -264,6 +268,9 @@ def append_product_image(
 ) -> tuple[Layer, list[str]]:
     """Añade otro recorte como capa de producto independiente para una pieza grupal."""
     incoming, warnings = _trim_to_content(load_rgba(source))
+    digest = hashlib.sha256(f"{incoming.width}x{incoming.height}:".encode("ascii"))
+    digest.update(incoming.tobytes())
+    fingerprint = digest.hexdigest()[:12]
     box = anchor.meta.get("replacement_box") or [
         anchor.x, anchor.y, anchor.width, anchor.height
     ]
@@ -293,6 +300,7 @@ def append_product_image(
         {
             "external": True,
             "replaced_from": source.name[:120],
+            "asset_fingerprint": fingerprint,
             "replacement_box": [box_x, box_y, box_w, box_h],
         }
     )

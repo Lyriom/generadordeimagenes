@@ -260,3 +260,45 @@ def test_dice_cuando_esta_apagado(monkeypatch, tmp_path):
     motivos: list[str] = []
     product_identity.identify(_project(layer), layer, _foto(tmp_path), diagnostics=motivos)
     assert any("apagado o sin clave" in m for m in motivos)
+
+
+def test_el_mismo_recorte_se_reconoce_una_sola_vez(monkeypatch, tmp_path):
+    """Un lote pone el mismo producto en todos los KV. Sin caché, una consulta por KV."""
+    consultas: list[int] = []
+    real = OpenAIVisionProvider.identify
+
+    def contando(self, image_path, options):
+        consultas.append(1)
+        return real(self, image_path, options)
+
+    monkeypatch.setattr(OpenAIVisionProvider, "identify", contando)
+    monkeypatch.setattr(settings, "openai_api_key", "clave")
+    _responde(monkeypatch, "cocina")
+    product_identity._CACHE.clear()
+
+    foto = _foto(tmp_path)
+    for _ in range(4):  # el mismo recorte, cuatro KV distintos
+        layer = _producto("Producto", "producto1.png")
+        layer.meta["asset_fingerprint"] = "abc123"
+        record = product_identity.identify(_project(layer), layer, foto)
+        assert record is not None and record["family_key"] == "cocina"
+    assert len(consultas) == 1
+
+
+def test_recortes_distintos_se_reconocen_por_separado(monkeypatch, tmp_path):
+    consultas: list[int] = []
+    real = OpenAIVisionProvider.identify
+    monkeypatch.setattr(
+        OpenAIVisionProvider,
+        "identify",
+        lambda self, p, o: (consultas.append(1), real(self, p, o))[1],
+    )
+    monkeypatch.setattr(settings, "openai_api_key", "clave")
+    _responde(monkeypatch, "cocina")
+    product_identity._CACHE.clear()
+
+    for huella in ("uno", "dos", "tres"):
+        layer = _producto("Producto", "producto.png")
+        layer.meta["asset_fingerprint"] = huella
+        product_identity.identify(_project(layer), layer, _foto(tmp_path))
+    assert len(consultas) == 3

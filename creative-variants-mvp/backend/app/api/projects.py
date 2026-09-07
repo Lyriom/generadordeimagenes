@@ -1144,22 +1144,29 @@ async def replace_product(
         # Reconocer qué producto es, aquí y no al generar: es una consulta de red
         # y la generación tiene que seguir siendo local y determinista. Va en un
         # hilo aparte porque este endpoint es async y bloquearlo pararía al resto.
-        motivos: list[str] = []
-        record = await run_in_threadpool(
-            partial(
-                product_identity.identify,
-                project,
-                layer,
-                storage.abs_path(project.project_id, layer.src) if layer.src else None,
-                diagnostics=motivos,
+        # Solo en un combo. El tamaño real de un producto sirve para decidir cuál
+        # va más grande que cuál, así que con un producto solo no hay nada que
+        # decidir: preguntarlo era gastar una consulta y unos segundos por cada
+        # KV del lote para no usar la respuesta, y encima soltar un aviso por
+        # cada uno. Lo reconocido se cachea por la huella del recorte, de modo
+        # que el mismo producto en cinco KV se pregunta una vez.
+        if group_id:
+            motivos: list[str] = []
+            record = await run_in_threadpool(
+                partial(
+                    product_identity.identify,
+                    project,
+                    layer,
+                    storage.abs_path(project.project_id, layer.src) if layer.src else None,
+                    diagnostics=motivos,
+                )
             )
-        )
-        if record is None:
-            detalle = f" ({'; '.join(motivos)})" if motivos else ""
-            warnings.append(
-                "No se reconoció qué producto es, así que en un combo se igualan "
-                f"los altos en vez de escalarlos por su tamaño real{detalle}."
-            )
+            if record is None:
+                detalle = f" ({'; '.join(motivos)})" if motivos else ""
+                warnings.append(
+                    "No se reconoció qué producto es, así que en el combo se igualan "
+                    f"los altos en vez de escalarlos por su tamaño real{detalle}."
+                )
         storage.save_project(project)
     except Exception as exc:  # noqa: BLE001
         raise as_http_error(exc) from exc

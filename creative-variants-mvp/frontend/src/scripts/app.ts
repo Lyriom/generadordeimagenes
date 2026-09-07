@@ -2998,6 +2998,35 @@ async function replaceProduct(projectId: string, targetId: string, file: File, o
   return post("/projects/" + projectId + "/layers/replace", data);
 }
 
+/** Avisos de una tanda, sin repetirlos.
+ *
+ * Una campaña recorre KV x producto: con tres KV y veinte productos, un aviso
+ * que sale en cada reemplazo aparece sesenta veces. Sesenta tostadas iguales no
+ * informan de nada y tapan la pantalla mientras se genera. Se dice una vez, y al
+ * final cuántas veces pasó. */
+function avisadorDeTanda(): { avisar: (mensajes: string[] | undefined) => void; resumen: () => void } {
+  const vistos = new Map<string, number>();
+  return {
+    avisar(mensajes) {
+      (mensajes || []).forEach((mensaje) => {
+        const veces = (vistos.get(mensaje) || 0) + 1;
+        vistos.set(mensaje, veces);
+        if (veces === 1) toast(mensaje, "info");
+      });
+    },
+    resumen() {
+      const repetidos = [...vistos.entries()].filter(([, veces]) => veces > 1);
+      if (repetidos.length) {
+        const total = repetidos.reduce((suma, [, veces]) => suma + veces, 0);
+        toast(
+          "Se repitieron " + String(total) + " avisos en la tanda; están en el detalle de cada propuesta.",
+          "info",
+        );
+      }
+    },
+  };
+}
+
 async function runCatalogGeneration(): Promise<void> {
   const individuals = selectedProductFiles();
   const validGroups = state.groups.map((group) => ({
@@ -3028,6 +3057,7 @@ async function runCatalogGeneration(): Promise<void> {
   const settings = generationSettings();
   const total = targets.length * (individuals.length + validGroups.length);
   let completed = 0;
+  const avisos = avisadorDeTanda();
   busy("Produciendo campaña", "Preparando " + String(total) + " tandas…", 3);
   try {
     for (let kvIndex = 0; kvIndex < targets.length; kvIndex += 1) {
@@ -3040,7 +3070,7 @@ async function runCatalogGeneration(): Promise<void> {
         const replaced = await replaceProduct(project.project_id, target.id, file, {
           hide_others: true, append: false, arrangement: "auto",
         });
-        (replaced.warnings || []).forEach((warning: string) => toast(warning, "info"));
+        avisos.avisar(replaced.warnings);
         const task = await post<any>("/projects/" + project.project_id + "/auto", {
           ...settings,
           seed: settings.seed + kvIndex * 100 + index,
@@ -3055,7 +3085,7 @@ async function runCatalogGeneration(): Promise<void> {
           const batchProgress = (completed + progress / 100) / Math.max(1, total) * 100;
           busyProgress(batchProgress, project.name + " · " + detail);
         });
-        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+        avisos.avisar(result.warnings);
         firstBatch = false;
         completed += 1;
       }
@@ -3070,7 +3100,7 @@ async function runCatalogGeneration(): Promise<void> {
             group_name: group.name,
             arrangement: group.arrangement,
           });
-          (replaced.warnings || []).forEach((warning: string) => toast(warning, "info"));
+          avisos.avisar(replaced.warnings);
         }
         const label = group.files.map(productName).join(" + ");
         const task = await post<any>("/projects/" + project.project_id + "/auto", {
@@ -3087,7 +3117,7 @@ async function runCatalogGeneration(): Promise<void> {
           const batchProgress = (completed + progress / 100) / Math.max(1, total) * 100;
           busyProgress(batchProgress, project.name + " · " + detail);
         });
-        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+        avisos.avisar(result.warnings);
         firstBatch = false;
         completed += 1;
       }
@@ -3095,6 +3125,7 @@ async function runCatalogGeneration(): Promise<void> {
       await loadTexts(project.project_id, true);
     }
     state.selectedVariants.clear();
+    avisos.resumen();
     toast("Campaña generada correctamente.", "success");
     await navigate("results");
   } catch (error) {
