@@ -1510,6 +1510,21 @@ def _coverage(source: tuple[int, int], target: tuple[int, int]) -> float:
     return (source_w * scale) * (source_h * scale) / (target_w * target_h)
 
 
+def formats_needing_recompose(project: Project, formats: list[str]) -> list[str]:
+    """Formatos que este arte solo puede llenar si antes se separa en capas.
+
+    Sirve para decidir si merece la pena separar: si todo lo que se pide encaja
+    con la proporción de origen, no hay nada que ganar analizando el arte.
+    """
+    source = (project.canvas.width, project.canvas.height)
+    return [
+        fmt
+        for fmt in formats
+        if fmt in SUPPORTED_FORMATS
+        and _coverage(source, SUPPORTED_FORMATS[fmt]) < MIN_SOURCE_COVERAGE
+    ]
+
+
 def viable_formats(
     project: Project, formats: list[str], layer_count: int
 ) -> tuple[list[str], list[str]]:

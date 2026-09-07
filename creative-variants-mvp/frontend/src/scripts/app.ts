@@ -2383,18 +2383,29 @@ function capasUtiles(project: Project): number {
   ).length;
 }
 
-/** Cobertura del peor KV cargado en este formato, o null si todos pueden con él.
+/** Cuánto del formato llena el KV tal como está: 1 = lo llena entero.
  *
- * Marcarlo aquí y no al terminar de generar es la diferencia entre elegir bien y
- * enterarte después de veinte minutos: un banner de 1920x325 en un 1080x1350 sale
- * como el banner encogido sobre un relleno de color, y eso no se puede publicar. */
-function formatoImposible(spec: FormatPreset): number | null {
-  const planos = state.campaign.filter((project) => capasUtiles(project) < MIN_LAYERS_TO_RECOMPOSE);
-  if (!planos.length || planos.length < state.campaign.length) return null;
-  const coberturas = planos.map((project) =>
-    coberturaEnFormato(project.canvas.width, project.canvas.height, spec.width, spec.height));
-  const peor = Math.max(...coberturas);
-  return peor < MIN_SOURCE_COVERAGE ? peor : null;
+ * Es la lectura del formato de origen que decide qué recomendar. Se toma el peor
+ * KV de la campaña, porque lo que se elige aquí se aplica a todos. */
+function coberturaDelKv(spec: FormatPreset): number {
+  if (!state.campaign.length) return 1;
+  return Math.min(...state.campaign.map((project) =>
+    coberturaEnFormato(project.canvas.width, project.canvas.height, spec.width, spec.height)));
+}
+
+/** Encaja con la proporción del arte: sale sin tocar nada. */
+function formatoRecomendado(spec: FormatPreset): boolean {
+  return coberturaDelKv(spec) >= MIN_SOURCE_COVERAGE;
+}
+
+/** Hay que separar el arte en capas antes de poder llenar este formato.
+ *
+ * No es un "no se puede": el motor sabe separar el copy con OCR y los objetos
+ * con SAM, y recomponer con las piezas sueltas. Solo es un aviso de que va a
+ * hacerlo, porque tarda más y el resultado ya no es el arte original intacto. */
+function necesitaSeparar(spec: FormatPreset): boolean {
+  if (formatoRecomendado(spec)) return false;
+  return state.campaign.some((project) => capasUtiles(project) < MIN_LAYERS_TO_RECOMPOSE);
 }
 
 function formatCard(spec: FormatPreset): string {
@@ -2412,29 +2423,31 @@ function formatCard(spec: FormatPreset): string {
     "--safe-r:" + String(Number(safe.right || 0) * 100) + "%",
     "--safe-b:" + String(Number(safe.bottom || 0) * 100) + "%",
   ].join(";");
-  const imposible = formatoImposible(spec);
+  const encaja = formatoRecomendado(spec);
+  const separa = necesitaSeparar(spec);
+  const nota = encaja
+    ? "Encaja con tu KV"
+    : separa
+      ? "Se separará el arte · llena el " + String(Math.round(coberturaDelKv(spec) * 100)) + "%"
+      : esc(spec.platform) + (spec.recommended ? " · recomendado" : "");
   return [
-    '<label class="format-card', imposible !== null ? " is-impossible" : "", '"><input class="format-check" type="checkbox" value="', attr(spec.id), '"',
-    checked(state.selectedFormats.has(spec.id)), imposible !== null ? " disabled" : "", '><span class="format-shape" style="', attr(style), '"><i class="safe-zone"></i></span>',
+    '<label class="format-card', encaja ? " is-fit" : separa ? " needs-split" : "", '"><input class="format-check" type="checkbox" value="', attr(spec.id), '"',
+    checked(state.selectedFormats.has(spec.id)), '><span class="format-shape" style="', attr(style), '"><i class="safe-zone"></i></span>',
     '<span class="format-copy"><strong>', esc(spec.placement), '</strong><span>', String(spec.width), "×", String(spec.height), " · ", esc(spec.ratio),
-    '</span><span>', imposible !== null
-      ? "Tu KV solo cubriría el " + String(Math.round(imposible * 100)) + "%"
-      : esc(spec.platform) + (spec.recommended ? " · recomendado" : ""),
-    "</span></span></label>",
+    '</span><span class="format-note">', nota, "</span></span></label>",
   ].join("");
 }
 
 function formatSelectorHtml(allowAuto: boolean): string {
   const catalog = state.capabilities?.format_catalog || [];
-  // Un formato que este KV no puede llenar tampoco puede quedarse marcado de
-  // antes: si no, el contador dice que hay seis elegidos y salen tres.
-  catalog.forEach((spec) => {
-    if (formatoImposible(spec) !== null) state.selectedFormats.delete(spec.id);
-  });
   const platforms = ["Todos", ...Array.from(new Set(catalog.map((item) => item.platform)))];
-  const visible = state.formatPlatform === "Todos"
+  const filtrados = state.formatPlatform === "Todos"
     ? catalog
     : catalog.filter((item) => item.platform === state.formatPlatform);
+  // Recomendar es ordenar: primero los que salen del KV tal como está, después
+  // los que obligan a separarlo. Leer la proporción del arte y no hacer nada con
+  // ella era dejarle el trabajo al usuario.
+  const visible = [...filtrados].sort((a, b) => Number(formatoRecomendado(b)) - Number(formatoRecomendado(a)));
   const filters = platforms.map((platform) =>
     '<button type="button" class="platform-filter' + (platform === state.formatPlatform ? " is-active" : "") +
     '" data-platform="' + attr(platform) + '">' + esc(platform) + "</button>"
@@ -2446,8 +2459,8 @@ function formatSelectorHtml(allowAuto: boolean): string {
     '<div id="manual-formats"', allowAuto && state.autoFormats ? " hidden" : "", '><div class="format-platforms">', filters, '</div><div class="format-grid">',
     visible.map(formatCard).join(""), "</div></div>",
     '<p class="muted tiny" style="margin:14px 0 0">Las líneas blancas marcan dónde deben quedar logo, producto, copy y legales.</p>',
-    catalog.some((spec) => formatoImposible(spec) !== null)
-      ? '<p class="notice warning" style="margin:12px 0 0">Los formatos apagados no se pueden sacar de este KV: llegó plano, sin capas que recomponer, y en esa proporción saldría la imagen encogida sobre un relleno de color. Sube el PSD con sus capas y se activan todos.</p>'
+    catalog.some(necesitaSeparar)
+      ? '<p class="notice" style="margin:12px 0 0">Los formatos marcados <strong>no encajan con la proporción de tu KV</strong>, así que para llenarlos el motor separará el arte en capas —copy con OCR, objetos recortados, fondo reconstruido— y lo recompondrá. Tarda más y el resultado ya no es el arte original intacto: si prefieres fidelidad, quédate con los de arriba.</p>'
       : "",
     "</section>",
   ].join("");

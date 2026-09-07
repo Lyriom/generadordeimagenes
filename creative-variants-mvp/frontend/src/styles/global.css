@@ -2211,11 +2211,11 @@ details .inventory { margin-top: 14px; }
   .button-row > .button.large { width: 100%; }
 }
 
-/* Formato que el KV cargado no puede llenar. Se apaga y se dice cuánto cubriría:
-   un porcentaje convence donde un "no se puede" suena a capricho. */
-.format-card.is-impossible {
-  opacity: 0.45;
-  cursor: not-allowed;
-  border-style: dashed;
-}
-.format-card.is-impossible .format-copy span:last-child { color: var(--warning); }
+/* Lectura del formato de origen, dicha en la propia tarjeta: el que encaja con
+   el KV se recomienda, y el que no dice que habrá que separar el arte y cuánto
+   llena tal cual. Ninguno se bloquea: el motor sabe separar, y prohibirlo era
+   quitarle al usuario una opción que sí existe. */
+.format-card.is-fit { border-color: color-mix(in srgb, var(--success) 55%, var(--line)); }
+.format-card.is-fit .format-note { color: var(--success); font-weight: 650; }
+.format-card.needs-split { border-style: dashed; }
+.format-card.needs-split .format-note { color: var(--warning); }

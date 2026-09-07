@@ -609,3 +609,30 @@ def test_con_capas_de_verdad_cualquier_proporcion_sigue_valiendo():
     project.layers = _layers()
     plans, _ = plan_variants(project, _Peticion(["1080x1350", "1080x1080"]))
     assert {plan.format for plan in plans} == {"1080x1350", "1080x1080"}
+
+
+def test_dice_que_formatos_obligan_a_separar_el_arte():
+    """Leer la proporción del arte es lo que decide si hay que separarlo."""
+    from app.services.layout_engine import formats_needing_recompose
+
+    banner = _banner_project()
+    piden = ["1080x1350", "1080x1080", "google_display_728x90"]
+    assert formats_needing_recompose(banner, piden) == ["1080x1350", "1080x1080"]
+
+    cuadrado = _banner_project(1080, 1080)
+    assert formats_needing_recompose(cuadrado, ["1080x1080", "1080x1350"]) == []
+
+
+def test_separar_hace_falta_solo_cuando_no_hay_piezas():
+    from app.services import separation
+
+    project = _banner_project()
+    project.layers = [
+        Layer(id="p1", name="Producto", type=LayerType.IMAGE,
+              category=LayerCategory.PRODUCT, src="layers/p.png",
+              x=0, y=0, width=100, height=100, z_index=3),
+    ]
+    assert separation.needs_separation(project) is True
+
+    project.layers = _layers()
+    assert separation.needs_separation(project) is False

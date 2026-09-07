@@ -44,7 +44,35 @@ def generate_variants_task(self, project_id: str, generation_request_dict: Dict[
     )
 
     project = storage.load_project(project_id)
-    variants, warnings = generate_variants(project, request)
+    warnings: list[str] = []
+
+    # Un arte plano solo se puede colocar entero, así que en una proporción
+    # distinta a la suya sale encogido sobre un relleno de color. Antes de dar
+    # eso por imposible se intenta lo que el motor sabe hacer: separarlo en
+    # capas (copy con OCR, objetos con SAM, fondo reconstruido) para poder
+    # recomponerlo de verdad. Solo se hace si hace falta para lo que se pidió.
+    from app.services import layout_engine, separation
+
+    pedidos = list(getattr(request, "formats", None) or [])
+    if pedidos and separation.needs_separation(project):
+        if layout_engine.formats_needing_recompose(project, pedidos):
+            self.update_state(
+                state="PROGRESS",
+                meta={
+                    "progress": 8,
+                    "status": "Separando el arte en capas para poder recomponerlo…",
+                },
+            )
+            piezas, separation_warnings = separation.separate(project)
+            warnings.extend(separation_warnings)
+            storage.save_project(project)
+            warnings.append(
+                f"El arte llegó plano y los formatos pedidos necesitan recomponerlo: "
+                f"se separó en {piezas} elemento(s) antes de generar."
+            )
+
+    variants, generate_warnings = generate_variants(project, request)
+    warnings.extend(generate_warnings)
     storage.save_project(project)
     return {
         "status": "COMPLETED",
