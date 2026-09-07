@@ -2365,6 +2365,38 @@ function selectedProductFiles(): File[] {
   return state.products.filter((file) => state.individualProducts.has(productKey(file)));
 }
 
+/* Un arte con menos capas que esto no se puede recomponer: no hay piezas que
+   mover, solo una imagen que colocar. Los mismos números que usa el motor. */
+const MIN_LAYERS_TO_RECOMPOSE = 3;
+const MIN_SOURCE_COVERAGE = 0.45;
+
+function coberturaEnFormato(sw: number, sh: number, tw: number, th: number): number {
+  if (Math.min(sw, sh, tw, th) <= 0) return 0;
+  const escala = Math.min(tw / sw, th / sh);
+  return (sw * escala * sh * escala) / (tw * th);
+}
+
+function capasUtiles(project: Project): number {
+  return project.layers.filter((layer) =>
+    layer.category !== "background" && layer.visible &&
+    (layer.type === "text" ? Boolean((layer.content || "").trim()) : Boolean(layer.src))
+  ).length;
+}
+
+/** Cobertura del peor KV cargado en este formato, o null si todos pueden con él.
+ *
+ * Marcarlo aquí y no al terminar de generar es la diferencia entre elegir bien y
+ * enterarte después de veinte minutos: un banner de 1920x325 en un 1080x1350 sale
+ * como el banner encogido sobre un relleno de color, y eso no se puede publicar. */
+function formatoImposible(spec: FormatPreset): number | null {
+  const planos = state.campaign.filter((project) => capasUtiles(project) < MIN_LAYERS_TO_RECOMPOSE);
+  if (!planos.length || planos.length < state.campaign.length) return null;
+  const coberturas = planos.map((project) =>
+    coberturaEnFormato(project.canvas.width, project.canvas.height, spec.width, spec.height));
+  const peor = Math.max(...coberturas);
+  return peor < MIN_SOURCE_COVERAGE ? peor : null;
+}
+
 function formatCard(spec: FormatPreset): string {
   const maxWidth = 46;
   const maxHeight = 64;
@@ -2380,16 +2412,25 @@ function formatCard(spec: FormatPreset): string {
     "--safe-r:" + String(Number(safe.right || 0) * 100) + "%",
     "--safe-b:" + String(Number(safe.bottom || 0) * 100) + "%",
   ].join(";");
+  const imposible = formatoImposible(spec);
   return [
-    '<label class="format-card"><input class="format-check" type="checkbox" value="', attr(spec.id), '"',
-    checked(state.selectedFormats.has(spec.id)), '><span class="format-shape" style="', attr(style), '"><i class="safe-zone"></i></span>',
+    '<label class="format-card', imposible !== null ? " is-impossible" : "", '"><input class="format-check" type="checkbox" value="', attr(spec.id), '"',
+    checked(state.selectedFormats.has(spec.id)), imposible !== null ? " disabled" : "", '><span class="format-shape" style="', attr(style), '"><i class="safe-zone"></i></span>',
     '<span class="format-copy"><strong>', esc(spec.placement), '</strong><span>', String(spec.width), "×", String(spec.height), " · ", esc(spec.ratio),
-    '</span><span>', esc(spec.platform), spec.recommended ? " · recomendado" : "", "</span></span></label>",
+    '</span><span>', imposible !== null
+      ? "Tu KV solo cubriría el " + String(Math.round(imposible * 100)) + "%"
+      : esc(spec.platform) + (spec.recommended ? " · recomendado" : ""),
+    "</span></span></label>",
   ].join("");
 }
 
 function formatSelectorHtml(allowAuto: boolean): string {
   const catalog = state.capabilities?.format_catalog || [];
+  // Un formato que este KV no puede llenar tampoco puede quedarse marcado de
+  // antes: si no, el contador dice que hay seis elegidos y salen tres.
+  catalog.forEach((spec) => {
+    if (formatoImposible(spec) !== null) state.selectedFormats.delete(spec.id);
+  });
   const platforms = ["Todos", ...Array.from(new Set(catalog.map((item) => item.platform)))];
   const visible = state.formatPlatform === "Todos"
     ? catalog
@@ -2404,7 +2445,11 @@ function formatSelectorHtml(allowAuto: boolean): string {
     allowAuto ? '<label class="choice" style="margin-bottom:14px"><input id="auto-formats" type="checkbox"' + checked(state.autoFormats) + '> Automático · original + formatos sociales</label>' : "",
     '<div id="manual-formats"', allowAuto && state.autoFormats ? " hidden" : "", '><div class="format-platforms">', filters, '</div><div class="format-grid">',
     visible.map(formatCard).join(""), "</div></div>",
-    '<p class="muted tiny" style="margin:14px 0 0">Las líneas blancas marcan dónde deben quedar logo, producto, copy y legales.</p></section>',
+    '<p class="muted tiny" style="margin:14px 0 0">Las líneas blancas marcan dónde deben quedar logo, producto, copy y legales.</p>',
+    catalog.some((spec) => formatoImposible(spec) !== null)
+      ? '<p class="notice warning" style="margin:12px 0 0">Los formatos apagados no se pueden sacar de este KV: llegó plano, sin capas que recomponer, y en esa proporción saldría la imagen encogida sobre un relleno de color. Sube el PSD con sus capas y se activan todos.</p>'
+      : "",
+    "</section>",
   ].join("");
 }
 

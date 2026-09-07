@@ -316,12 +316,14 @@ def _producto(nombre: str, x: int, y: int, w: int, h: int) -> Placement:
 
 def test_el_puntaje_castiga_la_proporcion_irreal():
     """Lo que fallaba de verdad: la pieza mala sacaba 98."""
+    # Los productos ocupan una parte razonable del lienzo: si son diminutos salta
+    # la regla de "pieza casi todo fondo" y tapa justo lo que aquí se mide.
     mala = evaluate_variant(
         _project(),
         _plan(
             [
-                _producto("cocina 20p.png", 200, 800, 280, 500),
-                _producto("cilindro de gas.png", 560, 780, 300, 520),
+                _producto("cocina 20p.png", 100, 620, 420, 750),
+                _producto("cilindro de gas.png", 580, 590, 450, 780),
             ]
         ),
     )
@@ -329,8 +331,8 @@ def test_el_puntaje_castiga_la_proporcion_irreal():
         _project(),
         _plan(
             [
-                _producto("cocina 20p.png", 200, 800, 280, 500),
-                _producto("cilindro de gas.png", 560, 978, 185, 322),
+                _producto("cocina 20p.png", 100, 620, 420, 750),
+                _producto("cilindro de gas.png", 580, 885, 280, 485),
             ]
         ),
     )
@@ -347,8 +349,8 @@ def test_el_aviso_de_proporcion_va_primero():
         _project(),
         _plan(
             [
-                _producto("cocina 20p.png", -40, 800, 280, 500),
-                _producto("cilindro de gas.png", 560, 780, 300, 520),
+                _producto("cocina 20p.png", -40, 620, 420, 750),
+                _producto("cilindro de gas.png", 580, 590, 450, 780),
             ]
         ),
     )

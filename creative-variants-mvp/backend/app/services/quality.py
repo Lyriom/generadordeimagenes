@@ -22,6 +22,9 @@ PRODUCT_COVERAGE_RANGE = (0.06, 0.68)
 FILL_RANGE = (0.16, 0.95)
 #: Un elemento que cubre este porcentaje del lienzo es escenografía.
 FULL_BLEED_RATIO = 0.92
+#: Por debajo de esta cobertura la pieza no es una composición, es un arte suelto
+#: sobre un relleno. Deja de ser un aviso menor y pasa a invalidarla.
+EMPTY_FILL = 0.12
 
 
 def _is_full_bleed(placement, canvas_w: int, canvas_h: int) -> bool:
@@ -79,6 +82,7 @@ BLOCKING_METRICS: dict[str, str] = {
     "severe_overlaps": "solapamientos graves",
     "outside_canvas": "elementos fuera del lienzo",
     "distorted_layers": "capas deformadas",
+    "empty_composition": "la pieza es casi todo fondo",
 }
 
 
@@ -353,8 +357,19 @@ def evaluate_variant(
     filled = _union_coverage(content, canvas_w, canvas_h)
     metrics["fill_ratio"] = round(filled, 4)
     low, high = FILL_RANGE
+    # Por debajo de esto no es "le falta aire": es un arte pequeño sobre un
+    # relleno de color, que es lo que salía al meter un banner en un formato
+    # vertical. No es una pieza a la que le falte un retoque.
+    metrics["empty_composition"] = float(bool(content) and filled < EMPTY_FILL)
     if not content:
         pass
+    elif filled < EMPTY_FILL:
+        penalties += 30
+        warnings.insert(
+            0,
+            f"La pieza es casi todo fondo: el contenido cubre el {filled * 100:.0f}% "
+            "del lienzo. Este formato no se puede sacar de este arte.",
+        )
     elif filled < low:
         penalties += 8
         warnings.append("La composición tiene demasiado espacio vacío.")

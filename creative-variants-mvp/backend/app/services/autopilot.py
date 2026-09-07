@@ -21,6 +21,7 @@ from . import (
     art_text,
     inpainting,
     layer_extraction,
+    layout_engine,
     storage,
     variants as variants_service,
 )
@@ -45,14 +46,22 @@ def usable_layers(project: Project) -> list:
 
 
 def auto_formats(project: Project) -> list[str]:
-    """Formato nativo del arte (el más cercano por proporción) más los de redes."""
+    """Formato nativo del arte más los de redes que ese arte pueda llenar.
+
+    Los de redes se añadían siempre, y con un banner de 1920x325 eso significaba
+    prometer un 1080x1350 que solo se puede rellenar de color: el arte cubre el
+    14% del lienzo. Si el arte trae capas el motor recompone y no hay problema;
+    si llegó plano, se ofrece solo lo que de verdad se puede sacar de él.
+    """
     aspect = project.canvas.width / max(1, project.canvas.height)
     native = min(
         LEGACY_FORMATS,
         key=lambda key: abs(LEGACY_FORMATS[key][0] / LEGACY_FORMATS[key][1] - aspect),
     )
     formats = [native]
-    formats.extend(fmt for fmt in SOCIAL_DEFAULTS if fmt != native)
+    extras = [fmt for fmt in SOCIAL_DEFAULTS if fmt != native]
+    viables, _ = layout_engine.viable_formats(project, extras, len(usable_layers(project)))
+    formats.extend(viables)
     return formats
 
 

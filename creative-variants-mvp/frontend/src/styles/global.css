@@ -2210,3 +2210,12 @@ details .inventory { margin-top: 14px; }
   .project-grid, .result-grid, .product-grid, .format-grid { grid-template-columns: 1fr; }
   .button-row > .button.large { width: 100%; }
 }
+
+/* Formato que el KV cargado no puede llenar. Se apaga y se dice cuánto cubriría:
+   un porcentaje convence donde un "no se puede" suena a capricho. */
+.format-card.is-impossible {
+  opacity: 0.45;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+.format-card.is-impossible .format-copy span:last-child { color: var(--warning); }

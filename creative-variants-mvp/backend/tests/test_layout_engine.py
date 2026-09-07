@@ -544,3 +544,68 @@ def test_a_removal_far_from_a_column_does_not_move_it():
     )
     sitio = {p.layer.name: p.y for p in coloc}
     assert sitio["izquierda"] == 300
+
+
+# ------------------------------------------- artes que no dan para todo formato
+def _banner_project(width: int = 1920, height: int = 325):
+    """El caso real: un KV de electromenores de 1920x325 que llegó aplanado."""
+    from app.models import Canvas, Project, SourceImage
+
+    return Project(
+        name="Banner",
+        canvas=Canvas(width=width, height=height),
+        source=SourceImage(
+            path="original/a.png", width=width, height=height,
+            format="PNG", original_filename="a.png", bytes=10,
+        ),
+    )
+
+
+class _Peticion:
+    def __init__(self, formats):
+        self.formats = formats
+        self.count = 6
+        self.seed = 7
+        self.intensity = "moderate"
+
+
+def test_un_banner_plano_no_genera_piezas_verticales():
+    """Doce propuestas del banner encogido sobre un relleno azul: eso es lo que salía."""
+    from app.services.layout_engine import plan_variants
+
+    project = _banner_project()
+    project.layers = [
+        Layer(id="p1", name="Producto", type=LayerType.IMAGE,
+              category=LayerCategory.PRODUCT, src="layers/p.png",
+              x=776, y=13, width=609, height=272, z_index=3),
+    ]
+    plans, warnings = plan_variants(project, _Peticion(["1080x1350", "1080x1080", "google_display_728x90"]))
+    formatos = {plan.format for plan in plans}
+    assert formatos == {"google_display_728x90"}
+    assert any("no se puede" in w or "color plano" in w for w in warnings)
+    # Y dice cuánto cubriría, que es el dato que convence.
+    assert any("%" in w for w in warnings)
+
+
+def test_si_ningun_formato_sirve_no_entrega_nada_y_lo_explica():
+    from app.services.layout_engine import plan_variants
+
+    project = _banner_project()
+    project.layers = [
+        Layer(id="p1", name="Producto", type=LayerType.IMAGE,
+              category=LayerCategory.PRODUCT, src="layers/p.png",
+              x=0, y=0, width=609, height=272, z_index=3),
+    ]
+    plans, warnings = plan_variants(project, _Peticion(["1080x1350", "1080x1080"]))
+    assert plans == []
+    assert any("No se generó nada a propósito" in w for w in warnings)
+
+
+def test_con_capas_de_verdad_cualquier_proporcion_sigue_valiendo():
+    """La guarda es para lo aplanado: un PSD con capas se recompone y va a todo."""
+    from app.services.layout_engine import plan_variants
+
+    project = _banner_project()
+    project.layers = _layers()
+    plans, _ = plan_variants(project, _Peticion(["1080x1350", "1080x1080"]))
+    assert {plan.format for plan in plans} == {"1080x1350", "1080x1080"}

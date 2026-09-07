@@ -1489,10 +1489,85 @@ def _build_plan(
     )
 
 
+#: Un arte con menos capas que esto no se puede recomponer: no hay piezas que
+#: mover, solo una imagen que colocar. Ahí el formato de salida tiene que
+#: parecerse al de origen o el resultado es la imagen pequeña sobre un relleno.
+MIN_LAYERS_TO_RECOMPOSE = 3
+
+#: Cuánto del lienzo de salida tiene que llegar a cubrir el arte de origen.
+#: Un banner de 1920x325 metido en un 1080x1350 cubre el 13%: el 87% restante es
+#: color plano, y eso no es una pieza publicitaria, es un banner con márgenes.
+MIN_SOURCE_COVERAGE = 0.45
+
+
+def _coverage(source: tuple[int, int], target: tuple[int, int]) -> float:
+    """Fracción del lienzo de salida que llega a cubrir el arte, sin deformarlo."""
+    source_w, source_h = source
+    target_w, target_h = target
+    if min(source_w, source_h, target_w, target_h) <= 0:
+        return 0.0
+    scale = min(target_w / source_w, target_h / source_h)
+    return (source_w * scale) * (source_h * scale) / (target_w * target_h)
+
+
+def viable_formats(
+    project: Project, formats: list[str], layer_count: int
+) -> tuple[list[str], list[str]]:
+    """Descarta los formatos que este arte no puede llenar, y dice por qué.
+
+    Con un PSD por capas el motor recompone y cualquier proporción es posible.
+    Con un arte plano —una sola imagen, sin copy ni logos separados— lo único que
+    puede hacer es colocarla; si la proporción de salida no se parece a la de
+    origen, el resultado es la imagen encogida sobre un fondo de color. Entregar
+    doce de esas es hacerle perder el tiempo a quien las pidió.
+    """
+    if layer_count >= MIN_LAYERS_TO_RECOMPOSE:
+        return formats, []
+
+    source = (project.canvas.width, project.canvas.height)
+    usables: list[str] = []
+    descartados: list[tuple[str, float]] = []
+    for fmt in formats:
+        if fmt not in SUPPORTED_FORMATS:
+            # Un formato desconocido no se descarta aquí en silencio: se deja
+            # pasar y falla donde siempre falló, con su nombre delante.
+            usables.append(fmt)
+            continue
+        cobertura = _coverage(source, SUPPORTED_FORMATS[fmt])
+        (usables if cobertura >= MIN_SOURCE_COVERAGE else descartados).append(
+            fmt if cobertura >= MIN_SOURCE_COVERAGE else (fmt, cobertura)  # type: ignore[arg-type]
+        )
+
+    if not descartados:
+        return usables, []
+
+    detalle = ", ".join(
+        f"{fmt} ({int(round(cobertura * 100))}%)" for fmt, cobertura in descartados[:6]
+    )
+    aviso = (
+        f"El arte es de {source[0]}x{source[1]} y llegó plano, sin capas que recomponer, "
+        f"así que solo se puede colocar entero. En estos formatos apenas cubriría el "
+        f"lienzo y el resto saldría en color plano: {detalle}. "
+        "Elija formatos de proporción parecida, o suba el PSD con sus capas para que "
+        "el motor pueda recomponer la pieza."
+    )
+    return usables, [aviso]
+
+
 def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[str]]:
     """Construye el plan completo de variantes (sin renderizar)."""
     ctx, warnings = _planning(project, request)
     if ctx is None:
+        return [], warnings
+
+    ctx.formats, avisos = viable_formats(project, ctx.formats, len(ctx.layers))
+    warnings.extend(avisos)
+    if not ctx.formats:
+        warnings.append(
+            "Ningún formato de los elegidos se puede sacar de este arte sin inventar "
+            "más de la mitad de la imagen. No se generó nada a propósito: doce piezas "
+            "inservibles cuestan más tiempo que ninguna."
+        )
         return [], warnings
 
     layout_rng = random.Random(ctx.seed)
