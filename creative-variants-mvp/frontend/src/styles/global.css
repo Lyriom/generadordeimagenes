@@ -1169,11 +1169,31 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 
 /* --------------------------------------------------------- zona de subida */
 
+/* La tarjeta de carga quedó sola en la pantalla y se estiraba a los 1520 px del
+   área de trabajo, con una zona de arrastre enorme y vacía. Se acota a una
+   anchura cómoda y se centra; dentro, dos columnas que reparten el espacio en
+   vez de dejarlo en blanco, y una sola por debajo de 860 px. */
+.upload-card { max-width: 1080px; margin-inline: auto; }
+.upload-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+}
+.upload-main { min-width: 0; }
+.upload-side { display: grid; gap: 14px; min-width: 0; align-content: start; }
+
+@media (max-width: 860px) {
+  .upload-grid { grid-template-columns: 1fr; }
+}
+
 .dropzone {
   position: relative;
   display: grid;
   place-items: center;
-  min-height: 220px;
+  /* Fluida: en una pantalla baja no se come el alto y en una alta no se queda
+     como una franja. */
+  min-height: clamp(180px, 24vh, 260px);
   padding: 28px;
   text-align: center;
   border: 2px dashed var(--line-strong);

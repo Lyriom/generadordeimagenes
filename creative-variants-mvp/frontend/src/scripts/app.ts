@@ -660,17 +660,26 @@ async function renderCampaign(): Promise<void> {
           // columna entera ofreciendo algo imposible.
           // Sin badge «RECOMENDADO»: recomendaba esta de entre dos, y ya no hay
           // otra con la que compararla.
-          '<section class="card elevated"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div></div>',
+          //
+          // Al quedarse sola, la tarjeta se estiraba a los 1500 px del área de
+          // trabajo con una zona de arrastre vacía dentro. Ahora se acota y se
+          // parte en dos columnas —arrastre a la izquierda, ajustes y botón a la
+          // derecha—, que en una pantalla ancha ocupan el espacio en vez de
+          // dejarlo en blanco. Por debajo de 860 px vuelve a una sola columna.
+          '<section class="card elevated upload-card"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div></div>',
+          '<div class="upload-grid"><div class="upload-main">',
           '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
           '<span class="drop-icon" id="drop-icon">⇧</span>',
           '<strong class="drop-title" id="drop-title">Arrastra tus KV aquí</strong>',
           '<span class="drop-hint" id="drop-hint">PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
           '<div id="upload-summary" class="queue-summary" hidden></div>',
           '<div id="upload-file-list" class="queue-list"></div>',
-          '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Logo opcional</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
-          '<label class="field"><span>Tipografía opcional</span><input id="font-file" type="file" accept=".ttf,.otf"></label></div>',
-          '<label class="check" style="margin:14px 0"><input id="import-layers" type="checkbox" checked> Importar todas las capas reales del PSD</label>',
-          '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button></section>',
+          '</div><div class="upload-side">',
+          '<label class="field"><span>Logo opcional</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
+          '<label class="field"><span>Tipografía opcional</span><input id="font-file" type="file" accept=".ttf,.otf"></label>',
+          '<label class="check"><input id="import-layers" type="checkbox" checked> Importar todas las capas reales del PSD</label>',
+          '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button>',
+          '</div></div></section>',
         ].join(""),
     state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
     '<div class="spacer"></div>',
