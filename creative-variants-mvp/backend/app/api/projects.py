@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import partial
 import io
 import logging
 import mimetypes
@@ -1143,16 +1144,21 @@ async def replace_product(
         # Reconocer qué producto es, aquí y no al generar: es una consulta de red
         # y la generación tiene que seguir siendo local y determinista. Va en un
         # hilo aparte porque este endpoint es async y bloquearlo pararía al resto.
+        motivos: list[str] = []
         record = await run_in_threadpool(
-            product_identity.identify,
-            project,
-            layer,
-            storage.abs_path(project.project_id, layer.src) if layer.src else None,
+            partial(
+                product_identity.identify,
+                project,
+                layer,
+                storage.abs_path(project.project_id, layer.src) if layer.src else None,
+                diagnostics=motivos,
+            )
         )
         if record is None:
+            detalle = f" ({'; '.join(motivos)})" if motivos else ""
             warnings.append(
                 "No se reconoció qué producto es, así que en un combo se igualan "
-                "los altos en vez de escalarlos por su tamaño real."
+                f"los altos en vez de escalarlos por su tamaño real{detalle}."
             )
         storage.save_project(project)
     except Exception as exc:  # noqa: BLE001

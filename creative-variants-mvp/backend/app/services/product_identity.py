@@ -44,6 +44,11 @@ def _provider() -> OpenAIVisionProvider:
     return OpenAIVisionProvider()
 
 
+def _anotar(diagnostics: list[str] | None, mensaje: str) -> None:
+    if diagnostics is not None and mensaje not in diagnostics:
+        diagnostics.append(mensaje[:300])
+
+
 def artwork_text(project: Project) -> str:
     """Todo el copy del KV en una sola cadena.
 
@@ -82,11 +87,17 @@ def identify(
     image_path: str | Path | None = None,
     *,
     use_vision: bool = True,
+    diagnostics: list[str] | None = None,
 ) -> dict | None:
     """Reconoce el producto de `layer` y deja el resultado en `layer.meta`.
 
     Devuelve el registro guardado, o `None` si ninguna vía lo reconoció. Nunca
     lanza: que el reconocimiento falle no puede tumbar la subida de un producto.
+
+    En `diagnostics` deja **por qué** no lo reconoció. No es lo mismo «lo miré y
+    no supe qué era» que «no pude preguntarle a nadie»: lo primero se arregla con
+    una foto mejor y lo segundo con la configuración del servidor, y colapsar las
+    dos en un solo aviso deja al usuario sin saber cuál de las dos le pasó.
     """
     meta = layer.meta
     nombre_archivo = meta.get("replaced_from")
@@ -98,14 +109,22 @@ def identify(
 
     if key is None and use_vision and image_path is not None:
         provider = _provider()
-        if provider.available():
+        if not provider.available():
+            _anotar(diagnostics, "el reconocimiento por imagen está apagado o sin clave")
+        else:
             try:
                 key = provider.identify(image_path, list(product_scale.families()))
                 source = "imagen"
+                if key is None:
+                    _anotar(diagnostics, "se miró la foto y no se reconoció el producto")
             except ProviderUnavailableError as exc:
                 logger.info("Reconocimiento por imagen no disponible: %s", exc)
+                _anotar(diagnostics, f"no se pudo consultar el reconocedor ({exc})")
             except Exception as exc:  # noqa: BLE001 - identificar es opcional
                 logger.warning("Falló el reconocimiento por imagen: %s", exc)
+                _anotar(diagnostics, f"falló el reconocedor ({type(exc).__name__}: {exc})")
+    elif key is None and not use_vision:
+        _anotar(diagnostics, "no se consultó el reconocimiento por imagen")
 
     if key is None:
         key = _from_artwork(project, texto_arte)

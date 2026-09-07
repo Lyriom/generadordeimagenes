@@ -230,3 +230,33 @@ def test_no_manda_tope_de_tokens(monkeypatch, tmp_path):
     )
     assert "max_tokens" not in enviados[0]
     assert "max_completion_tokens" not in enviados[0]
+
+
+def test_dice_cuando_miro_y_no_supo(monkeypatch, tmp_path):
+    """«Lo miré y no lo reconocí» se arregla con una foto mejor."""
+    monkeypatch.setattr(settings, "openai_api_key", "clave")
+    _responde(monkeypatch, "desconocido")
+    layer = _producto("Producto", "producto1.png")
+    motivos: list[str] = []
+    product_identity.identify(_project(layer), layer, _foto(tmp_path), diagnostics=motivos)
+    assert any("se miró la foto" in m for m in motivos)
+
+
+def test_dice_cuando_no_pudo_preguntar(monkeypatch, tmp_path):
+    """«No pude preguntarle a nadie» se arregla en el servidor. No es lo mismo."""
+    monkeypatch.setattr(settings, "openai_api_key", "clave")
+    _responde(monkeypatch, "", status=404)
+    layer = _producto("Producto", "producto1.png")
+    motivos: list[str] = []
+    product_identity.identify(_project(layer), layer, _foto(tmp_path), diagnostics=motivos)
+    assert any("no se pudo consultar" in m for m in motivos)
+    # Con el código dentro, que es lo que dice qué hay que arreglar.
+    assert any("404" in m for m in motivos)
+
+
+def test_dice_cuando_esta_apagado(monkeypatch, tmp_path):
+    monkeypatch.setattr(settings, "openai_api_key", None)
+    layer = _producto("Producto", "producto1.png")
+    motivos: list[str] = []
+    product_identity.identify(_project(layer), layer, _foto(tmp_path), diagnostics=motivos)
+    assert any("apagado o sin clave" in m for m in motivos)
