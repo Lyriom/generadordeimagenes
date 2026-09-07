@@ -65,10 +65,10 @@ function readableDetail(payload: any): string {
 function gatewayMessage(status: number): string {
   if (status === 413) {
     return (
-      "El archivo es más grande de lo que admite el servidor web, que corta la " +
-      "subida antes de que llegue a la aplicación. Déjalo en la carpeta " +
-      "data/ingest del servidor y tráelo desde la pestaña «Tomarlo de la " +
-      "carpeta compartida», que no pasa por el navegador."
+      "El archivo es más grande de lo que admite el servidor, que corta la " +
+      "subida antes de que llegue a la aplicación. Guarda el PSD más ligero " +
+      "—sin capas ocultas ni objetos inteligentes incrustados— o aplánalo, y " +
+      "vuelve a subirlo."
     );
   }
   if (status === 502 || status === 503 || status === 504) {

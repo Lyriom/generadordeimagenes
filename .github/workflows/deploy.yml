@@ -155,6 +155,16 @@ jobs:
       #   .env   la clave de Magnific y la contraseña de acceso viven solo ahí
       #   data/  los proyectos, los recortes y las artes generadas. Un deploy
       #          sin esta línea borra el trabajo del equipo.
+      # El número de versión lo mueve una persona; esto se mueve solo. Es lo
+      # que permite mirar la interfaz y saber si ya trae el último cambio, en
+      # vez de adivinarlo. Va dentro de app/ porque es lo que el Dockerfile
+      # copia a la imagen, y .git no llega al servidor.
+      - name: Sellar el build
+        run: |
+          printf '%s %s' "$(git rev-parse --short HEAD)" "$(date -u +%Y-%m-%d)" \
+            > creative-variants-mvp/backend/app/build.txt
+          cat creative-variants-mvp/backend/app/build.txt
+
       - name: Sincronizar código al servidor
         run: |
           rsync -az --delete \

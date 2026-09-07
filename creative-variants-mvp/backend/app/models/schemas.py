@@ -23,6 +23,8 @@ class HealthResponse(BaseModel):
     status: str = "ok"
     app: str
     version: str
+    #: Build concreto que está sirviendo. Cambia en cada despliegue.
+    build: str = "local"
     providers: dict[str, Any] = Field(default_factory=dict)
 
 

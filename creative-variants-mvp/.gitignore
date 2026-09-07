@@ -16,3 +16,6 @@ __pycache__/
 node_modules/
 dist/
 .astro/
+
+# Sello del build: lo escribe el despliegue, no se versiona.
+backend/app/build.txt

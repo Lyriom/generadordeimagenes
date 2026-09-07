@@ -24,6 +24,7 @@ def health() -> HealthResponse:
         status="ok",
         app=settings.app_name,
         version=settings.app_version,
+        build=settings.app_build,
         providers=providers,
     )
 

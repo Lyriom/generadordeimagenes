@@ -525,8 +525,11 @@ function renderChrome(): void {
     '<span class="status-dot"></span><div><strong>',
     connected ? "Motor conectado" : "Motor sin conexión",
     "</strong><small>",
+    // La versión la mueve una persona; el build se mueve solo en cada
+    // despliegue. Con los dos a la vista se sabe si lo que estás mirando ya
+    // trae el último cambio, sin tener que preguntarlo.
     connected
-      ? "FastAPI " + esc(state.health.version || "")
+      ? "v" + esc(state.health.version || "?") + (state.health.build && state.health.build !== "local" ? " · " + esc(state.health.build) : "")
       : "Revisa backend y red",
     "</small></div>",
   ].join("");
@@ -652,8 +655,12 @@ async function renderCampaign(): Promise<void> {
           '<div class="spacer"></div><div class="button-row"><button class="ghost-button" id="add-more-kv">Añadir más KV</button></div>',
         ].join("")
       : [
-          '<div class="grid two">',
-          '<section class="card elevated"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div><span class="badge">RECOMENDADO</span></div>',
+          // Una sola vía de entrada. La carpeta del servidor pedía acceso al
+          // disco de la máquina, que este cliente no tiene, así que era una
+          // columna entera ofreciendo algo imposible.
+          // Sin badge «RECOMENDADO»: recomendaba esta de entre dos, y ya no hay
+          // otra con la que compararla.
+          '<section class="card elevated"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div></div>',
           '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
           '<span class="drop-icon" id="drop-icon">⇧</span>',
           '<strong class="drop-title" id="drop-title">Arrastra tus KV aquí</strong>',
@@ -664,10 +671,6 @@ async function renderCampaign(): Promise<void> {
           '<label class="field"><span>Tipografía opcional</span><input id="font-file" type="file" accept=".ttf,.otf"></label></div>',
           '<label class="check" style="margin:14px 0"><input id="import-layers" type="checkbox" checked> Importar todas las capas reales del PSD</label>',
           '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button></section>',
-          '<section class="card dark"><div class="card-head"><div><h2>Desde carpeta del servidor</h2><p>Ideal para PSD de 60–100 MB</p></div><span class="badge green">RÁPIDO</span></div>',
-          '<div id="ingest-list" class="stack"><div class="loader"></div></div>',
-          '<button class="button rose full" id="import-ingest" disabled>Importar seleccionados</button></section>',
-          "</div>",
         ].join(""),
     state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
     '<div class="spacer"></div>',
@@ -691,10 +694,7 @@ async function renderCampaign(): Promise<void> {
     saveSession();
     navigate("campaign");
   });
-  if (!state.campaign.length) {
-    bindUpload();
-    await loadIngest();
-  }
+  if (!state.campaign.length) bindUpload();
 }
 
 function bindSavedProjects(): void {
@@ -1026,65 +1026,6 @@ function bindUpload(): void {
       idle();
     }
   });
-}
-
-async function loadIngest(): Promise<void> {
-  const host = query<HTMLElement>("#ingest-list");
-  const button = query<HTMLButtonElement>("#import-ingest");
-  if (!host || !button) return;
-  try {
-    const result = await get<any>("/ingest?with_pieces=true");
-    const files = result.files || [];
-    if (!files.length) {
-      host.innerHTML = '<div class="notice">La carpeta de ingesta está vacía.</div>';
-      return;
-    }
-    host.innerHTML = files.map((file: any) => [
-      '<label class="choice"><input class="ingest-check" type="checkbox" value="', attr(file.path), '">',
-      '<span><strong>', esc(file.name), '</strong><br><small>', String(file.width), "×",
-      String(file.height), " · ", String(file.size_mb), " MB · ", String(file.pieces || 1),
-      " pieza(s)</small></span></label>",
-    ].join("")).join("");
-    queryAll<HTMLInputElement>(".ingest-check").forEach((check) => {
-      check.addEventListener("change", () => {
-        button.disabled = !query<HTMLInputElement>(".ingest-check:checked");
-      });
-    });
-    button.addEventListener("click", async () => {
-      const selectedPaths = queryAll<HTMLInputElement>(".ingest-check:checked").map((item) => item.value);
-      const created: Project[] = [];
-      busy("Importando desde servidor", "Analizando archivos grandes…", 8);
-      try {
-        for (let index = 0; index < selectedPaths.length; index += 1) {
-          const path = selectedPaths[index];
-          busyProgress(8 + Math.round(index / selectedPaths.length * 80), "Importando " + path);
-          if (/\.(psd|psb)$/i.test(path)) {
-            const result = await post<any>("/projects/from-ingest/split", {
-              source: path, import_layers: true,
-            });
-            created.push(...result.projects);
-          } else {
-            created.push(await post<Project>("/projects/from-ingest", {
-              source: path, import_layers: true,
-            }));
-          }
-        }
-        state.campaign = created;
-        state.campaignIds = created.map((project) => project.project_id);
-        state.activeId = state.campaignIds[0] || null;
-        saveSession();
-        await refreshAll();
-        toast("Campaña importada correctamente.", "success");
-        await navigate("layers");
-      } catch (error) {
-        toast(errorMessage(error), "error");
-      } finally {
-        idle();
-      }
-    });
-  } catch (error) {
-    host.innerHTML = '<div class="notice error">' + esc(errorMessage(error)) + "</div>";
-  }
 }
 
 export async function mountApp(): Promise<void> {

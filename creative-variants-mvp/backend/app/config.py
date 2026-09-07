@@ -24,12 +24,27 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _build_stamp() -> str:
+    """Identificador del build, escrito por el despliegue. Vacío en local."""
+    marca = Path(__file__).with_name("build.txt")
+    try:
+        return marca.read_text(encoding="utf-8").strip()[:64]
+    except OSError:
+        return "local"
+
+
 class Settings:
     """Ajustes del MVP. Sin dependencias externas obligatorias."""
 
     def __init__(self) -> None:
         self.app_name: str = os.getenv("APP_NAME", "Creative Variants MVP")
-        self.app_version: str = "0.1.0"
+        self.app_version: str = "1.0.0"
+        # Qué build concreto está corriendo. El número de versión se mueve
+        # cuando alguien lo cambia; esto se mueve solo en cada despliegue, que es
+        # lo que hace falta para saber si lo que estás mirando ya trae el último
+        # cambio. Lo escribe el despliegue en app/build.txt antes de construir
+        # la imagen; en local no existe y no pasa nada.
+        self.app_build: str = _build_stamp()
 
         # --- Almacenamiento ---
         default_data = Path(__file__).resolve().parents[2] / "data"
