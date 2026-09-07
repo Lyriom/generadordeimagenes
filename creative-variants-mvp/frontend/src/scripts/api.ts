@@ -109,6 +109,73 @@ export async function request<T = any>(
   return payload as T;
 }
 
+/** Subida con progreso real, y con aviso de cuándo termina de subir.
+ *
+ * `fetch` no dice cuánto se ha enviado ya. Con un PSD de 200 MB eso es una
+ * barra quieta durante minutos, que desde fuera no se distingue de una página
+ * colgada. `XMLHttpRequest` sí lo informa, y es la única razón por la que
+ * sigue aquí en vez de `fetch`.
+ *
+ * Los dos avisos son distintos y los dos hacen falta:
+ *   onProgress → bytes enviados; es el tramo que el usuario controla.
+ *   onUploaded → ya está todo arriba y ahora manda el servidor. En un PSD esa
+ *                segunda parte es la larga (leer capas, aplanar, miniaturas) y
+ *                no tiene porcentaje que enseñar, pero sí conviene decir que
+ *                la espera cambió de dueño.
+ */
+export function upload<T = any>(
+  path: string,
+  body: FormData,
+  onProgress?: (sent: number, total: number) => void,
+  onUploaded?: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", API_ROOT + path, true);
+    // Content-Type no se pone a mano: lo escribe el navegador con el boundary
+    // del FormData, y ponerlo aquí rompe la subida.
+    xhr.setRequestHeader("X-Session-Id", sessionId());
+
+    if (onProgress) {
+      xhr.upload.addEventListener("progress", (event) => {
+        onProgress(event.loaded, event.lengthComputable ? event.total : 0);
+      });
+    }
+    if (onUploaded) xhr.upload.addEventListener("load", () => onUploaded());
+
+    xhr.addEventListener("load", () => {
+      const type = xhr.getResponseHeader("content-type") || "";
+      const isJson = type.includes("application/json");
+      let payload: unknown = xhr.responseText;
+      if (isJson) {
+        try {
+          payload = JSON.parse(xhr.responseText || "{}");
+        } catch {
+          payload = {};
+        }
+      }
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(payload as T);
+        return;
+      }
+      reject(
+        new ApiError(
+          isJson ? readableDetail(payload) : gatewayMessage(xhr.status),
+          xhr.status,
+          payload,
+        ),
+      );
+    });
+    xhr.addEventListener("error", () =>
+      reject(new ApiError("Se cortó la conexión durante la subida. Vuelve a intentarlo.", 0, null)),
+    );
+    xhr.addEventListener("abort", () => reject(new ApiError("Subida cancelada.", 0, null)));
+    // Sin timeout a propósito: un pliego de 300 MB por una subida doméstica
+    // tarda lo que tarda, y cortarlo a los 30 s no ayuda a nadie.
+    xhr.send(body);
+  });
+}
+
 export const get = <T = any>(path: string) => request<T>(path);
 export const post = <T = any>(path: string, body?: unknown) =>
   request<T>(path, {

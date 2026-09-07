@@ -9,6 +9,7 @@ import {
   resetSessionId,
   sessionId,
   thumbnailUrl,
+  upload,
   variantPngUrl,
 } from "./api";
 import type {
@@ -307,6 +308,114 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/* Confirmación propia en vez de la del navegador.
+   El confirm() nativo sale rotulado con el dominio, no se puede maquetar y
+   sobre todo no admite un "no volver a preguntar": limpiar una campaña de
+   veinte KV obligaba a leer y aceptar el mismo aviso veinte veces. */
+type ConfirmRequest = {
+  title: string;
+  lines?: string[];
+  confirm?: string;
+  cancel?: string;
+  /* false = la acción no borra nada (el botón deja de ser rojo). */
+  danger?: boolean;
+  /* Recuerda el "sí" por TIPO de acción y nunca en general: aceptar "quitar un
+     KV" no puede callar también el aviso de borrar la campaña entera. Sin esta
+     clave, el diálogo pregunta siempre y no ofrece la casilla. */
+  remember?: string;
+};
+
+const CONFIRM_SKIP_KEY = "creative-confirm-skip";
+const confirmSkipped = new Set<string>(readConfirmSkips());
+
+function readConfirmSkips(): string[] {
+  try {
+    const parsed = JSON.parse(sessionStorage.getItem(CONFIRM_SKIP_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return []; /* modo privado: la preferencia vive solo en memoria */
+  }
+}
+
+/* sessionStorage y no localStorage: "esta sesión" quiere decir esta sesión.
+   Al cerrar la pestaña los avisos vuelven, que es lo que se espera de algo que
+   borra archivos sin poder deshacerse. */
+function rememberConfirmSkip(key: string): void {
+  confirmSkipped.add(key);
+  try {
+    sessionStorage.setItem(CONFIRM_SKIP_KEY, JSON.stringify([...confirmSkipped]));
+  } catch {
+    /* ídem */
+  }
+}
+
+export async function confirmAction(request: ConfirmRequest): Promise<boolean> {
+  if (request.remember && confirmSkipped.has(request.remember)) return true;
+  const overlay = query<HTMLElement>("#confirm-overlay");
+  const title = query<HTMLElement>("#confirm-title");
+  const body = query<HTMLElement>("#confirm-body");
+  const ok = query<HTMLButtonElement>("#confirm-ok");
+  const cancel = query<HTMLButtonElement>("#confirm-cancel");
+  const rememberRow = query<HTMLElement>("#confirm-remember-row");
+  const rememberBox = query<HTMLInputElement>("#confirm-remember");
+  // Si el diálogo no está montado se cae al del navegador: preguntar feo es
+  // mejor que dar por aceptado un borrado que nadie confirmó.
+  if (!overlay || !title || !body || !ok || !cancel || !rememberRow || !rememberBox) {
+    return window.confirm([request.title, ...(request.lines || [])].join("\n\n"));
+  }
+
+  title.textContent = request.title;
+  body.innerHTML = (request.lines || []).map((line) => "<p>" + esc(line) + "</p>").join("");
+  ok.textContent = request.confirm || "Sí, continuar";
+  ok.className = request.danger === false ? "button" : "danger-button";
+  cancel.textContent = request.cancel || "Cancelar";
+  rememberRow.hidden = !request.remember;
+  rememberBox.checked = false;
+
+  const previous = document.activeElement as HTMLElement | null;
+  overlay.hidden = false;
+  // El foco arranca en Cancelar, no en el botón que borra: un Enter de más no
+  // puede costar una campaña.
+  cancel.focus();
+
+  const stop = new AbortController();
+  return new Promise<boolean>((resolve) => {
+    const close = (value: boolean): void => {
+      stop.abort();
+      overlay.hidden = true;
+      previous?.focus?.();
+      resolve(value);
+    };
+    ok.addEventListener("click", () => {
+      if (request.remember && rememberBox.checked) rememberConfirmSkip(request.remember);
+      close(true);
+    }, { signal: stop.signal });
+    cancel.addEventListener("click", () => close(false), { signal: stop.signal });
+    // Clic en el fondo = cancelar, como el resto de los modales de la app.
+    overlay.addEventListener("mousedown", (event) => {
+      if (event.target === overlay) close(false);
+    }, { signal: stop.signal });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close(false);
+        return;
+      }
+      // El Tab queda atrapado dentro del diálogo: con el fondo bloqueado, el
+      // foco perdido allá atrás deja al teclado sin nada que hacer.
+      if (event.key === "Tab") {
+        const focusables: HTMLElement[] = request.remember
+          ? [rememberBox, cancel, ok]
+          : [cancel, ok];
+        const index = focusables.indexOf(document.activeElement as HTMLElement);
+        const next = (index + (event.shiftKey ? -1 : 1) + focusables.length) % focusables.length;
+        event.preventDefault();
+        focusables[next].focus();
+      }
+    }, { signal: stop.signal });
+  });
+}
+
 function busy(title: string, detail: string, progress = 8): void {
   const overlay = query<HTMLElement>("#busy-overlay")!;
   overlay.hidden = false;
@@ -431,7 +540,7 @@ function renderChrome(): void {
         "<small>", String(project.canvas.width), "×", String(project.canvas.height),
         " · ", String(project.variants.length), " variantes</small>",
       ].join("")
-    : '<span class="eyebrow">SIN CAMPAÑA</span><strong>Carga tu primer KV</strong><small>PSD, PSB, PNG o JPG</small>';
+    : '<span class="eyebrow">SIN CAMPAÑA</span><strong>Carga tu primer KV</strong><small>PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF</small>';
 }
 
 async function navigate(view: ViewName): Promise<void> {
@@ -543,8 +652,10 @@ async function renderCampaign(): Promise<void> {
           '<div class="grid two">',
           '<section class="card elevated"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div><span class="badge">RECOMENDADO</span></div>',
           '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
-          '<span class="drop-icon">⇧</span><strong>Arrastra tus KV aquí</strong><span>PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
-          '<div id="upload-file-list" class="file-list"></div>',
+          '<span class="drop-icon">⇧</span><strong id="drop-title">Arrastra tus KV aquí</strong>',
+          '<span id="drop-hint">PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
+          '<div id="upload-summary" class="queue-summary" hidden></div>',
+          '<div id="upload-file-list" class="queue-list"></div>',
           '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Logo opcional</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
           '<label class="field"><span>Tipografía opcional</span><input id="font-file" type="file" accept=".ttf,.otf"></label></div>',
           '<label class="check" style="margin:14px 0"><input id="import-layers" type="checkbox" checked> Importar todas las capas reales del PSD</label>',
@@ -604,10 +715,15 @@ function bindSavedProjects(): void {
   deleteButton.addEventListener("click", async () => {
     const ids = checks.filter((item) => item.checked).map((item) => item.value);
     if (!ids.length) return;
-    const message = ids.length === 1
-      ? "¿Borrar este proyecto y sus archivos?"
-      : "¿Borrar " + String(ids.length) + " proyectos y todos sus archivos?";
-    if (!window.confirm(message)) return;
+    const confirmed = await confirmAction({
+      title: ids.length === 1
+        ? "¿Borrar este proyecto?"
+        : "¿Borrar " + String(ids.length) + " proyectos?",
+      lines: ["Se van con todos sus archivos y no se puede deshacer."],
+      confirm: ids.length === 1 ? "Sí, borrar" : "Sí, borrar los " + String(ids.length),
+      remember: "borrar-proyecto",
+    });
+    if (!confirmed) return;
     // El backend solo borra de uno en uno, así que se recorre la selección y se
     // informa de los que fallen en vez de dar por hecho que se fueron todos.
     busy("Borrando proyectos", "Liberando espacio…", 5);
@@ -645,10 +761,15 @@ async function dropKv(projectId: string): Promise<void> {
   const warning = last
     ? "Es el último KV de la campaña: al quitarlo vuelves a la carga."
     : "Los otros " + String(state.campaignIds.length - 1) + " no se tocan.";
-  if (!window.confirm(
-    "¿Quitar «" + project.name + "» de la campaña?\n\n" +
-    warning + "\n\nSe borra con sus archivos y no se puede deshacer.",
-  )) return;
+  const confirmed = await confirmAction({
+    title: "¿Quitar «" + project.name + "» de la campaña?",
+    lines: [warning, "Se borra con sus archivos y no se puede deshacer."],
+    confirm: "Sí, quitar",
+    // Si es el último KV el aviso es distinto (se vuelve a la carga), así que
+    // ese caso se pregunta siempre: no lo tapa el "no volver a preguntar".
+    remember: last ? undefined : "quitar-kv",
+  });
+  if (!confirmed) return;
 
   busy("Quitando el KV", project.name, 40);
   try {
@@ -689,7 +810,13 @@ function bindProjectCards(): void {
   queryAll<HTMLButtonElement>(".delete-project").forEach((button) => {
     button.addEventListener("click", async () => {
       const id = button.dataset.id!;
-      if (!window.confirm("¿Borrar este proyecto y sus archivos?")) return;
+      const confirmed = await confirmAction({
+        title: "¿Borrar este proyecto?",
+        lines: ["Se va con todos sus archivos y no se puede deshacer."],
+        confirm: "Sí, borrar",
+        remember: "borrar-proyecto",
+      });
+      if (!confirmed) return;
       try {
         await del("/projects/" + id);
         state.campaignIds = state.campaignIds.filter((item) => item !== id);
@@ -705,20 +832,123 @@ function bindProjectCards(): void {
   });
 }
 
+const ARTWORK_EXTENSIONS = /\.(psd|psb|png|jpe?g|webp|tiff?|avif)$/i;
+
+/** Tamaño legible. En MB con un decimal un PNG de 40 KB sale como "0.0 MB",
+ *  que es peor que no poner nada: parece que el archivo está vacío. */
+function readableSize(bytes: number): string {
+  if (bytes < 1024) return String(bytes) + " B";
+  if (bytes < 1024 * 1024) return String(Math.round(bytes / 1024)) + " KB";
+  const mb = bytes / 1024 / 1024;
+  return mb.toFixed(mb < 10 ? 1 : 0) + " MB";
+}
+
+/** Ficha de un archivo en cola: se ve qué es antes de subir nada.
+ *
+ * Del PSD no se puede sacar miniatura en el navegador —hay que leerlo capa por
+ * capa, y eso lo hace el servidor—, así que en su lugar va el rótulo del
+ * formato. Lo importante es que no se quede un hueco: un archivo elegido tiene
+ * que verse elegido. */
+function queueCard(file: File, index: number): string {
+  const isLayered = /\.(psd|psb)$/i.test(file.name);
+  const media = isLayered
+    ? '<div class="queue-badge">' + (/\.psb$/i.test(file.name) ? "PSB" : "PSD") + "</div>"
+    : '<img src="' + attr(productUrl(file)) + '" alt="">';
+  return [
+    '<article class="queue-card">', media,
+    '<div class="queue-meta"><strong>', esc(file.name), "</strong><span>",
+    readableSize(file.size),
+    isLayered ? " · conserva sus capas reales" : " · separación asistida",
+    "</span></div>",
+    '<button type="button" class="queue-drop" data-index="', String(index),
+    '" title="Quitar de la cola" aria-label="Quitar ', attr(file.name), '">×</button>',
+    "</article>",
+  ].join("");
+}
+
 function bindUpload(): void {
   const input = query<HTMLInputElement>("#artwork-files")!;
+  const zone = query<HTMLElement>("#artwork-drop")!;
+  const title = query<HTMLElement>("#drop-title")!;
+  const hint = query<HTMLElement>("#drop-hint")!;
   const button = query<HTMLButtonElement>("#upload-campaign")!;
   const list = query<HTMLElement>("#upload-file-list")!;
+  const summary = query<HTMLElement>("#upload-summary")!;
   let queuedFiles: File[] = [];
-  input.addEventListener("change", () => {
-    queuedFiles = mergeUniqueFiles(queuedFiles, Array.from(input.files || []));
-    input.value = "";
+
+  const renderQueue = (): void => {
+    const total = queuedFiles.reduce((sum, file) => sum + file.size, 0);
     button.disabled = queuedFiles.length === 0;
-    list.innerHTML = queuedFiles.map((file) =>
-      '<div class="file-chip"><strong>' + esc(file.name) + '</strong><span>' +
-      (file.size / 1024 / 1024).toFixed(1) + " MB</span></div>"
-    ).join("");
+    button.textContent = queuedFiles.length
+      ? "Crear campaña con " + String(queuedFiles.length) + " KV"
+      : "Crear campaña";
+    // La zona de arrastre se encoge cuando ya hay cola: deja de ser lo
+    // principal de la tarjeta y el sitio se lo quedan los archivos elegidos.
+    zone.classList.toggle("slim", queuedFiles.length > 0);
+    title.textContent = queuedFiles.length ? "Añadir más KV" : "Arrastra tus KV aquí";
+    hint.textContent = queuedFiles.length
+      ? "Arrastra aquí o haz clic para sumar más a la campaña"
+      : "PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios";
+    summary.hidden = queuedFiles.length === 0;
+    summary.innerHTML = queuedFiles.length
+      ? "<strong>" + String(queuedFiles.length) + (queuedFiles.length === 1 ? " archivo" : " archivos") +
+        " en cola</strong><span>" + readableSize(total) + " en total</span>"
+      : "";
+    list.innerHTML = queuedFiles.map(queueCard).join("");
+    queryAll<HTMLButtonElement>(".queue-drop").forEach((item) => {
+      item.addEventListener("click", () => {
+        queuedFiles.splice(Number(item.dataset.index), 1);
+        renderQueue();
+      });
+    });
+  };
+
+  const enqueue = (incoming: File[]): void => {
+    const accepted = incoming.filter((file) => ARTWORK_EXTENSIONS.test(file.name));
+    const rejected = incoming.filter((file) => !ARTWORK_EXTENSIONS.test(file.name));
+    const before = queuedFiles.length;
+    queuedFiles = mergeUniqueFiles(queuedFiles, accepted);
+    renderQueue();
+    if (rejected.length) {
+      toast(
+        "No se admite " + rejected.map((file) => file.name).join(", ") +
+        ". Formatos válidos: PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF.",
+        "error",
+      );
+    }
+    // Si el archivo ya estaba en la cola no se duplica, pero en silencio parece
+    // que el clic no hizo nada.
+    if (accepted.length && queuedFiles.length === before) {
+      toast("Ese archivo ya estaba en la cola.", "info");
+    }
+  };
+
+  input.addEventListener("change", () => {
+    enqueue(Array.from(input.files || []));
+    input.value = "";
   });
+
+  // El input transparente cubre toda la zona, así que el navegador ya acepta el
+  // archivo soltado. Lo que faltaba era que se viera: sin esto, arrastrar sobre
+  // un recuadro que dice "arrastra aquí" no cambia nada en pantalla.
+  ["dragenter", "dragover"].forEach((name) => {
+    zone.addEventListener(name, (event) => {
+      event.preventDefault();
+      zone.classList.add("is-dragging");
+    });
+  });
+  ["dragleave", "dragend", "drop"].forEach((name) => {
+    zone.addEventListener(name, () => zone.classList.remove("is-dragging"));
+  });
+  zone.addEventListener("drop", (event) => {
+    const dropped = Array.from((event as DragEvent).dataTransfer?.files || []);
+    if (!dropped.length) return;
+    event.preventDefault();
+    enqueue(dropped);
+  });
+
+  renderQueue();
+
   button.addEventListener("click", async () => {
     const files = queuedFiles;
     if (!files.length) return;
@@ -726,28 +956,54 @@ function bindUpload(): void {
     const font = query<HTMLInputElement>("#font-file")?.files?.[0];
     const importLayers = query<HTMLInputElement>("#import-layers")!.checked;
     const created: Project[] = [];
-    busy("Importando campaña", "Leyendo capas y preparando vistas previas…", 5);
+
+    // La barra se reparte por bytes, no por archivos: con un PSD de 200 MB y
+    // dos PNG de 2, contar archivos haría que se quedara clavada en el 33%
+    // durante todo lo que de verdad tarda.
+    const totalBytes = files.reduce((sum, file) => sum + file.size, 0) || 1;
+    let sentBytes = 0;
+    const barra = (extra: number) => 4 + Math.round(((sentBytes + extra) / totalBytes) * 88);
+
+    busy("Importando campaña", "Preparando la subida…", 4);
     try {
       for (let index = 0; index < files.length; index += 1) {
         const artwork = files[index];
-        busyProgress(5 + Math.round((index / files.length) * 80), "Importando " + artwork.name);
+        const cual = files.length > 1 ? " (" + String(index + 1) + "/" + String(files.length) + ")" : "";
         const data = new FormData();
         data.append("artwork", artwork);
         data.append("name", artwork.name.replace(/\.[^.]+$/, ""));
         data.append("import_layers", String(importLayers));
         if (logo) data.append("logo", logo);
         if (font) data.append("font", font);
+
+        const alSubir = (sent: number) => {
+          busyProgress(
+            barra(sent),
+            "Subiendo " + artwork.name + cual + " · " + readableSize(sent) + " de " + readableSize(artwork.size),
+          );
+        };
+        const alTerminarSubida = () => {
+          busyProgress(
+            barra(artwork.size),
+            /\.(psd|psb)$/i.test(artwork.name)
+              ? "Leyendo las capas de " + artwork.name + "…"
+              : "Analizando " + artwork.name + "…",
+          );
+        };
+
         if (/\.(psd|psb)$/i.test(artwork.name)) {
-          const result = await post<any>("/projects/split", data);
+          const result = await upload<any>("/projects/split", data, alSubir, alTerminarSubida);
           created.push(...result.projects);
         } else {
-          created.push(await post<Project>("/projects", data));
+          created.push(await upload<Project>("/projects", data, alSubir, alTerminarSubida));
         }
+        sentBytes += artwork.size;
       }
       state.campaign = created;
       state.campaignIds = created.map((project) => project.project_id);
       state.activeId = state.campaignIds[0] || null;
       saveSession();
+      busyProgress(96, "Preparando las vistas previas…");
       await refreshAll();
       toast("Campaña importada correctamente.", "success");
       await navigate("layers");
@@ -1498,7 +1754,7 @@ function bindCopyEditor(project: Project): void {
     });
   });
   queryAll<HTMLButtonElement>(".split-copy").forEach((button) => {
-    button.addEventListener("click", () => {
+    button.addEventListener("click", async () => {
       const id = button.dataset.layer!;
       // Al separar, la capa madre deja de existir y con ella su casilla. Si
       // había texto escrito sin guardar se perdía en silencio.
@@ -1506,12 +1762,15 @@ function bindCopyEditor(project: Project): void {
       const item = (state.texts[project.project_id] || EMPTY_TEXTS).layers
         .find((entry) => entry.id === id);
       if (draft !== undefined && item && draft !== item.text) {
-        const seguir = window.confirm(
-          "Tienes texto escrito sin guardar en «" + item.name + "».\n\n" +
-          "Al separarla en partes esa casilla desaparece y el texto se pierde: " +
-          "cada parte se reescribe por su cuenta.\n\n" +
-          "Cancela para guardarlo primero, o acepta para separar de todas formas.",
-        );
+        const seguir = await confirmAction({
+          title: "Tienes texto sin guardar en «" + item.name + "»",
+          lines: [
+            "Al separarla en partes esa casilla desaparece y el texto se pierde: cada parte se reescribe por su cuenta.",
+            "Cancela para guardarlo primero, o sepárala de todas formas.",
+          ],
+          confirm: "Separar de todas formas",
+          remember: "separar-copy-sin-guardar",
+        });
         if (!seguir) return;
         delete state.copyDrafts[id];
       }
@@ -1695,11 +1954,17 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
     // Guardar sin producto deja el KV inservible para generar. Se avisa aquí
     // y no tres pasos después, cuando ya no se recuerda qué KV era.
     if (!selections.some((item) => item.category === "product")) {
-      const seguir = window.confirm(
-        "«" + project.name + "» no tiene ninguna capa marcada como Producto.\n\n" +
-        "Así no podrá generar artes: el sistema no sabe qué pieza retirar.\n\n" +
-        "Pulsa Cancelar para marcarla ahora, o Aceptar para guardar de todas formas.",
-      );
+      const seguir = await confirmAction({
+        title: "«" + project.name + "» no tiene ninguna capa marcada como Producto",
+        lines: [
+          "Así no podrá generar artes: el sistema no sabe qué pieza retirar.",
+          "Cancela para marcarla ahora, o guarda de todas formas.",
+        ],
+        confirm: "Guardar de todas formas",
+        // No borra nada: es un aviso de que el KV queda inservible para generar.
+        danger: false,
+        remember: "guardar-sin-producto",
+      });
       if (!seguir) return;
     }
     busy("Guardando revisión", "Actualizando funciones de las capas…", 35);
@@ -1915,7 +2180,13 @@ function bindSingleLayer(project: Project, layer: Layer): void {
     }
   });
   query("#delete-layer")?.addEventListener("click", async () => {
-    if (!window.confirm("¿Eliminar la capa " + layer.name + "?")) return;
+    const confirmed = await confirmAction({
+      title: "¿Eliminar la capa «" + layer.name + "»?",
+      lines: ["Se quita de este KV y no se puede deshacer."],
+      confirm: "Sí, eliminar",
+      remember: "eliminar-capa",
+    });
+    if (!confirmed) return;
     try {
       await put("/projects/" + project.project_id + "/layers", {
         updates: [], delete: [layer.id],

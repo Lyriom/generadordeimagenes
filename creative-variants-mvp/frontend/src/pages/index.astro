@@ -130,6 +130,23 @@ import "../styles/global.css";
       <div class="viewer-foot" id="viewer-foot"></div>
     </div>
 
+    <!-- Confirmación de la app, no la del navegador: el confirm() nativo sale
+         con el dominio como título, no se puede maquetar y no admite un "no
+         volver a preguntar", así que cada borrado repetía el mismo aviso. -->
+    <div id="confirm-overlay" class="confirm-overlay" hidden>
+      <div class="confirm-card" role="dialog" aria-modal="true" aria-labelledby="confirm-title" aria-describedby="confirm-body">
+        <strong id="confirm-title"></strong>
+        <div id="confirm-body" class="confirm-body"></div>
+        <label class="check confirm-remember" id="confirm-remember-row">
+          <input id="confirm-remember" type="checkbox"> No volver a preguntar en esta sesión
+        </label>
+        <div class="button-row confirm-actions">
+          <button type="button" class="ghost-button" id="confirm-cancel">Cancelar</button>
+          <button type="button" class="danger-button" id="confirm-ok">Sí, continuar</button>
+        </div>
+      </div>
+    </div>
+
     <div id="toast-region" class="toast-region" aria-live="assertive"></div>
     <div id="busy-overlay" class="busy-overlay" hidden>
       <div class="busy-card">
