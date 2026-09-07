@@ -3206,6 +3206,7 @@ function resultCard(project: Project, variant: Variant): string {
   const format = variant.meta?.format || {};
   const key = resultKey(project.project_id, variant.id);
   const warnings = variant.quality?.warnings || [];
+  const notes: string[] = variant.meta?.notes || [];
   const svg = variant.meta?.svg;
   const psd = variant.meta?.psd;
   const product = variant.meta?.product_label || "Producto";
@@ -3227,7 +3228,12 @@ function resultCard(project: Project, variant: Variant): string {
     psd ? '<a class="ghost-button" href="' + attr(fileUrl(project.project_id, psd)) + '" download>Photoshop PSD</a>' : '<span class="badge gray">PSD al regenerar</span>',
     svg ? '<a class="ghost-button" href="' + attr(fileUrl(project.project_id, svg)) + '" download>Illustrator SVG</a>' : '<span class="badge gray">SVG al regenerar</span>',
     '</div><details style="margin-top:12px"><summary>', warnings.length ? "⚠ " + String(warnings.length) + " avisos" : "Detalle", '</summary><div class="notice" style="margin-top:8px">Composición: ',
-    esc(variant.layout_label), warnings.length ? "<br>" + warnings.map((warning) => "• " + esc(warning)).join("<br>") : "<br>Sin avisos.", "</div></details></div></article>",
+    esc(variant.layout_label), warnings.length ? "<br>" + warnings.map((warning) => "• " + esc(warning)).join("<br>") : "<br>Sin avisos.",
+    // Lo que el motor decidió solo: cómo escaló los productos, si tuvo que
+    // rehacer la composición. Sin esto, «es automático» es indistinguible de
+    // «no hizo nada».
+    notes.length ? "<br><br>Decisiones del motor:<br>" + notes.map((note) => "• " + esc(note)).join("<br>") : "",
+    "</div></details></div></article>",
   ].join("");
 }
 

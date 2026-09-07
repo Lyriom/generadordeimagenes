@@ -1345,8 +1345,31 @@ def choose_layouts(
     return result[:count]
 
 
-def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[str]]:
-    """Construye el plan completo de variantes (sin renderizar)."""
+@dataclass
+class _Planning:
+    """Todo lo que hace falta para construir un plan, ya resuelto una sola vez.
+
+    Se separa del bucle porque una variante puede tener que replantearse: si la
+    pieza sale con un defecto que la invalida se prueba otra semilla, y para eso
+    hay que poder rehacer **una** sin rehacer las doce.
+    """
+
+    layers: list[Layer]
+    removed: list[Layer]
+    bias: dict[str, Any]
+    intensity: str
+    preset: dict[str, Any]
+    movable: set[str] | None
+    resizable: set[str] | None
+    reorderable: set[str] | None
+    source_canvas: tuple[int, int]
+    product_arrangement: str
+    formats: list[str]
+    count: int
+    seed: int
+
+
+def _planning(project: Project, request) -> tuple[_Planning | None, list[str]]:
     warnings: list[str] = []
     bias = parse_instruction(getattr(request, "instruction", None))
     # Las coordenadas explícitas pertenecen solo al campo de posición. El texto
@@ -1363,18 +1386,12 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
                 bias[key] = position_bias[key]
     intensity = getattr(request, "intensity", "moderate")
     preset = INTENSITY_PRESETS.get(intensity, INTENSITY_PRESETS["moderate"])
-    seed = int(getattr(request, "seed", 42))
-    count = int(getattr(request, "count", 12))
-    formats = list(getattr(request, "formats", ["1080x1080"]))
 
     hidden = set(getattr(request, "hidden_layers", []) or [])
     locked = set(getattr(request, "locked_layers", []) or [])
     movable = getattr(request, "movable_layers", None)
     resizable = getattr(request, "resizable_layers", None)
     reorderable = getattr(request, "reorderable_layers", None)
-    movable_set = set(movable) if movable is not None else None
-    resizable_set = set(resizable) if resizable is not None else None
-    reorderable_set = set(reorderable) if reorderable is not None else None
 
     working_layers: list[Layer] = []
     # Las que el usuario quitó del arte no se dibujan, pero su hueco hay que
@@ -1405,14 +1422,85 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
         warnings.append(
             "No hay elementos utilizables. Marque y recorte al menos uno en Ajustes finos."
         )
+        return None, warnings
+
+    return (
+        _Planning(
+            layers=working_layers,
+            removed=removed_layers,
+            bias=bias,
+            intensity=intensity,
+            preset=preset,
+            movable=set(movable) if movable is not None else None,
+            resizable=set(resizable) if resizable is not None else None,
+            reorderable=set(reorderable) if reorderable is not None else None,
+            source_canvas=(project.canvas.width, project.canvas.height),
+            product_arrangement=getattr(request, "product_arrangement", "auto"),
+            formats=list(getattr(request, "formats", ["1080x1080"])),
+            count=int(getattr(request, "count", 12)),
+            seed=int(getattr(request, "seed", 42)),
+        ),
+        warnings,
+    )
+
+
+def _build_plan(
+    ctx: _Planning,
+    index: int,
+    fmt: str,
+    layout_key: str,
+    variant_seed: int,
+) -> VariantPlan:
+    width, height = SUPPORTED_FORMATS[fmt]
+    rng = random.Random(variant_seed)
+    background_style = ctx.preset["backgrounds"][index % len(ctx.preset["backgrounds"])]
+    if layout_key == FAITHFUL_LAYOUT:
+        # Conservar el diseño exige conservar su fondo real, no uno generado.
+        background_style = "plate"
+
+    placements, notes = build_placements(
+        ctx.layers,
+        layout_key,
+        width,
+        height,
+        rng,
+        intensity=ctx.intensity,
+        bias=ctx.bias,
+        movable=ctx.movable,
+        resizable=ctx.resizable,
+        reorderable=ctx.reorderable,
+        source_canvas=ctx.source_canvas,
+        safe_area=format_safe_area(fmt),
+        product_arrangement=ctx.product_arrangement,
+        removed=ctx.removed,
+    )
+    return VariantPlan(
+        index=index,
+        layout=layout_key,
+        layout_label=LAYOUTS[layout_key]["label"],
+        format=fmt,
+        width=width,
+        height=height,
+        seed=variant_seed,
+        intensity=ctx.intensity,
+        background_style=background_style,
+        placements=placements,
+        notes=notes,
+    )
+
+
+def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[str]]:
+    """Construye el plan completo de variantes (sin renderizar)."""
+    ctx, warnings = _planning(project, request)
+    if ctx is None:
         return [], warnings
 
-    layout_rng = random.Random(seed)
+    layout_rng = random.Random(ctx.seed)
     layout_keys = choose_layouts(
-        count,
+        ctx.count,
         layout_rng,
         allowed=getattr(request, "layouts", None),
-        preferred=bias.get("preferred_layouts"),
+        preferred=ctx.bias.get("preferred_layouts"),
     )
 
     # La primera variante de cada formato compatible reproduce el diseño original.
@@ -1420,59 +1508,41 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     source_aspect = project.canvas.width / max(1, project.canvas.height)
     faithful_pending: set[str] = set()
     if getattr(request, "layouts", None) is None:
-        for fmt in dict.fromkeys(formats):
+        for fmt in dict.fromkeys(ctx.formats):
             fmt_w, fmt_h = SUPPORTED_FORMATS[fmt]
             if abs((fmt_w / fmt_h) / source_aspect - 1.0) <= FAITHFUL_ASPECT_TOLERANCE:
                 faithful_pending.add(fmt)
 
     plans: list[VariantPlan] = []
-    for index in range(count):
-        fmt = formats[index % len(formats)]
-        width, height = SUPPORTED_FORMATS[fmt]
+    for index in range(ctx.count):
+        fmt = ctx.formats[index % len(ctx.formats)]
         if fmt in faithful_pending:
             layout_key = FAITHFUL_LAYOUT
             faithful_pending.discard(fmt)
         else:
             layout_key = layout_keys[index]
-        variant_seed = seed * 1000 + index
-        rng = random.Random(variant_seed)
-        background_style = preset["backgrounds"][index % len(preset["backgrounds"])]
-        if layout_key == FAITHFUL_LAYOUT:
-            # Conservar el diseño exige conservar su fondo real, no uno generado.
-            background_style = "plate"
-
-        placements, notes = build_placements(
-            working_layers,
-            layout_key,
-            width,
-            height,
-            rng,
-            intensity=intensity,
-            bias=bias,
-            movable=movable_set,
-            resizable=resizable_set,
-            reorderable=reorderable_set,
-            source_canvas=(project.canvas.width, project.canvas.height),
-            safe_area=format_safe_area(fmt),
-            product_arrangement=getattr(request, "product_arrangement", "auto"),
-            removed=removed_layers,
-        )
-        plans.append(
-            VariantPlan(
-                index=index,
-                layout=layout_key,
-                layout_label=LAYOUTS[layout_key]["label"],
-                format=fmt,
-                width=width,
-                height=height,
-                seed=variant_seed,
-                intensity=intensity,
-                background_style=background_style,
-                placements=placements,
-                notes=notes,
-            )
-        )
+        plans.append(_build_plan(ctx, index, fmt, layout_key, ctx.seed * 1000 + index))
     return plans, warnings
+
+
+#: Cuánto se separa la semilla de un reintento de la que falló. Un primo grande
+#: para que dos reintentos no acaben en el mismo sitio por casualidad.
+_RETRY_SEED_STEP = 7919
+
+
+def replan(project: Project, request, plan: VariantPlan, attempt: int) -> VariantPlan | None:
+    """Rehace **una** variante con otra semilla, dejando lo demás igual.
+
+    Es lo que permite volver a intentarlo cuando la pieza sale con un defecto que
+    la invalida, en vez de entregarla con un aviso y que lo arregle el usuario.
+    Devuelve `None` si el proyecto ya no da para plantear nada.
+    """
+    ctx, _ = _planning(project, request)
+    if ctx is None:
+        return None
+    return _build_plan(
+        ctx, plan.index, plan.format, plan.layout, plan.seed + _RETRY_SEED_STEP * attempt
+    )
 
 
 def layout_catalog() -> list[dict[str, str]]:

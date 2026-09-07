@@ -40,6 +40,70 @@ def _to_placement_model(placement: layout_engine.Placement) -> VariantLayerPlace
     )
 
 
+#: Cuántas composiciones se prueban para una misma variante antes de quedarse con
+#: la mejor. Tres porque el problema casi siempre se resuelve en el primer
+#: reintento; seguir insistiendo cuesta render y no arregla lo que no depende de
+#: la semilla, como que falte el logo.
+MAX_ATTEMPTS = 3
+
+
+def _compose_until_clean(project: Project, request, plan):
+    """Dibuja la variante, la mira, y si no se puede publicar la vuelve a plantear.
+
+    Es la diferencia entre entregar una pieza mala con un aviso y no entregarla:
+    un solapamiento grave o unas proporciones irreales dependen de cómo cayó la
+    composición, así que se prueba otra semilla y se conserva la mejor de todas.
+
+    Devuelve (plan, imagen, informe, intentos) del que se queda.
+    """
+    best: tuple = ()
+    attempt = 0
+    while True:
+        attempt += 1
+        image, render_warnings = renderer.render_variant(project, plan)
+        report = quality.evaluate_variant(
+            project, plan, image, extra_warnings=render_warnings
+        )
+        if not best or report.score > best[2].score:
+            if best:
+                best[1].close()
+            best = (plan, image, report)
+        else:
+            image.close()
+
+        defects = quality.blocking_defects(report)
+        if not defects or attempt >= MAX_ATTEMPTS:
+            break
+        siguiente = layout_engine.replan(project, request, plan, attempt)
+        if siguiente is None:
+            break
+        logger.info(
+            "variante %s replanteada (intento %s): %s",
+            plan.index,
+            attempt + 1,
+            ", ".join(defects),
+        )
+        plan = siguiente
+
+    plan, image, report = best
+    if attempt > 1:
+        pendientes = quality.blocking_defects(report)
+        if pendientes:
+            # Se dice cuántas se probaron: si no, el aviso parece un descuido y
+            # no el resultado de haberlo intentado.
+            report.warnings.insert(
+                0,
+                f"Se probaron {attempt} composiciones y ninguna quedó limpia; esta es "
+                f"la mejor. Sigue con: {', '.join(pendientes)}.",
+            )
+        else:
+            plan.notes.append(
+                f"Compuesta al intento {attempt}: las anteriores tenían defectos que "
+                "impedían publicarla."
+            )
+    return plan, image, report, attempt
+
+
 def generate_variants(project: Project, request) -> tuple[list[Variant], list[str]]:
     """Genera todas las variantes solicitadas. Determinista para una misma semilla."""
     plans, warnings = layout_engine.plan_variants(project, request)
@@ -54,8 +118,7 @@ def generate_variants(project: Project, request) -> tuple[list[Variant], list[st
     variants: list[Variant] = []
     for plan in plans:
         variant_id = new_id()
-        image, render_warnings = renderer.render_variant(project, plan)
-        report = quality.evaluate_variant(project, plan, image, extra_warnings=render_warnings)
+        plan, image, report, attempts = _compose_until_clean(project, request, plan)
         rel_png, rel_thumb = renderer.save_variant_image(project, variant_id, image)
         prediction: dict = {}
         try:
@@ -82,6 +145,13 @@ def generate_variants(project: Project, request) -> tuple[list[Variant], list[st
                 meta={
                     "format": format_spec(plan.format),
                     "product_arrangement": getattr(request, "product_arrangement", "auto"),
+                    # Cuántas composiciones hubo que probar para esta pieza. Un
+                    # número mayor que 1 dice que el motor descartó las primeras.
+                    "attempts": attempts,
+                    # Lo que el motor decidió solo y por qué: cómo escaló los
+                    # productos, si tuvo que replantear, qué ajustó al formato.
+                    # Hasta ahora se quedaba en el plan y no lo veía nadie.
+                    "notes": plan.notes[:6],
                     # Trazabilidad exacta del producto o combo usado en esta
                     # salida. Los assets de reemplazo son inmutables, por lo que
                     # esta lista también permite auditar que no hubo cruces.

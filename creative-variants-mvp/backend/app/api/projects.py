@@ -21,6 +21,7 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 
 from ..config import settings
 from ..models import (
@@ -70,6 +71,7 @@ from ..services import (
     analysis,
     art_text,
     autopilot,
+    product_identity,
     psd_import,
     replacement,
     export as export_service,
@@ -1137,6 +1139,20 @@ async def replace_product(
                 group_id=group_id,
                 group_name=group_name,
                 arrangement=arrangement,
+            )
+        # Reconocer qué producto es, aquí y no al generar: es una consulta de red
+        # y la generación tiene que seguir siendo local y determinista. Va en un
+        # hilo aparte porque este endpoint es async y bloquearlo pararía al resto.
+        record = await run_in_threadpool(
+            product_identity.identify,
+            project,
+            layer,
+            storage.abs_path(project.project_id, layer.src) if layer.src else None,
+        )
+        if record is None:
+            warnings.append(
+                "No se reconoció qué producto es, así que en un combo se igualan "
+                "los altos en vez de escalarlos por su tamaño real."
             )
         storage.save_project(project)
     except Exception as exc:  # noqa: BLE001

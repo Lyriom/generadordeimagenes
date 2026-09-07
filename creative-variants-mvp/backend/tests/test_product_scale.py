@@ -354,3 +354,74 @@ def test_el_aviso_de_proporcion_va_primero():
     )
     assert report.warnings
     assert "Proporción irreal" in report.warnings[0]
+
+
+# ------------------------------------------- validar la pieza y volver a probar
+class _PlanFalso:
+    """Plan mínimo: al motor de reintentos solo le importa índice, formato y semilla."""
+
+    def __init__(self, index=0, seed=1000):
+        self.index = index
+        self.seed = seed
+        self.format = "1080x1920"
+        self.layout = "product_center_headline_top"
+        self.notes: list[str] = []
+        self.placements: list = []
+
+
+def _informe(score: int, conflictos: float = 0.0):
+    from app.models import QualityReport
+
+    return QualityReport(
+        score=score,
+        warnings=["algo"] if conflictos else [],
+        metrics={"product_scale_conflicts": conflictos},
+    )
+
+
+def _simular(monkeypatch, guion: list[tuple[int, float]]):
+    """Cada entrada del guion es (puntaje, conflictos) del siguiente render."""
+    from PIL import Image as PilImage
+
+    from app.services import layout_engine as le
+    from app.services import quality as q
+    from app.services import renderer as r
+    from app.services import variants as v
+
+    turnos = iter(guion)
+    monkeypatch.setattr(r, "render_variant", lambda *a, **k: (PilImage.new("RGB", (4, 4)), []))
+    monkeypatch.setattr(q, "evaluate_variant", lambda *a, **k: _informe(*next(turnos)))
+    monkeypatch.setattr(
+        le, "replan", lambda project, request, plan, attempt: _PlanFalso(plan.index, plan.seed + attempt)
+    )
+    return v
+
+
+def test_una_pieza_limpia_se_compone_una_sola_vez(monkeypatch):
+    v = _simular(monkeypatch, [(96, 0.0)])
+    _, _, report, attempts = v._compose_until_clean(None, None, _PlanFalso())
+    assert attempts == 1
+    assert report.score == 96
+
+
+def test_una_pieza_invalida_se_vuelve_a_plantear(monkeypatch):
+    """Antes se entregaba con un aviso; ahora se prueba otra composición."""
+    v = _simular(monkeypatch, [(70, 1.0), (94, 0.0)])
+    plan, _, report, attempts = v._compose_until_clean(None, None, _PlanFalso())
+    assert attempts == 2
+    assert report.score == 94
+    assert any("intento 2" in note for note in plan.notes)
+
+
+def test_si_ninguna_sale_limpia_se_entrega_la_mejor_y_se_dice(monkeypatch):
+    v = _simular(monkeypatch, [(70, 1.0), (81, 1.0), (75, 1.0)])
+    _, _, report, attempts = v._compose_until_clean(None, None, _PlanFalso())
+    assert attempts == v.MAX_ATTEMPTS
+    assert report.score == 81  # la mejor de las tres, no la última
+    assert "Se probaron 3 composiciones" in report.warnings[0]
+
+
+def test_no_insiste_para_siempre(monkeypatch):
+    v = _simular(monkeypatch, [(50, 1.0)] * 10)
+    _, _, _, attempts = v._compose_until_clean(None, None, _PlanFalso())
+    assert attempts == v.MAX_ATTEMPTS

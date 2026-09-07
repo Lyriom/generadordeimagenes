@@ -28,6 +28,7 @@ from .magnific import MagnificInpaintProvider, model_catalog as magnific_catalog
 from .manual_segmentation import ManualSegmentationProvider
 from .opencv_inpaint import OpenCVInpaintProvider
 from .openai_inpaint import OpenAIInpaintProvider
+from .openai_vision import OpenAIVisionProvider
 from .rapid_ocr import RapidOcrProvider
 from .sam_segmentation import SamSegmentationProvider
 
@@ -116,6 +117,7 @@ def provider_status() -> dict[str, dict[str, Any]]:
     adobe = AdobeInpaintProvider()
     openai = OpenAIInpaintProvider()
     magnific = MagnificInpaintProvider()
+    vision = OpenAIVisionProvider()
     active_segmentation = get_segmentation_provider()
     active_inpainting = get_inpainting_provider()
     return {
@@ -131,6 +133,15 @@ def provider_status() -> dict[str, dict[str, Any]]:
             "available": ocr_ok,
             "detail": None if ocr_ok else ocr.error,
             "lang": settings.ocr_lang,
+        },
+        # Reconocer el producto es lo que permite escalar bien un combo sin que el
+        # usuario tenga que nombrar sus archivos. Se publica su estado porque una
+        # capacidad apagada en silencio es una capacidad que no existe.
+        "product_vision": {
+            "active": vision.name if vision.available() else "none",
+            "available": vision.available(),
+            "enabled": settings.enable_product_vision,
+            "model": settings.openai_vision_model,
         },
         "inpainting": {
             "active": getattr(active_inpainting, "name", "opencv"),

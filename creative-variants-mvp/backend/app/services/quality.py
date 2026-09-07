@@ -71,6 +71,26 @@ def _text_background_color(
     return tuple(int(round(v)) for v in mean)  # type: ignore[return-value]
 
 
+#: Defectos que invalidan una pieza: no son cosas a pulir, son razones para no
+#: publicarla. Cuando aparece alguno, el motor vuelve a plantear la variante en
+#: vez de entregarla con un aviso y dejarle el problema al usuario.
+BLOCKING_METRICS: dict[str, str] = {
+    "product_scale_conflicts": "proporciones irreales entre los productos",
+    "severe_overlaps": "solapamientos graves",
+    "outside_canvas": "elementos fuera del lienzo",
+    "distorted_layers": "capas deformadas",
+}
+
+
+def blocking_defects(report: QualityReport) -> list[str]:
+    """Nombres de los defectos que invalidan la pieza, vacío si se puede publicar."""
+    return [
+        label
+        for key, label in BLOCKING_METRICS.items()
+        if report.metrics.get(key, 0)
+    ]
+
+
 def evaluate_variant(
     project: Project,
     plan: VariantPlan,

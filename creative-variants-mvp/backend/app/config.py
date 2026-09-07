@@ -128,6 +128,17 @@ class Settings:
         self.openai_image_endpoint: str = os.getenv(
             "OPENAI_IMAGE_ENDPOINT", "https://api.openai.com/v1/images/edits"
         )
+        # Reconocer el producto de un recorte para poder escalarlo por su tamaño
+        # real. Se pide una familia de una lista cerrada y con `detail: low`, así
+        # que es una consulta mínima y se hace una sola vez por recorte.
+        self.enable_product_vision: bool = _env_bool("ENABLE_PRODUCT_VISION", True)
+        self.openai_vision_model: str = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
+        self.openai_vision_endpoint: str = os.getenv(
+            "OPENAI_VISION_ENDPOINT", "https://api.openai.com/v1/chat/completions"
+        )
+        # Propio y corto: esto corre mientras el usuario espera a que suba su
+        # producto, y los 180 s de los generadores de imagen ahí no valen.
+        self.product_vision_timeout: int = _env_int("PRODUCT_VISION_TIMEOUT", 25)
         self.bfl_api_key: str | None = os.getenv("BFL_API_KEY") or None
         self.bfl_endpoint: str = os.getenv(
             "BFL_ENDPOINT", "https://api.bfl.ai/v1/flux-pro-1.0-fill"

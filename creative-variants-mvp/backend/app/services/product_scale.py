@@ -113,36 +113,70 @@ def _inches(haystack: str) -> int | None:
     return max(usable) if usable else None
 
 
-def measure(*texts: str | None) -> Measurement | None:
-    """Alto real del producto que nombran esos textos, o `None` si no se reconoce."""
-    haystack = " ".join(normalise(text) for text in texts if text)
-    if not haystack:
-        return None
+def families() -> tuple[tuple[str, str], ...]:
+    """Lista cerrada (clave, nombre) de lo que el motor sabe medir.
 
-    for key, pattern, height_cm, label in _FAMILIES:
-        if not re.search(pattern, haystack):
+    La usa el identificador por imagen para preguntar eligiendo de un menú en vez
+    de a campo abierto: así la respuesta o es una de estas o no vale, y no hay que
+    interpretar texto libre.
+    """
+    return tuple((key, label) for key, _, _, label in _FAMILIES)
+
+
+def measure_family(key: str, *hints: str | None) -> Measurement | None:
+    """Mide una familia ya identificada, afinando con las pulgadas que haya en `hints`.
+
+    Quien reconoce el producto mirando la foto no siempre puede leer el tamaño;
+    las pulgadas suelen estar escritas en el arte o en el nombre del archivo.
+    """
+    for candidate, _, height_cm, label in _FAMILIES:
+        if candidate != key:
             continue
-        inches = _inches(haystack)
+        haystack = " ".join(normalise(hint) for hint in hints if hint)
+        inches = _inches(haystack) if haystack else None
         if inches is not None and key in _SCREEN_FAMILIES:
             height_cm = inches * _DIAGONAL_TO_HEIGHT * _INCH_TO_CM * _SCREEN_CHROME
             label = f'{label} de {inches}"'
         elif inches is not None and key in _WIDTH_IN_INCHES_FAMILIES:
-            # Una cocina de 30" es más ancha que una de 20", y algo más alta.
             height_cm = 95.0 if inches >= 26 else 90.0
             label = f'{label} de {inches}"'
         return Measurement(round(height_cm, 1), label)
     return None
 
 
-def measure_layer(layer) -> Measurement | None:
-    """Mide un producto por su origen, de la pista más fiable a la más pobre.
+def family_key(*texts: str | None) -> str | None:
+    """Familia que nombran esos textos, o `None` si no se reconoce ninguna."""
+    haystack = " ".join(normalise(text) for text in texts if text)
+    if not haystack:
+        return None
+    for key, pattern, _, _ in _FAMILIES:
+        if re.search(pattern, haystack):
+            return key
+    return None
 
-    El nombre del archivo que subió el usuario es el mejor dato
-    («cocina-indurama-croma.png»); el de la capa del PSD suele ser «Capa 15». No
-    se usa el nombre del grupo: describe al combo entero, así que mediría a todas
-    sus piezas como si fueran la primera que menciona.
+
+def measure(*texts: str | None) -> Measurement | None:
+    """Alto real del producto que nombran esos textos, o `None` si no se reconoce."""
+    key = family_key(*texts)
+    return measure_family(key, *texts) if key is not None else None
+
+
+def measure_layer(layer) -> Measurement | None:
+    """Mide un producto por lo que ya se sabe de él, de lo más fiable a lo más pobre.
+
+    Lo primero es lo que dejó el identificador al subir el producto (`product_size`),
+    que es donde acaba lo que se reconoció mirando la foto. Después el nombre del
+    archivo y el de la capa, que son pistas y ya no un requisito. No se usa el
+    nombre del grupo: describe al combo entero, así que mediría a todas sus piezas
+    como si fueran la primera que menciona.
     """
     meta = getattr(layer, "meta", None) or {}
+    stored = meta.get("product_size")
+    if isinstance(stored, dict) and stored.get("height_cm"):
+        try:
+            return Measurement(float(stored["height_cm"]), str(stored.get("family") or "producto"))
+        except (TypeError, ValueError):
+            pass
     for candidate in (
         meta.get("replaced_from"),
         getattr(layer, "name", None),
