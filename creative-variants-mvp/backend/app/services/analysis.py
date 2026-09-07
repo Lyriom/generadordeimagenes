@@ -271,12 +271,22 @@ def analyze_project(
     if assigned_cutout:
         assigned[LayerCategory.PRODUCT] = 1
     detections = sorted(detections, key=lambda det: det.area, reverse=True)
+    # Cajas ya aceptadas, para no quedarse dos veces con lo mismo. El detector por
+    # contraste propone recuadros anidados sobre un mismo objeto —el bloque de
+    # color y el bloque de color con su borde—, y sin esto los dos se volvían
+    # capa: al recomponer salía el mismo elemento repetido en la pieza.
+    aceptadas: list[tuple[int, int, int, int]] = []
     for det in detections:
         box = (det.x, det.y, det.width, det.height)
         if any(_overlap_ratio(box, tbox) > 0.55 for tbox in text_boxes):
             continue  # la región es texto: la maneja el OCR
         if det.width < 20 or det.height < 20:
             continue
+        # Se comparan de mayor a menor: si esta caja está casi entera dentro de
+        # una ya aceptada, es la misma cosa vista más pequeña.
+        if any(_overlap_ratio(box, previa) > 0.6 for previa in aceptadas):
+            continue
+        aceptadas.append(box)
         category, heuristic_confidence = _classify_visual(box, image_size, faces, assigned)
         assigned[category] = assigned.get(category, 0) + 1
         confidence = round(min(0.95, (det.score * 0.5) + (heuristic_confidence * 0.5)), 3)

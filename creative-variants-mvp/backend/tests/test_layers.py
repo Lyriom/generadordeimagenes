@@ -215,3 +215,33 @@ def test_file_serving_blocks_path_traversal(client: TestClient, project: dict):
     for evil in ("../../../etc/passwd", "..%2f..%2fproject.json", "/etc/passwd"):
         response = client.get(f"/projects/{project_id}/files/{evil}")
         assert response.status_code in (400, 404), evil
+
+
+def test_no_se_queda_dos_veces_con_el_mismo_objeto(monkeypatch, client, project):
+    """El detector por contraste propone recuadros anidados sobre una misma cosa.
+
+    Sin suprimirlos, al recomponer el arte salía el mismo bloque repetido en la
+    pieza: es lo que pasaba al separar un banner aplanado.
+    """
+    from app.models import Project as ProjectModel
+    from app.providers.base import Detection
+    from app.services import analysis, storage
+    from app.services import segmentation as seg_service
+
+    propuestas = [
+        Detection(x=100, y=100, width=200, height=160, score=0.8),
+        Detection(x=110, y=108, width=180, height=140, score=0.7),  # la misma, anidada
+        Detection(x=380, y=120, width=140, height=150, score=0.6),  # otra cosa
+    ]
+    monkeypatch.setattr(seg_service, "detect_regions", lambda *a, **k: (propuestas, []))
+    monkeypatch.setattr(seg_service, "refine_box", lambda *a, **k: None)
+    monkeypatch.setattr(analysis, "detect_faces", lambda *a, **k: [])
+
+    cargado: ProjectModel = storage.load_project(project["project_id"])
+    layers, *_ = analysis.analyze_project(
+        cargado, run_segmentation=True, run_ocr=False, max_regions=12, extract=False
+    )
+    cajas = [(l.x, l.y, l.width, l.height) for l in layers if l.type.value == "image"]
+    assert (110, 108, 180, 140) not in cajas, "se quedó con la caja anidada"
+    assert (100, 100, 200, 160) in cajas
+    assert (380, 120, 140, 150) in cajas
