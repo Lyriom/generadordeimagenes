@@ -652,8 +652,9 @@ async function renderCampaign(): Promise<void> {
           '<div class="grid two">',
           '<section class="card elevated"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div><span class="badge">RECOMENDADO</span></div>',
           '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
-          '<span class="drop-icon">⇧</span><strong id="drop-title">Arrastra tus KV aquí</strong>',
-          '<span id="drop-hint">PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
+          '<span class="drop-icon" id="drop-icon">⇧</span>',
+          '<strong class="drop-title" id="drop-title">Arrastra tus KV aquí</strong>',
+          '<span class="drop-hint" id="drop-hint">PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
           '<div id="upload-summary" class="queue-summary" hidden></div>',
           '<div id="upload-file-list" class="queue-list"></div>',
           '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Logo opcional</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
@@ -869,6 +870,7 @@ function queueCard(file: File, index: number): string {
 function bindUpload(): void {
   const input = query<HTMLInputElement>("#artwork-files")!;
   const zone = query<HTMLElement>("#artwork-drop")!;
+  const icon = query<HTMLElement>("#drop-icon")!;
   const title = query<HTMLElement>("#drop-title")!;
   const hint = query<HTMLElement>("#drop-hint")!;
   const button = query<HTMLButtonElement>("#upload-campaign")!;
@@ -882,12 +884,20 @@ function bindUpload(): void {
     button.textContent = queuedFiles.length
       ? "Crear campaña con " + String(queuedFiles.length) + " KV"
       : "Crear campaña";
-    // La zona de arrastre se encoge cuando ya hay cola: deja de ser lo
-    // principal de la tarjeta y el sitio se lo quedan los archivos elegidos.
-    zone.classList.toggle("slim", queuedFiles.length > 0);
-    title.textContent = queuedFiles.length ? "Añadir más KV" : "Arrastra tus KV aquí";
-    hint.textContent = queuedFiles.length
-      ? "Arrastra aquí o haz clic para sumar más a la campaña"
+    // Con archivos ya en cola la zona de arrastre se queda en un «+»: sigue
+    // siendo un sitio donde soltar —por eso conserva área y borde de puntos, y
+    // no es un botón redondo—, pero deja de explicar lo que ya se explicó y el
+    // espacio se lo quedan los archivos elegidos, que es lo que hay que ver.
+    const conCola = queuedFiles.length > 0;
+    zone.classList.toggle("slim", conCola);
+    icon.textContent = conCola ? "+" : "⇧";
+    // El «+» solo no dice nada a un lector de pantalla, y el texto visible ya
+    // no está: el nombre accesible pasa a la etiqueta.
+    zone.setAttribute("aria-label", conCola ? "Añadir más KV" : "");
+    zone.title = conCola ? "Añadir más KV" : "";
+    title.textContent = conCola ? "Añadir más KV" : "Arrastra tus KV aquí";
+    hint.textContent = conCola
+      ? ""
       : "PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios";
     summary.hidden = queuedFiles.length === 0;
     summary.innerHTML = queuedFiles.length

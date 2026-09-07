@@ -1195,19 +1195,22 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   cursor: pointer;
 }
 .dropzone.compact { min-height: 165px; }
-/* Con archivos ya en cola la zona de arrastre deja de ser lo importante: se
-   encoge para que el sitio se lo queden los archivos elegidos, que son lo que
-   el usuario necesita ver. */
-.dropzone.slim { min-height: 104px; padding: 18px; }
+/* Con archivos ya en cola la zona de arrastre se queda en un «+»: el texto ya
+   se leyó una vez y el sitio se lo quedan los archivos elegidos, que son lo
+   que hay que ver. Conserva área y borde de puntos porque sigue siendo un
+   sitio donde soltar, no un botón. */
+.dropzone.slim { min-height: 74px; padding: 14px; }
+.dropzone.slim .drop-title, .dropzone.slim .drop-hint { display: none; }
 .dropzone.slim .drop-icon {
-  width: 38px;
-  height: 38px;
-  margin-bottom: 9px;
-  border-radius: 12px;
-  font-size: 18px;
+  width: 42px;
+  height: 42px;
+  margin: 0 auto;
+  border-radius: 13px;
+  font-size: 27px;
+  font-weight: 300;
+  /* El «+» de la tipografía trae hueco arriba; sin esto queda bajo del centro. */
+  line-height: 0.9;
 }
-.dropzone.slim strong { font-size: var(--fs-lg); }
-.dropzone.slim span { margin-top: 4px; }
 .dropzone strong { display: block; font-size: var(--fs-xl); font-weight: 700; }
 .dropzone span { display: block; margin-top: 8px; color: var(--fg-muted); font-size: var(--fs-sm); }
 .drop-icon {
