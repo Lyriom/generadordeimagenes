@@ -43,6 +43,30 @@ DEFAULT_LOCKS = {LayerCategory.LOGO, LayerCategory.PRODUCT, LayerCategory.PERSON
 LOW_CONFIDENCE = 0.55
 
 
+#: Qué parte de una región tiene que ser texto para considerarla una plancha de
+#: copy en vez de un objeto con letras encima.
+TEXT_PLATE_RATIO = 0.14
+
+
+def _text_share(
+    box: tuple[int, int, int, int], text_boxes: list[tuple[int, int, int, int]]
+) -> float:
+    """Fracción de `box` ocupada por los textos que caen dentro.
+
+    Se suman las intersecciones sin descontar solapes entre textos: dos líneas
+    de copy no se pisan, así que la cuenta es buena y no hace falta una máscara.
+    """
+    bx, by, bw, bh = box
+    area = float(max(1, bw * bh))
+    dentro = 0
+    for tx, ty, tw, th in text_boxes:
+        x0, y0 = max(bx, tx), max(by, ty)
+        x1, y1 = min(bx + bw, tx + tw), min(by + bh, ty + th)
+        if x1 > x0 and y1 > y0:
+            dentro += (x1 - x0) * (y1 - y0)
+    return min(1.0, dentro / area)
+
+
 def _overlap_ratio(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
     """Fracción del área de `a` cubierta por `b`."""
     ax, ay, aw, ah = a
@@ -278,8 +302,14 @@ def analyze_project(
     aceptadas: list[tuple[int, int, int, int]] = []
     for det in detections:
         box = (det.x, det.y, det.width, det.height)
-        if any(_overlap_ratio(box, tbox) > 0.55 for tbox in text_boxes):
-            continue  # la región es texto: la maneja el OCR
+        # Un bloque de color con copy encima y una foto con una marca de agua se
+        # detectan igual: como un rectángulo con texto dentro. La diferencia es
+        # cuánto del rectángulo ES texto. Si es una parte apreciable, el
+        # contenido está en las palabras y se queda el texto (editable). Si es un
+        # detalle, el contenido está en la imagen y se queda la imagen. Uno de
+        # los dos, nunca los dos, que era lo que ponía el mensaje repetido.
+        if _text_share(box, text_boxes) >= TEXT_PLATE_RATIO:
+            continue  # esto es una plancha de texto: la maneja el OCR
         if det.width < 20 or det.height < 20:
             continue
         # Se comparan de mayor a menor: si esta caja está casi entera dentro de

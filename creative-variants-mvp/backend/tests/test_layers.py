@@ -247,37 +247,61 @@ def test_no_se_queda_dos_veces_con_el_mismo_objeto(monkeypatch, client, project)
     assert (380, 120, 140, 150) in cajas
 
 
-def test_el_copy_pintado_dentro_de_un_bloque_no_se_saca_aparte(monkeypatch, client, project):
-    """Sacarlo pondría el mismo mensaje dos veces: dentro del bloque y suelto encima."""
+def _separar(monkeypatch, client, project, region, textos):
+    """Corre la separación con una región y unos textos dados. Devuelve (capas, avisos)."""
     from app.models import Project as ProjectModel
     from app.providers.base import Detection, OcrResult, TextRegion
     from app.services import analysis, ocr as ocr_service, storage
     from app.services import segmentation as seg_service
 
-    # Un bloque de color con su copy dentro, y un titular suelto fuera de él.
-    bloque = Detection(x=40, y=40, width=300, height=200, score=0.9)
-    monkeypatch.setattr(seg_service, "detect_regions", lambda *a, **k: ([bloque], []))
+    monkeypatch.setattr(
+        seg_service, "detect_regions",
+        lambda *a, **k: ([Detection(x=region[0], y=region[1], width=region[2],
+                                    height=region[3], score=0.9)], []),
+    )
     monkeypatch.setattr(seg_service, "refine_box", lambda *a, **k: None)
     monkeypatch.setattr(analysis, "detect_faces", lambda *a, **k: [])
     monkeypatch.setattr(
-        ocr_service,
-        "run_ocr",
+        ocr_service, "run_ocr",
         lambda *a, **k: OcrResult(
-            regions=[
-                TextRegion(text="ESPECIAL DE ELECTROMENORES", x=70, y=90, width=220, height=40),
-                TextRegion(text="30% OFF", x=420, y=300, width=140, height=50),
-            ],
+            regions=[TextRegion(text=t, x=x, y=y, width=w, height=h)
+                     for t, x, y, w, h in textos],
             provider="falso",
         ),
     )
-
     cargado: ProjectModel = storage.load_project(project["project_id"])
     layers, warnings, *_ = analysis.analyze_project(
         cargado, run_segmentation=True, run_ocr=True, max_regions=12, extract=False
     )
+    return layers, warnings
+
+
+def test_una_plancha_de_copy_se_queda_como_texto_editable(monkeypatch, client, project):
+    """El bloque azul con el titular dentro: el contenido son las palabras."""
+    layers, _ = _separar(
+        monkeypatch, client, project,
+        region=(40, 40, 300, 200),
+        textos=[("ESPECIAL DE ELECTROMENORES", 60, 90, 260, 60)],
+    )
     textos = [l.content for l in layers if l.type.value == "text"]
-    assert any("30% OFF" in (t or "") for t in textos), "el titular de fuera sí se separa"
-    assert not any("ELECTROMENORES" in (t or "") for t in textos), "el de dentro no"
+    imagenes = [(l.x, l.y, l.width, l.height) for l in layers if l.type.value == "image"]
+    assert any("ELECTROMENORES" in (t or "") for t in textos)
+    # Y el rectángulo de color no se queda además como imagen: sería el mismo
+    # mensaje dos veces en la pieza.
+    assert (40, 40, 300, 200) not in imagenes
+
+
+def test_una_marca_pequena_sobre_una_foto_deja_la_foto(monkeypatch, client, project):
+    """Al revés: unas letras pequeñas sobre un objeto grande no lo convierten en copy."""
+    layers, warnings = _separar(
+        monkeypatch, client, project,
+        region=(30, 30, 400, 400),
+        textos=[("ref. 123", 60, 380, 90, 24)],
+    )
+    textos = [l.content for l in layers if l.type.value == "text"]
+    imagenes = [(l.x, l.y, l.width, l.height) for l in layers if l.type.value == "image"]
+    assert (30, 30, 400, 400) in imagenes
+    assert not any("ref. 123" in (t or "") for t in textos)
     assert any("dentro de bloques del arte" in w for w in warnings)
 
 
