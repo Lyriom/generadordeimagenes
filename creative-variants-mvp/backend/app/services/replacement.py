@@ -14,7 +14,7 @@ from pathlib import Path
 from PIL import Image
 
 from ..models import Layer, LayerCategory, LayerType, Project
-from . import storage
+from . import product_alpha, storage
 from .imaging import fit_contain, load_rgba
 
 logger = logging.getLogger(__name__)
@@ -126,12 +126,29 @@ def _trim_to_content(image: Image.Image) -> tuple[Image.Image, list[str]]:
     )
     if opaque_ratio < MIN_OPAQUE_RATIO:
         raise ValueError("La imagen casi no tiene contenido visible.")
-    if alpha.getextrema() == (255, 255):
-        warnings.append(
-            "La imagen no tiene transparencia: se verá su fondo rectangular sobre el KV. "
-            "Use un PNG recortado (sin fondo)."
-        )
     return image.crop(box), warnings
+
+
+#: Cómo se consiguió el recorte, para poder decirlo en la interfaz. No es lo
+#: mismo que el archivo ya viniera recortado que haberlo recortado aquí.
+CUTOUT_LABELS = {
+    "ya-transparente": "el archivo ya venía recortado",
+    "fondo-plano": "recortado aquí, por el fondo plano del catálogo",
+    "magnific": "recortado con el modelo de recorte",
+    "sin-recorte": "sin recortar: la imagen conserva su fondo",
+}
+
+
+def _prepare_incoming(source: Path) -> tuple[Image.Image, list[str], str]:
+    """El recorte listo para pegar: con transparencia y ajustado al contenido.
+
+    Un catálogo entrega el producto sobre blanco, y antes eso solo se avisaba.
+    Recortar aquí es la diferencia entre pegar el producto y pegar un rectángulo
+    blanco encima del arte.
+    """
+    recortada, warnings, metodo = product_alpha.cutout(load_rgba(source), source)
+    ajustada, avisos = _trim_to_content(recortada)
+    return ajustada, warnings + avisos, metodo
 
 
 def _target_box(layer: Layer, doomed: list[Layer]) -> tuple[int, int, int, int]:
@@ -166,7 +183,7 @@ def replace_layer_image(
     lo que permite borrarlo del fondo. La caja se recalcula con ajuste por contención
     y centrado, así que el producto nuevo nunca se deforma.
     """
-    incoming, warnings = _trim_to_content(load_rgba(source))
+    incoming, warnings, cutout_method = _prepare_incoming(source)
 
     if hide_others:
         # Limpia el grupo cargado en la tanda anterior antes de construir uno nuevo.
@@ -212,6 +229,7 @@ def replace_layer_image(
 
     layer.meta.setdefault("original_src", layer.src)
     layer.meta["replaced_from"] = source.name[:120]
+    layer.meta["cutout"] = cutout_method
     # La huella identifica al recorte, no a la capa. Un lote pone el mismo
     # producto en varios KV: reconocerlo una vez y reutilizarlo es la diferencia
     # entre una consulta y una por cada KV.
@@ -267,7 +285,7 @@ def append_product_image(
     arrangement: str = "auto",
 ) -> tuple[Layer, list[str]]:
     """Añade otro recorte como capa de producto independiente para una pieza grupal."""
-    incoming, warnings = _trim_to_content(load_rgba(source))
+    incoming, warnings, cutout_method = _prepare_incoming(source)
     digest = hashlib.sha256(f"{incoming.width}x{incoming.height}:".encode("ascii"))
     digest.update(incoming.tobytes())
     fingerprint = digest.hexdigest()[:12]
@@ -300,6 +318,7 @@ def append_product_image(
         {
             "external": True,
             "replaced_from": source.name[:120],
+            "cutout": cutout_method,
             "asset_fingerprint": fingerprint,
             "replacement_box": [box_x, box_y, box_w, box_h],
         }

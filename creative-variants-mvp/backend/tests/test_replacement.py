@@ -4,7 +4,7 @@ from __future__ import annotations
 import io
 
 from fastapi.testclient import TestClient
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from app.services import storage
 
@@ -116,6 +116,7 @@ def test_replace_without_layer_id_uses_largest_product(client: TestClient, proje
 
 
 def test_replace_hide_others_and_warns_without_alpha(client: TestClient, project: dict):
+    """Una imagen de un solo color no tiene producto dentro: se dice y se sigue."""
     create_manual_layers(client, project["project_id"])
     # Segundo producto para comprobar el ocultado.
     second = client.post(
@@ -139,7 +140,7 @@ def test_replace_hide_others_and_warns_without_alpha(client: TestClient, project
     )
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert any("no tiene transparencia" in w for w in payload["warnings"])
+    assert any("no hay ningún producto que recortar" in w for w in payload["warnings"])
     assert any("ocultaron" in w for w in payload["warnings"])
 
     stored = client.get(f"/projects/{project['project_id']}").json()
@@ -254,3 +255,40 @@ def test_replace_rejects_unknown_layer(client: TestClient, project: dict):
         files={"image": ("p.png", cutout(300, 300), "image/png")},
     )
     assert response.status_code == 400
+
+
+def catalogo(width: int = 600, height: int = 450) -> bytes:
+    """Como llega de un catálogo: el producto sobre blanco, sin transparencia."""
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    dibujo = ImageDraw.Draw(image)
+    dibujo.rounded_rectangle(
+        [width // 6, height // 4, width - width // 6, height - height // 4],
+        radius=12,
+        fill=(38, 40, 44),
+    )
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_un_producto_de_catalogo_se_recorta_al_subirlo(client: TestClient, project: dict):
+    """Lo que faltaba: se avisaba de que traía fondo y se pegaba igual."""
+    create_manual_layers(client, project["project_id"])
+    response = client.post(
+        f"/projects/{project['project_id']}/layers/replace",
+        files={"image": ("AWHMM20C01-01.png", catalogo(), "image/png")},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert not any("fondo rectangular" in w for w in payload["warnings"])
+    assert payload["layer"]["meta"]["cutout"] == "fondo-plano"
+
+    guardado = client.get(
+        f"/projects/{project['project_id']}/files/{payload['layer']['src']}"
+    )
+    assert guardado.status_code == 200
+    with Image.open(io.BytesIO(guardado.content)) as pegado:
+        assert pegado.mode == "RGBA"
+        # Las esquinas transparentes son justo lo que dejaba de tapar el arte.
+        alpha = pegado.convert("RGBA").getchannel("A")
+        assert alpha.getextrema()[0] == 0
