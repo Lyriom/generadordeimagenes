@@ -51,7 +51,7 @@ def generate_variants_task(self, project_id: str, generation_request_dict: Dict[
     # eso por imposible se intenta lo que el motor sabe hacer: separarlo en
     # capas (copy con OCR, objetos con SAM, fondo reconstruido) para poder
     # recomponerlo de verdad. Solo se hace si hace falta para lo que se pidió.
-    from app.services import layout_engine, separation
+    from app.services import background_expand, layout_engine, separation
 
     pedidos = list(getattr(request, "formats", None) or [])
     if pedidos and separation.needs_separation(project):
@@ -70,6 +70,35 @@ def generate_variants_task(self, project_id: str, generation_request_dict: Dict[
                 f"El arte llegó plano y los formatos pedidos necesitan recomponerlo: "
                 f"se separó en {piezas} elemento(s) antes de generar."
             )
+
+    # El fondo de los formatos que el arte no cubre se extiende **antes** de
+    # componer: es una llamada de red por lienzo, y hacerla dentro del render
+    # sería una por pieza. Se guarda en disco, así que una tanda de veinte
+    # productos sobre el mismo KV la paga una vez por formato.
+    from app.models.schemas import SUPPORTED_FORMATS
+
+    lienzos = {
+        SUPPORTED_FORMATS[fmt] for fmt in pedidos if fmt in SUPPORTED_FORMATS
+    }
+    por_extender = [
+        (ancho, alto)
+        for ancho, alto in sorted(lienzos)
+        if background_expand.cached(project, ancho, alto) is None
+        and background_expand.cover_upscale(
+            (project.canvas.width, project.canvas.height), ancho, alto
+        )
+        > background_expand.SHARP_UPSCALE
+    ]
+    for indice, (ancho, alto) in enumerate(por_extender):
+        self.update_state(
+            state="PROGRESS",
+            meta={
+                "progress": 12 + int(8 * indice / max(1, len(por_extender))),
+                "status": f"Extendiendo el fondo a {ancho}x{alto}…",
+            },
+        )
+        _, expand_warnings = background_expand.expand(project, ancho, alto)
+        warnings.extend(expand_warnings)
 
     variants, generate_warnings = generate_variants(project, request)
     warnings.extend(generate_warnings)

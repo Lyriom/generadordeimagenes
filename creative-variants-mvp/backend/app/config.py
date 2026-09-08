@@ -134,6 +134,13 @@ class Settings:
         self.magnific_scene_model: str = os.getenv(
             "MAGNIFIC_SCENE_MODEL", "flux-kontext-max"
         )
+        # Con qué modelo se extiende el fondo a un lienzo que el arte no cubre.
+        # Vacío = el de máscara (`MAGNIFIC_MODEL`), que garantiza que los píxeles
+        # del arte no se tocan. Un modelo sin máscara —Gemini 2.5 Flash Image,
+        # Nano Banana Pro— continúa mejor una escena, pero **regenera** la
+        # imagen entera, así que solo se usa cuando hay plancha limpia: sobre el
+        # arte original redibujaría el copy y los logos.
+        self.magnific_expand_model: str = os.getenv("MAGNIFIC_EXPAND_MODEL", "").strip()
         self.magnific_inline_max_mb: int = _env_int("MAGNIFIC_INLINE_MAX_MB", 6)
         # Suavizado del borde al recomponer lo generado sobre el arte original.
         self.magnific_feather: int = _env_int("MAGNIFIC_FEATHER", 6)

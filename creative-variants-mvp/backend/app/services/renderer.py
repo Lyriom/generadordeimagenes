@@ -19,7 +19,7 @@ from PIL.ImageFont import FreeTypeFont
 
 from ..config import settings
 from ..models import LayerCategory, LayerType, Project
-from . import storage
+from . import background_expand, storage
 from .imaging import (
     best_text_color,
     blur,
@@ -162,10 +162,10 @@ def _palette_source(project: Project) -> tuple[Image.Image, np.ndarray | None] |
 
 #: Cuánto se puede ampliar el fondo antes de que se le vean los píxeles. Por
 #: encima de esto se difumina a propósito: un banner de 325 px de alto estirado a
-#: 1350 y nítido se ve roto, y difuminado se lee como una textura. Es el recurso
-#: que usan las plataformas para encajar una foto ancha en un lienzo alto, y es
-#: justo el caso de una pieza recompuesta en otra proporción.
-BACKGROUND_SHARP_UPSCALE = 1.6
+#: 1350 y nítido se ve roto, y difuminado se lee como una textura. Vive en
+#: `background_expand` porque es la misma frontera que decide si el fondo se
+#: extiende con el modelo: se difumina exactamente donde no se pudo extender.
+BACKGROUND_SHARP_UPSCALE = background_expand.SHARP_UPSCALE
 
 
 def _plate(source: Image.Image, width: int, height: int) -> Image.Image:
@@ -191,6 +191,15 @@ def build_background(project: Project, plan: VariantPlan) -> Image.Image:
     # usaban ``contain``, descuadrando el KV original.
     if plan.layout == "faithful":
         return resize_contain_canvas(source, width, height, hex_to_rgb(primary))
+
+    # Si el fondo ya se extendió a este lienzo, se usa tal cual: es el arte
+    # continuado hacia afuera, con sus píxeles intactos y sin la ampliación que
+    # obligaba a difuminar. Se genera antes de componer y se guarda en disco, así
+    # que aquí no hay red: o está el archivo o no está.
+    if style in {"plate", "plate_zoom"}:
+        extendido = background_expand.cached(project, width, height)
+        if extendido is not None:
+            return load_flat_rgb(storage.abs_path(project.project_id, extendido))
 
     if style == "solid":
         return Image.new("RGB", (width, height), hex_to_rgb(primary))
