@@ -160,7 +160,7 @@ def test_si_el_modelo_falla_se_dice_y_se_sigue(proyecto, monkeypatch):
     monkeypatch.setattr(background_expand, "get_inpainting_provider", lambda *a, **k: _Roto())
     rel, avisos = background_expand.expand(proyecto, *STORY)
     assert rel is None
-    assert any("no se pudo extender el fondo" in a.lower() for a in avisos)
+    assert any("se descartó" in a and "503" in a for a in avisos)
     assert background_expand.cached(proyecto, *STORY) is None
 
 
@@ -217,10 +217,13 @@ def test_el_modelo_sin_mascara_solo_con_plancha_limpia(proyecto, monkeypatch):
             return output_path
 
     monkeypatch.setattr(be, "MagnificSceneProvider", lambda model=None: _Escena())
-    monkeypatch.setattr(
-        be, "get_inpainting_provider",
-        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no debía usar la máscara")),
-    )
+
+    class _SinModeloDeMascara:
+        """Sin Magnific de máscara: el único intento posible es el de escena."""
+
+        name = "opencv"
+
+    monkeypatch.setattr(be, "get_inpainting_provider", lambda *a, **k: _SinModeloDeMascara())
     rel_fondo = "backgrounds/background.png"
     destino = storage.abs_path(proyecto.project_id, rel_fondo)
     destino.parent.mkdir(parents=True, exist_ok=True)
@@ -237,3 +240,87 @@ def test_un_modelo_que_no_existe_no_cambia_nada(proyecto, monkeypatch):
 
     monkeypatch.setattr(be.settings, "magnific_expand_model", "modelo-inventado")
     assert be._scene_provider(None, plancha_limpia=True) is None
+
+
+def test_el_de_mascara_va_primero_y_el_otro_solo_si_falla(proyecto, monkeypatch):
+    """El seguro primero. El que entiende mejor la orden, de repuesto."""
+    from app.services import background_expand as be
+
+    monkeypatch.setattr(be.settings, "magnific_expand_model", "gemini-2-5-flash-image-preview")
+    rel_fondo = "backgrounds/background.png"
+    destino = storage.abs_path(proyecto.project_id, rel_fondo)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", CUADRADO, (40, 60, 90)).save(destino)
+    proyecto.background = BackgroundInfo(path=rel_fondo, provider="opencv", generated_at=utcnow())
+
+    orden: list[str] = []
+
+    class _Escena:
+        model_id = "gemini-2-5-flash-image-preview"
+        name = "magnific-scene"
+
+        def available(self) -> bool:
+            return True
+
+        def empty(self, image_path, output_path=None, prompt=None):
+            orden.append("escena")
+            with Image.open(image_path) as base:
+                base.convert("RGB").save(output_path, format="PNG")
+            return output_path
+
+    monkeypatch.setattr(be, "MagnificSceneProvider", lambda model=None: _Escena())
+
+    falso = _RellenoFalso()
+    monkeypatch.setattr(be, "get_inpainting_provider", lambda *a, **k: falso)
+    be.expand(proyecto, *STORY)
+    assert orden == [], "con el de máscara sirviendo, no se llama al segundo"
+    assert len(falso.llamadas) == 1
+
+
+def test_si_el_de_mascara_devuelve_un_dibujo_entra_el_segundo(proyecto, monkeypatch):
+    from app.services import background_expand as be
+
+    monkeypatch.setattr(be.settings, "magnific_expand_model", "gemini-2-5-flash-image-preview")
+    rel_fondo = "backgrounds/background.png"
+    destino = storage.abs_path(proyecto.project_id, rel_fondo)
+    destino.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", CUADRADO, (40, 60, 90)).save(destino)
+    proyecto.background = BackgroundInfo(path=rel_fondo, provider="opencv", generated_at=utcnow())
+
+    orden: list[str] = []
+
+    class _Dibujante:
+        """Lo que hace Ideogram de verdad: una ilustración en vez de un fondo."""
+
+        name = "magnific"
+        model_id = "ideogram-image-edit"
+
+        def fill(self, image_path, mask_path, prompt=None, output_path=None):
+            orden.append("mascara")
+            with Image.open(image_path) as base:
+                pintado = base.convert("RGB").copy()
+            dibujo = ImageDraw.Draw(pintado)
+            for i in range(0, pintado.height, 40):
+                dibujo.line([(0, i), (pintado.width, i)], fill=(250, 40, 40), width=12)
+            pintado.save(output_path, format="PNG")
+            return output_path
+
+    class _Escena:
+        model_id = "gemini-2-5-flash-image-preview"
+        name = "magnific-scene"
+
+        def available(self) -> bool:
+            return True
+
+        def empty(self, image_path, output_path=None, prompt=None):
+            orden.append("escena")
+            with Image.open(image_path) as base:
+                base.convert("RGB").save(output_path, format="PNG")
+            return output_path
+
+    monkeypatch.setattr(be, "MagnificSceneProvider", lambda model=None: _Escena())
+    monkeypatch.setattr(be, "get_inpainting_provider", lambda *a, **k: _Dibujante())
+
+    rel, avisos = be.expand(proyecto, *STORY)
+    assert orden == ["mascara", "escena"]
+    assert rel is not None and avisos == []

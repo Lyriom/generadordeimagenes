@@ -22,6 +22,7 @@ difuminada de siempre.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import cv2
 import numpy as np
@@ -108,16 +109,23 @@ def _detail(gris: np.ndarray, zona: np.ndarray) -> float:
     return float((bordes[zona] > 8.0).mean())
 
 
-def _acceptable(salida: Image.Image, mask: np.ndarray) -> str | None:
+def _acceptable(
+    salida: Image.Image, base: Image.Image, mask: np.ndarray
+) -> str | None:
     """¿Lo generado es un fondo? Devuelve el motivo si no lo es.
 
-    Se compara con la propia plancha, que es la referencia que importa: el color
-    medio no puede irse lejos y lo generado no puede estar mucho más cargado de
-    bordes que el arte. Sin esta comprobación se entregaba una ilustración de
-    colores planos con el copy ilegible encima, y con 96 puntos.
+    La referencia es **la plancha original**, no el interior de la salida: un
+    modelo sin máscara regenera la imagen entera, y comparar el dibujo con el
+    dibujo lo dejaría pasar siempre. El color medio de lo generado no puede irse
+    lejos del del arte, y lo generado no puede estar mucho más cargado de
+    bordes: un fondo liso no tiene ninguno, un dibujo tiene muchos. Sin esta
+    comprobación se entregaba una ilustración con casas y figuras, con el copy
+    ilegible encima y 96 puntos.
     """
     pixeles = np.asarray(salida.convert("RGB"))
+    referencia = np.asarray(base.convert("RGB"))
     gris = cv2.cvtColor(pixeles, cv2.COLOR_RGB2GRAY)
+    gris_ref = cv2.cvtColor(referencia, cv2.COLOR_RGB2GRAY)
     generado = mask > 127
     arte = mask <= 24
     if not generado.any() or not arte.any():
@@ -126,13 +134,13 @@ def _acceptable(salida: Image.Image, mask: np.ndarray) -> str | None:
     deriva = float(
         np.linalg.norm(
             pixeles[generado].mean(axis=0).astype(np.float64)
-            - pixeles[arte].mean(axis=0).astype(np.float64)
+            - referencia[arte].mean(axis=0).astype(np.float64)
         )
     )
     if deriva > MAX_COLOR_DRIFT:
         return f"el color no se parece al del arte (distancia {deriva:.0f})"
 
-    detalle_arte = _detail(gris, arte)
+    detalle_arte = _detail(gris_ref, arte)
     detalle_generado = _detail(gris, generado)
     if detalle_generado > max(0.02, detalle_arte * MAX_DETAIL_RATIO):
         return (
@@ -209,11 +217,22 @@ def expand(
     limpia = bool(project.background.path) and plate != storage.abs_path(
         project.project_id, project.source.path
     )
+    # Dos intentos, en este orden. El de máscara va primero porque es el seguro:
+    # no puede tocar el arte. Medido en producción, aun así devuelve dibujos —le
+    # pides un fondo liso y trae una ilustración—, y ahí entra el segundo:
+    # Gemini 2.5 Flash Image sigue la instrucción mucho mejor. Regenera la
+    # imagen entera, así que solo se le da la plancha ya limpia, donde no hay
+    # copy ni logos que pueda estropear.
+    intentos: list[tuple[str, Any]] = []
+    mascara = get_inpainting_provider(preferred_provider, model)
+    if getattr(mascara, "name", "opencv") != "opencv":
+        # OpenCV rellena por difusión de los vecinos: en una franja así da una
+        # mancha. Para eso ya está la plancha difuminada.
+        intentos.append(("mascara", mascara))
     escena = _scene_provider(model, limpia)
-    provider = None if escena is not None else get_inpainting_provider(preferred_provider, model)
-    if escena is None and getattr(provider, "name", "opencv") == "opencv":
-        # OpenCV rellena por difusión de los píxeles vecinos: en una franja tan
-        # grande da una mancha. Para eso ya está la plancha difuminada.
+    if escena is not None:
+        intentos.append(("escena", escena))
+    if not intentos:
         return None, warnings
 
     fitted_w, fitted_h = fit_contain(base.size[0], base.size[1], width, height)
@@ -240,50 +259,56 @@ def expand(
     lienzo.save(base_path, format="PNG")
     save_mask(mask_path, mask)
 
+    motivos: list[str] = []
     try:
-        if escena is not None:
-            # Sin máscara: el modelo devuelve la escena entera continuada. Solo
-            # se llega aquí con plancha limpia, donde no hay copy ni logos que
-            # pueda redibujar.
-            escena.empty(str(base_path), output_path=str(target), prompt=EXPAND_INSTRUCTION)
-        else:
-            assert provider is not None
-            provider.fill(
-                str(base_path), str(mask_path), prompt=EXPAND_INSTRUCTION, output_path=str(target)
+        for clase, usado in intentos:
+            etiqueta = getattr(usado, "model_id", getattr(usado, "name", "?"))
+            try:
+                if clase == "escena":
+                    usado.empty(
+                        str(base_path), output_path=str(target), prompt=EXPAND_INSTRUCTION
+                    )
+                else:
+                    usado.fill(
+                        str(base_path), str(mask_path),
+                        prompt=EXPAND_INSTRUCTION, output_path=str(target),
+                    )
+            except (ProviderUnavailableError, Exception) as exc:  # noqa: BLE001
+                logger.warning(
+                    "fondo no extendido a %sx%s en %s con %s: %s",
+                    width, height, project.project_id, etiqueta, exc,
+                )
+                motivos.append(f"{etiqueta} falló ({exc})")
+                target.unlink(missing_ok=True)
+                continue
+
+            # El modelo elige su propio tamaño: se devuelve al del lienzo para
+            # que el renderer no tenga que adivinar nada.
+            with Image.open(target) as abierta:
+                salida = abierta.convert("RGB")
+                if salida.size != (width, height):
+                    salida = salida.resize((width, height), Image.Resampling.LANCZOS)
+                salida.save(target, format="PNG")
+
+            motivo = _acceptable(salida, lienzo, mask)
+            if motivo is None:
+                logger.info(
+                    "fondo extendido a %sx%s en %s con %s",
+                    width, height, project.project_id, etiqueta,
+                )
+                return rel, warnings
+            logger.info(
+                "fondo extendido descartado en %s con %s: %s",
+                project.project_id, etiqueta, motivo,
             )
-    except (ProviderUnavailableError, Exception) as exc:  # noqa: BLE001
-        logger.warning("fondo no extendido a %sx%s en %s: %s", width, height, project.project_id, exc)
-        warnings.append(
-            f"No se pudo extender el fondo a {width}x{height} ({exc}): la pieza usa "
-            "la plancha del arte difuminada."
-        )
-        target.unlink(missing_ok=True)
-        return None, warnings
+            motivos.append(f"{etiqueta}: {motivo}")
+            target.unlink(missing_ok=True)
     finally:
         base_path.unlink(missing_ok=True)
         mask_path.unlink(missing_ok=True)
 
-    # El modelo elige su propio tamaño: se devuelve al del lienzo para que el
-    # renderer no tenga que adivinar nada.
-    with Image.open(target) as abierta:
-        salida = abierta.convert("RGB")
-        if salida.size != (width, height):
-            salida = salida.resize((width, height), Image.Resampling.LANCZOS)
-        salida.save(target, format="PNG")
-
-    motivo = _acceptable(salida, mask)
-    if motivo is not None:
-        logger.info("fondo extendido descartado en %s: %s", project.project_id, motivo)
-        warnings.append(
-            f"El fondo extendido para {width}x{height} se descartó porque {motivo}: "
-            "la pieza usa la plancha del arte difuminada."
-        )
-        target.unlink(missing_ok=True)
-        return None, warnings
-    usado = escena if escena is not None else provider
-    logger.info(
-        "fondo extendido a %sx%s en %s con %s",
-        width, height, project.project_id,
-        getattr(usado, "model_id", getattr(usado, "name", "?")),
+    warnings.append(
+        f"El fondo extendido para {width}x{height} se descartó ("
+        f"{'; '.join(motivos[:2])}): la pieza usa la plancha del arte difuminada."
     )
-    return rel, warnings
+    return None, warnings

@@ -140,7 +140,9 @@ class Settings:
         # Nano Banana Pro— continúa mejor una escena, pero **regenera** la
         # imagen entera, así que solo se usa cuando hay plancha limpia: sobre el
         # arte original redibujaría el copy y los logos.
-        self.magnific_expand_model: str = os.getenv("MAGNIFIC_EXPAND_MODEL", "").strip()
+        self.magnific_expand_model: str = os.getenv(
+            "MAGNIFIC_EXPAND_MODEL", "gemini-2-5-flash-image-preview"
+        ).strip()
         self.magnific_inline_max_mb: int = _env_int("MAGNIFIC_INLINE_MAX_MB", 6)
         # Suavizado del borde al recomponer lo generado sobre el arte original.
         self.magnific_feather: int = _env_int("MAGNIFIC_FEATHER", 6)
