@@ -252,3 +252,40 @@ def test_fuera_de_la_reticula_la_decoracion_sigue_anclada():
     ]
     places, _ = _colocar(1080, 1350, layout="vertical_stack", capas=capas)
     assert _por_categoria(places)["decoration"].pinned
+
+
+def test_dos_capas_de_la_misma_categoria_conservan_su_orden():
+    """El caso real: en la misma columna, uno encima del titular y otro debajo.
+
+    Juntándolos por categoría la caja que los une pasa por encima del titular y
+    el orden se pierde: salían los dos arriba y el titular después.
+    """
+    capas = _capas() + [
+        Layer(id="sb1", name="Subtítulo", type=LayerType.TEXT,
+              category=LayerCategory.SUBHEADLINE, content="SOLO ESTE MES",
+              x=330, y=40, width=322, height=54, z_index=5),
+        Layer(id="sb2", name="Subtítulo 2", type=LayerType.TEXT,
+              category=LayerCategory.SUBHEADLINE, content="12 MESES SIN INTERESES",
+              x=336, y=240, width=369, height=31, z_index=5),
+    ]
+    places, _ = _colocar(1080, 1350, capas=capas)
+    por_id = {p.layer.id: p for p in places}
+    assert por_id["sb1"].y < por_id["hd"].y < por_id["sb2"].y
+    # Y cada uno con el ancho entero, no media banda cada uno.
+    for clave in ("sb1", "sb2", "hd"):
+        assert por_id[clave].width > 1080 * 0.5
+
+
+def test_un_combo_sigue_viajando_como_un_bloque():
+    """Tres productos son un bloque visual: el reparto interno no es del reflujo."""
+    capas = [c for c in _capas() if c.category != LayerCategory.PRODUCT] + [
+        Layer(id=f"pd{i}", name=f"Producto {i}", type=LayerType.IMAGE,
+              category=LayerCategory.PRODUCT, src=f"l/p{i}.png",
+              x=1000 + i * 180, y=25, width=170, height=280, z_index=4)
+        for i in range(3)
+    ]
+    places, _ = _colocar(1080, 1350, capas=capas)
+    productos = [p for p in places if p.layer.category == LayerCategory.PRODUCT]
+    assert len(productos) == 3
+    alturas = {p.y for p in productos}
+    assert len(alturas) == 1, "los tres van en la misma banda, uno al lado del otro"

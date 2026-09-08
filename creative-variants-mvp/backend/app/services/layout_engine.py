@@ -873,60 +873,69 @@ def _source_items(
 ) -> list[source_layout.Item]:
     """Traduce las capas a lo que el reflujo necesita saber de cada bloque.
 
-    Una entrada por categoría, con la caja que ocupaba en el arte y la medida de
-    su contenido. El reparto interno de un combo no se decide aquí: eso sigue
-    siendo trabajo de `_split_zone` dentro de la banda que le toque.
+    Una entrada **por capa**, salvo los productos: un combo es un bloque visual y
+    su reparto interno sigue siendo de `_split_zone`, que es quien sabe si el
+    usuario los pidió en fila, apilados o superpuestos.
+
+    Juntar por categoría era más corto y estaba mal. En un banner con dos
+    subtítulos, uno encima del titular y otro debajo, la caja que los une pasa
+    por encima del titular y el orden de lectura se pierde: salían los dos
+    subtítulos arriba y el titular después. Cada capa lleva su propio sitio.
     """
     source_w, source_h = source_canvas
     items: list[source_layout.Item] = []
     for category, group in by_category.items():
         if category in FLOW_EXCLUDED:
             continue
-        x0 = min(layer.x for layer in group)
-        y0 = min(layer.y for layer in group)
-        x1 = max(layer.x + layer.width for layer in group)
-        y1 = max(layer.y + layer.height for layer in group)
-        if x1 <= x0 or y1 <= y0:
-            continue
-        box = (
-            x0 / max(1, source_w),
-            y0 / max(1, source_h),
-            (x1 - x0) / max(1, source_w),
-            (y1 - y0) / max(1, source_h),
-        )
         ref_y = _reference_share(category, REFLOW_REFERENCE_STACKED, 3)
         ref_x = _reference_share(category, REFLOW_REFERENCE_WIDE, 2)
-        imagenes = [layer for layer in group if not layer.is_text]
-        if imagenes:
-            # Varias piezas de la misma categoría se colocan en fila salvo que la
-            # banda diga lo contrario, así que la proporción del conjunto es la
-            # suma de anchos sobre el alto mayor.
-            ancho = sum(layer.width for layer in imagenes)
-            alto = max(layer.height for layer in imagenes)
+        # Un combo viaja como un bloque; el resto, capa a capa.
+        bloques = [group] if category == LayerCategory.PRODUCT else [[l] for l in group]
+        for bloque in bloques:
+            x0 = min(layer.x for layer in bloque)
+            y0 = min(layer.y for layer in bloque)
+            x1 = max(layer.x + layer.width for layer in bloque)
+            y1 = max(layer.y + layer.height for layer in bloque)
+            if x1 <= x0 or y1 <= y0:
+                continue
+            box = (
+                x0 / max(1, source_w),
+                y0 / max(1, source_h),
+                (x1 - x0) / max(1, source_w),
+                (y1 - y0) / max(1, source_h),
+            )
+            clave = category.value if len(bloque) > 1 else bloque[0].id
+            imagenes = [layer for layer in bloque if not layer.is_text]
+            if imagenes:
+                # Varias piezas del mismo bloque se colocan en fila salvo que la
+                # banda diga lo contrario, así que la proporción del conjunto es
+                # la suma de anchos sobre el alto mayor.
+                ancho = sum(layer.width for layer in imagenes)
+                alto = max(layer.height for layer in imagenes)
+                items.append(
+                    source_layout.Item(
+                        key=clave,
+                        box=box,
+                        aspect=ancho / max(1, alto),
+                        natural=(ancho, alto),
+                        max_upscale=MAX_UPSCALE,
+                        ref_y=ref_y,
+                        ref_x=ref_x,
+                    )
+                )
+                continue
             items.append(
                 source_layout.Item(
-                    key=category.value,
+                    key=clave,
                     box=box,
-                    aspect=ancho / max(1, alto),
-                    natural=(ancho, alto),
-                    max_upscale=MAX_UPSCALE,
+                    aspect=None,
                     ref_y=ref_y,
                     ref_x=ref_x,
+                    font_cap=CATEGORY_FONT_CAPS.get(category, 0.06),
+                    max_lines=CATEGORY_MAX_LINES.get(category, 2),
+                    chars=max(len((layer.content or "").strip()) for layer in bloque),
                 )
             )
-            continue
-        items.append(
-            source_layout.Item(
-                key=category.value,
-                box=box,
-                aspect=None,
-                ref_y=ref_y,
-                ref_x=ref_x,
-                font_cap=CATEGORY_FONT_CAPS.get(category, 0.06),
-                max_lines=CATEGORY_MAX_LINES.get(category, 2),
-                chars=max(len((layer.content or "").strip()) for layer in group),
-            )
-        )
     return items
 
 #: Diferencia máxima de proporción para que reproducir el diseño original tenga
@@ -969,6 +978,7 @@ def build_placements(
         by_category.setdefault(layer.category, []).append(layer)
 
     derived = False
+    derived_zones: dict[str, tuple[float, float, float, float]] = {}
     if layout.get("derive_from_source") and source_canvas is not None:
         agrupadas: dict[LayerCategory, list[Layer]] = {}
         for layer in layers:
@@ -984,6 +994,7 @@ def build_placements(
         )
         if zonas:
             zones = {**zones, **zonas}
+            derived_zones = zonas
             notes.extend(notas)
             derived = True
         else:
@@ -1120,18 +1131,25 @@ def build_placements(
             aspects = [
                 layer.width / max(1, layer.height) for layer in group if not layer.is_text
             ]
-            slots = _split_zone(
-                zone,
-                len(group),
-                gap=0.012 * preset["spacing"][1],
-                canvas=(canvas_w, canvas_h),
-                group_aspect=sum(aspects) / len(aspects) if aspects else 1.0,
-                arrangement=(
-                    product_arrangement
-                    if category == LayerCategory.PRODUCT
-                    else "auto"
-                ),
-            )
+            por_capa = [derived_zones.get(layer.id) for layer in group]
+            if derived and all(slot is not None for slot in por_capa):
+                # El reflujo ya le dio a cada capa su banda, en el orden que
+                # tenían en el arte. Repartir aquí una zona común las volvería a
+                # mezclar.
+                slots = [slot for slot in por_capa if slot is not None]
+            else:
+                slots = _split_zone(
+                    zone,
+                    len(group),
+                    gap=0.012 * preset["spacing"][1],
+                    canvas=(canvas_w, canvas_h),
+                    group_aspect=sum(aspects) / len(aspects) if aspects else 1.0,
+                    arrangement=(
+                        product_arrangement
+                        if category == LayerCategory.PRODUCT
+                        else "auto"
+                    ),
+                )
 
         # Las piezas de un combo se colocan una a una, pero su tamaño solo tiene
         # sentido comparado con el de las demás: se reúnen para ajustarlas juntas.
