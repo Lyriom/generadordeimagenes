@@ -19,7 +19,7 @@ from typing import Any, Iterable
 from ..models import Layer, LayerCategory, LayerType, Project
 from ..models.formats import format_safe_area
 from ..models.schemas import SUPPORTED_FORMATS
-from . import product_scale
+from . import product_scale, source_layout
 from .imaging import fit_contain
 
 Zone = tuple[float, float, float, float]
@@ -819,6 +819,113 @@ KEEP_RELATIVE_CATEGORIES = {LayerCategory.DECORATION}
 #: Layout que respeta el diseño completo del arte original.
 FAITHFUL_LAYOUT = "faithful"
 
+#: Layout que no trae zonas propias: las deduce de dónde estaba cada bloque en el
+#: arte original. Es el que se usa cuando el formato pedido obliga a recomponer.
+SOURCE_FLOW_LAYOUT = "source_flow"
+
+#: Ninguno de los dos entra en el sorteo de familias: los dos se asignan a
+#: propósito, según cuánto se parezca el formato de salida al de origen.
+SYNTHETIC_LAYOUTS = {FAITHFUL_LAYOUT, SOURCE_FLOW_LAYOUT}
+
+# Se registra aquí, con las familias ya definidas, porque parte de
+# `vertical_stack`: si el arte no da para deducir una retícula —un solo bloque,
+# sin orden de lectura que conservar— la variante sale apilada en vez de
+# quedarse sin zonas.
+LAYOUTS[SOURCE_FLOW_LAYOUT] = {
+    "label": "Recompuesto con la retícula del original",
+    "derive_from_source": True,
+    "zones": dict(LAYOUTS["vertical_stack"]["zones"]),
+    "align": "center",
+}
+
+#: Categorías que no entran en el reflujo: tienen un sitio propio que no depende
+#: del orden de lectura. El legal vive en el pie de cualquier pieza y la
+#: decoración ya conserva su posición relativa.
+FLOW_EXCLUDED = {LayerCategory.LEGAL, LayerCategory.DECORATION}
+
+#: Desde dónde empieza el pie donde vive el texto legal. El reflujo tiene que
+#: dejar ese trozo libre: si la última banda cae encima, el motor la manda a otro
+#: sitio y se pierde justo el orden que se estaba conservando.
+LEGAL_FOOT = 0.86
+
+#: De qué familia sale el tamaño de cada banda del reflujo. Las proporciones de
+#: estas dos están afinadas y son las que hacen que una pieza se lea como una
+#: pieza: el reflujo cambia el ORDEN de los bloques, no su escala. Se leen los
+#: altos de la apilada cuando las bandas van en vertical y los anchos de la
+#: panorámica cuando van en columnas.
+REFLOW_REFERENCE_STACKED = "vertical_stack"
+REFLOW_REFERENCE_WIDE = "product_left"
+
+
+def _reference_share(category: LayerCategory, layout_key: str, index: int) -> float:
+    zonas = LAYOUTS[layout_key]["zones"]
+    zona = zonas.get(category.value) or DEFAULT_ZONES.get(
+        category.value, DEFAULT_ZONES["decoration"]
+    )
+    return float(zona[index])
+
+
+def _source_items(
+    by_category: dict[LayerCategory, list[Layer]], source_canvas: tuple[int, int]
+) -> list[source_layout.Item]:
+    """Traduce las capas a lo que el reflujo necesita saber de cada bloque.
+
+    Una entrada por categoría, con la caja que ocupaba en el arte y la medida de
+    su contenido. El reparto interno de un combo no se decide aquí: eso sigue
+    siendo trabajo de `_split_zone` dentro de la banda que le toque.
+    """
+    source_w, source_h = source_canvas
+    items: list[source_layout.Item] = []
+    for category, group in by_category.items():
+        if category in FLOW_EXCLUDED:
+            continue
+        x0 = min(layer.x for layer in group)
+        y0 = min(layer.y for layer in group)
+        x1 = max(layer.x + layer.width for layer in group)
+        y1 = max(layer.y + layer.height for layer in group)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        box = (
+            x0 / max(1, source_w),
+            y0 / max(1, source_h),
+            (x1 - x0) / max(1, source_w),
+            (y1 - y0) / max(1, source_h),
+        )
+        ref_y = _reference_share(category, REFLOW_REFERENCE_STACKED, 3)
+        ref_x = _reference_share(category, REFLOW_REFERENCE_WIDE, 2)
+        imagenes = [layer for layer in group if not layer.is_text]
+        if imagenes:
+            # Varias piezas de la misma categoría se colocan en fila salvo que la
+            # banda diga lo contrario, así que la proporción del conjunto es la
+            # suma de anchos sobre el alto mayor.
+            ancho = sum(layer.width for layer in imagenes)
+            alto = max(layer.height for layer in imagenes)
+            items.append(
+                source_layout.Item(
+                    key=category.value,
+                    box=box,
+                    aspect=ancho / max(1, alto),
+                    natural=(ancho, alto),
+                    max_upscale=MAX_UPSCALE,
+                    ref_y=ref_y,
+                    ref_x=ref_x,
+                )
+            )
+            continue
+        items.append(
+            source_layout.Item(
+                key=category.value,
+                box=box,
+                aspect=None,
+                ref_y=ref_y,
+                ref_x=ref_x,
+                font_cap=CATEGORY_FONT_CAPS.get(category, 0.06),
+                max_lines=CATEGORY_MAX_LINES.get(category, 2),
+                chars=max(len((layer.content or "").strip()) for layer in group),
+            )
+        )
+    return items
+
 #: Diferencia máxima de proporción para que reproducir el diseño original tenga
 #: sentido. Un banner 1200x400 volcado a 1080x1920 no se "conserva": se destruye.
 FAITHFUL_ASPECT_TOLERANCE = 0.18
@@ -858,8 +965,34 @@ def build_placements(
     for layer in sorted(layers, key=lambda item: item.z_index):
         by_category.setdefault(layer.category, []).append(layer)
 
+    derived = False
+    if layout.get("derive_from_source") and source_canvas is not None:
+        agrupadas: dict[LayerCategory, list[Layer]] = {}
+        for layer in layers:
+            agrupadas.setdefault(layer.category, []).append(layer)
+        hay_legal = any(layer.category == LayerCategory.LEGAL for layer in layers)
+        zonas, notas = source_layout.derive_zones(
+            _source_items(agrupadas, source_canvas),
+            source_canvas,
+            canvas_w,
+            canvas_h,
+            margin=(margin / max(1, canvas_w), margin / max(1, canvas_h)),
+            reserve=(1.0 - LEGAL_FOOT) if hay_legal else 0.0,
+        )
+        if zonas:
+            zones = {**zones, **zonas}
+            notes.extend(notas)
+            derived = True
+        else:
+            notes.append(
+                "El arte no tiene bloques suficientes para deducir su retícula: "
+                "la pieza se compuso apilada."
+            )
+
     base_align = bias.get("force_align") or layout.get("align", "left")
-    mirror = preset["allow_mirror"] and rng.random() < 0.35
+    # Voltear una retícula deducida del original destruye justo lo que se estaba
+    # conservando: el orden de lectura.
+    mirror = preset["allow_mirror"] and not derived and rng.random() < 0.35
 
     placements: list[Placement] = []
     for category, group in by_category.items():
@@ -1110,7 +1243,7 @@ def build_placements(
             # El texto legal se ancla al pie: debe permanecer visible.
             if category == LayerCategory.LEGAL:
                 y = min(y, canvas_h - margin - height)
-                y = max(int(canvas_h * 0.86), y)
+                y = max(int(canvas_h * LEGAL_FOOT), y)
 
             # Un elemento anclado reproduce el diseño original, que puede ir a sangre:
             # aplicarle el margen de seguridad lo encoge y desplaza toda la pieza.
@@ -1341,7 +1474,7 @@ def choose_layouts(
     preferred: list[str] | None = None,
 ) -> list[str]:
     """Reparte layouts garantizando variedad (cada familia aparece antes de repetir)."""
-    default_pool = [key for key in LAYOUTS if key != FAITHFUL_LAYOUT]
+    default_pool = [key for key in LAYOUTS if key not in SYNTHETIC_LAYOUTS]
     pool = [key for key in (allowed or default_pool) if key in LAYOUTS] or default_pool
     preferred = [key for key in (preferred or []) if key in pool]
     result: list[str] = []
@@ -1621,12 +1754,25 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
             if abs((fmt_w / fmt_h) / source_aspect - 1.0) <= FAITHFUL_ASPECT_TOLERANCE:
                 faithful_pending.add(fmt)
 
+    # Un formato que no se parece al de origen no puede conservar el diseño, pero
+    # sí su orden de lectura. En esos, la mitad de las piezas se recomponen con la
+    # retícula del arte y la otra mitad prueban familias distintas: la variedad
+    # sigue valiendo, la plantilla a ciegas no.
+    recomponer: set[str] = set()
+    if getattr(request, "layouts", None) is None:
+        recomponer = set(formats_needing_recompose(project, list(dict.fromkeys(ctx.formats))))
+
     plans: list[VariantPlan] = []
+    hechas: dict[str, int] = {}
     for index in range(ctx.count):
         fmt = ctx.formats[index % len(ctx.formats)]
+        orden = hechas.get(fmt, 0)
+        hechas[fmt] = orden + 1
         if fmt in faithful_pending:
             layout_key = FAITHFUL_LAYOUT
             faithful_pending.discard(fmt)
+        elif fmt in recomponer and orden % 2 == 0:
+            layout_key = SOURCE_FLOW_LAYOUT
         else:
             layout_key = layout_keys[index]
         plans.append(_build_plan(ctx, index, fmt, layout_key, ctx.seed * 1000 + index))

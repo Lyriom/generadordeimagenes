@@ -298,13 +298,16 @@ def test_overlap_ratio_math():
 
 
 def test_choose_layouts_covers_every_family_before_repeating():
-    from app.services.layout_engine import FAITHFUL_LAYOUT
+    from app.services.layout_engine import FAITHFUL_LAYOUT, SYNTHETIC_LAYOUTS
 
-    sorteables = set(LAYOUTS) - {FAITHFUL_LAYOUT}
+    # Los layouts sintéticos no se sortean: se asignan según el formato.
+    sorteables = set(LAYOUTS) - SYNTHETIC_LAYOUTS
     keys = choose_layouts(len(sorteables), random.Random(4))
     assert set(keys) == sorteables
     # La familia «fiel» no entra en el sorteo: la asigna plan_variants por formato.
-    assert FAITHFUL_LAYOUT not in choose_layouts(30, random.Random(9))
+    sorteados = set(choose_layouts(30, random.Random(9)))
+    assert FAITHFUL_LAYOUT not in sorteados
+    assert not sorteados & SYNTHETIC_LAYOUTS
     # Pero se respeta si el usuario la pide explícitamente.
     assert choose_layouts(3, random.Random(1), allowed=[FAITHFUL_LAYOUT]) == [
         FAITHFUL_LAYOUT

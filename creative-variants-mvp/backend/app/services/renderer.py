@@ -160,6 +160,24 @@ def _palette_source(project: Project) -> tuple[Image.Image, np.ndarray | None] |
     return load_flat_rgb(path), load_alpha(path)
 
 
+#: Cuánto se puede ampliar el fondo antes de que se le vean los píxeles. Por
+#: encima de esto se difumina a propósito: un banner de 325 px de alto estirado a
+#: 1350 y nítido se ve roto, y difuminado se lee como una textura. Es el recurso
+#: que usan las plataformas para encajar una foto ancha en un lienzo alto, y es
+#: justo el caso de una pieza recompuesta en otra proporción.
+BACKGROUND_SHARP_UPSCALE = 1.6
+
+
+def _plate(source: Image.Image, width: int, height: int) -> Image.Image:
+    """El arte de fondo cubriendo el lienzo, difuminado si hay que estirarlo."""
+    plate = resize_cover(source, width, height)
+    escala = max(width / max(1, source.width), height / max(1, source.height))
+    if escala <= BACKGROUND_SHARP_UPSCALE:
+        return plate
+    exceso = min(4.0, escala / BACKGROUND_SHARP_UPSCALE)
+    return blur(plate, max(3.0, min(width, height) * 0.006 * exceso))
+
+
 def build_background(project: Project, plan: VariantPlan) -> Image.Image:
     width, height = plan.width, plan.height
     source, source_alpha = _background_source(project)
@@ -186,11 +204,11 @@ def build_background(project: Project, plan: VariantPlan) -> Image.Image:
     if style == "plate_blur":
         return blur(resize_cover(source, width, height), max(6.0, min(width, height) * 0.02))
     if style == "plate_zoom":
-        zoomed = resize_cover(source, int(width * 1.18), int(height * 1.18))
+        zoomed = _plate(source, int(width * 1.18), int(height * 1.18))
         left = (zoomed.width - width) // 2
         top = (zoomed.height - height) // 2
         return zoomed.crop((left, top, left + width, top + height))
-    return resize_cover(source, width, height)
+    return _plate(source, width, height)
 
 
 # ------------------------------------------------------------------------ texto
