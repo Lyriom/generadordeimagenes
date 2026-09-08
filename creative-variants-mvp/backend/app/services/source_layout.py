@@ -27,6 +27,12 @@ salieron de medir el resultado:
   la misma prioridad que publica SizeIM en su guía de zonas seguras (mínimos de
   cuerpo de letra antes que tamaño de imagen).
 
+Y la agrupación no es sólo «lo que iba junto va junto»: es **cómo** iba junto.
+Tres líneas de copy apiladas en el arte se apilan también en la pieza nueva,
+cada una con todo el ancho; puestas en columnas —que fue el primer intento—
+«ELECTROMENORES» acababa en 23 px, ilegible. Solo cuando las bandas van por el
+mismo eje que ya separaba a los bloques se reparten el ancho entre ellos.
+
 Y una tercera, que costó dos mediciones: **el tamaño de cada banda no se
 inventa**. Sale de lo que le daría la familia de layout de referencia, que son
 proporciones ya afinadas y son las que hacen que una pieza se lea como una
@@ -144,22 +150,45 @@ def reading_axis(items: list[Item], source_canvas: tuple[int, int]) -> str:
     )
 
 
-def _groups(ordered: list[Item], axis: str) -> list[list[Item]]:
-    """Agrupa los bloques que ocupaban el mismo tramo del eje de lectura.
+def clusters(items: list[Item], axis: str) -> list[list[Item]]:
+    """Los bloques repartidos en los tramos que ocupaban del eje de lectura.
 
-    En un banner, el precio justo encima del CTA es un solo sitio del arte: si se
-    separan en dos bandas, la pieza deja de leerse como la original.
+    Los tramos salen en el orden en que se leen y, dentro de cada uno, los
+    bloques en el orden en que estaban apilados. Ese doble orden es lo que hay
+    que conservar: ordenar solo por el centro del eje ya bastaba para colar el
+    precio por delante del titular, porque el titular es más ancho y su centro
+    cae más a la derecha aunque los dos empiecen en el mismo sitio.
     """
-    grupos: list[list[Item]] = []
-    for item in ordered:
-        junto = grupos and any(
-            _overlap(item.box, previo.box, axis) >= GROUP_OVERLAP for previo in grupos[-1]
+    minor = "y" if axis == "x" else "x"
+    ordenados = sorted(
+        items, key=lambda item: (_extent(item.box, axis)[0], _centre(item.box, minor))
+    )
+    tramos: list[list[Item]] = []
+    for item in ordenados:
+        junto = tramos and any(
+            _overlap(item.box, previo.box, axis) >= GROUP_OVERLAP for previo in tramos[-1]
         )
         if junto:
-            grupos[-1].append(item)
+            tramos[-1].append(item)
         else:
-            grupos.append([item])
-    return grupos
+            tramos.append([item])
+    return [sorted(tramo, key=lambda item: _centre(item.box, minor)) for tramo in tramos]
+
+
+def _groups(tramos: list[list[Item]], axis: str, flow: str) -> list[list[Item]]:
+    """Cómo se convierten los tramos del arte en bandas del lienzo nuevo.
+
+    Compartir banda significa repartirse su ancho, y eso solo tiene sentido si en
+    el arte los bloques ya estaban separados por ese mismo eje. Tres líneas de
+    copy apiladas se apilan también aquí, cada una con todo el ancho: meterlas en
+    columnas dejaba «ELECTROMENORES» en 23 px. En cambio, en un lienzo
+    panorámico ese mismo tramo sí es una columna y sus bloques se reparten el
+    alto, porque es como estaban.
+    """
+    minor = "y" if axis == "x" else "x"
+    if minor == flow:
+        return [[item] for tramo in tramos for item in tramo]
+    return [list(tramo) for tramo in tramos]
 
 
 def _shares(group: list[Item], axis: str) -> list[float]:
@@ -293,8 +322,8 @@ def _grow(
 
 
 def _solve(
-    grupos: list[list[Item]],
-    repartos: list[list[float]],
+    tramos: list[list[Item]],
+    axis: str,
     flow: str,
     canvas_w: int,
     canvas_h: int,
@@ -307,6 +336,8 @@ def _solve(
     misma medida con la que después se juzga la pieza. Así el eje no se elige por
     una regla escrita, sino por el resultado.
     """
+    grupos = _groups(tramos, axis, flow)
+    repartos = [_shares(grupo, axis) for grupo in grupos]
     margin_x, margin_y = margin
     margen_flow = margin_y if flow == "y" else margin_x
     margen_cross = margin_x if flow == "y" else margin_y
@@ -321,6 +352,8 @@ def _solve(
         - (reserve if flow == "y" else 0.0)
     )
     if hueco <= 0:
+        return {}, 0.0
+    if not grupos:
         return {}, 0.0
 
     demandas: list[float] = []
@@ -344,6 +377,14 @@ def _solve(
     else:
         demandas = _grow(demandas, techos, texto, hueco)
 
+    # El aire que ni las imágenes ni el texto pueden usar no se apila al final:
+    # se reparte entre las bandas. Si no, la pieza sale con un claro enorme en
+    # medio y todo lo demás pegado.
+    gap = BAND_GAP
+    holgura = hueco - sum(demandas)
+    if holgura > 1e-9 and len(grupos) > 1:
+        gap += holgura / (len(grupos) - 1)
+
     zones: dict[str, Zone] = {}
     llenado = 0.0
     posicion = margen_flow
@@ -360,7 +401,7 @@ def _solve(
             avance += ancho
             fit_w, fit_h = _fitted(item, caja[0], caja[1], canvas_h)
             llenado += (fit_w * fit_h) / max(1, canvas_w * canvas_h)
-        posicion += banda + BAND_GAP
+        posicion += banda + gap
     return zones, llenado
 
 
@@ -387,17 +428,16 @@ def derive_zones(
         return {}, []
 
     axis = reading_axis(items, source_canvas)
-    ordenados = sorted(items, key=lambda item: _centre(item.box, axis))
-    grupos = _groups(ordenados, axis)
-    repartos = [_shares(grupo, axis) for grupo in grupos]
+    tramos = clusters(items, axis)
 
     candidatos = [
-        (flow, *_solve(grupos, repartos, flow, canvas_w, canvas_h, margin, reserve))
+        (flow, *_solve(tramos, axis, flow, canvas_w, canvas_h, margin, reserve))
         for flow in ("y", "x")
     ]
     flow, zones, llenado = max(candidatos, key=lambda candidato: candidato[2])
     if not zones:
         return {}, []
+    bloques = len(_groups(tramos, axis, flow))
 
     sentido = {
         ("x", "y"): "de izquierda a derecha pasó a ser de arriba a abajo",
@@ -406,7 +446,7 @@ def derive_zones(
         ("y", "y"): "se conservó de arriba a abajo",
     }[(axis, flow)]
     notes = [
-        f"Recompuesto con la retícula del arte: {len(grupos)} bloque(s), el orden de "
+        f"Recompuesto con la retícula del arte: {bloques} bloque(s), el orden de "
         f"lectura {sentido} y el contenido llena el {int(round(llenado * 100))}% del lienzo."
     ]
     return zones, notes

@@ -838,10 +838,13 @@ LAYOUTS[SOURCE_FLOW_LAYOUT] = {
     "align": "center",
 }
 
-#: Categorías que no entran en el reflujo: tienen un sitio propio que no depende
-#: del orden de lectura. El legal vive en el pie de cualquier pieza y la
-#: decoración ya conserva su posición relativa.
-FLOW_EXCLUDED = {LayerCategory.LEGAL, LayerCategory.DECORATION}
+#: La única categoría que no entra en el reflujo. El legal vive en el pie de
+#: cualquier pieza, y ahí se queda. La decoración sí entra: fuera de este layout
+#: conserva su posición relativa porque una plantilla genérica no sabe dónde
+#: ponerla, pero aquí se está reconstruyendo la retícula del propio arte y una
+#: decoración es un bloque más. Anclada al sitio del original quedaba suelta en
+#: medio de una composición que ya no era esa.
+FLOW_EXCLUDED = {LayerCategory.LEGAL}
 
 #: Desde dónde empieza el pie donde vive el texto legal. El reflujo tiene que
 #: dejar ese trozo libre: si la última banda cae encima, el motor la manda a otro
@@ -1017,7 +1020,7 @@ def build_placements(
                 source_canvas is not None
                 and (
                     bool(layout.get("keep_all_relative"))
-                    or category in KEEP_RELATIVE_CATEGORIES
+                    or (category in KEEP_RELATIVE_CATEGORIES and not derived)
                     # Solo los recortes confirmados del PSD conservan la composición
                     # original. Las capas manuales de la misma categoría siguen editables.
                     or all(layer.meta.get("mandatory_art") for layer in group)

@@ -73,14 +73,34 @@ def test_el_banner_se_apila_en_el_orden_en_que_se_leia():
     assert any("orden de lectura" in nota for nota in notes)
 
 
-def test_lo_que_estaba_junto_en_el_arte_comparte_banda():
-    """El precio vivía pegado al titular: separarlos en dos bandas rompe la lectura."""
+def test_lo_que_estaba_apilado_sigue_apilado_y_a_todo_el_ancho():
+    """Compartir banda es repartirse el ancho, y eso arruinaba el copy.
+
+    En el arte el precio iba debajo del titular. Metidos en la misma banda cada
+    uno se queda con media anchura y el texto se hunde: fue así como
+    «ELECTROMENORES» acabó en 23 px. Apilados conservan el ancho entero.
+    """
     places, _ = _colocar(1080, 1350)
     por_cat = _por_categoria(places)
-    precio, titular = por_cat["price"], por_cat["headline"]
-    solape = min(precio.y + precio.height, titular.y + titular.height) - max(precio.y, titular.y)
-    assert solape > 0, "precio y titular deberían quedar a la misma altura"
-    assert precio.x < titular.x, "y en el orden que tenían dentro del bloque"
+    titular, precio = por_cat["headline"], por_cat["price"]
+    assert titular.y < precio.y, "el titular iba encima del precio y sigue encima"
+    assert titular.width > 1080 * 0.5, f"el titular se quedó estrecho: {titular.width}px"
+    # Y nada se cuela entre los dos: eran el mismo sitio del arte.
+    entre = [
+        p for p in places
+        if titular.y + titular.height <= p.y < precio.y and p.layer.category.value != "legal"
+    ]
+    assert entre == []
+
+
+def test_en_columnas_si_se_reparten_el_alto():
+    """El eje de salida decide: en un panorámico el bloque sí es una columna."""
+    places, _ = _colocar(1200, 628)
+    por_cat = _por_categoria(places)
+    titular, precio = por_cat["headline"], por_cat["price"]
+    solape = min(titular.x + titular.width, precio.x + precio.width) - max(titular.x, precio.x)
+    assert solape > 0, "titular y precio comparten columna"
+    assert titular.y < precio.y, "y en el orden en que estaban apilados"
 
 
 def test_un_lienzo_panoramico_conserva_las_columnas():
@@ -208,3 +228,27 @@ def test_si_el_usuario_elige_los_layouts_no_se_le_cambian():
     peticion.layouts = ["product_left"]  # type: ignore[attr-defined]
     plans, _ = plan_variants(project, peticion)
     assert {p.layout for p in plans} == {"product_left"}
+
+
+def test_una_decoracion_entra_en_la_reticula_y_no_se_queda_suelta():
+    """Anclada al sitio del original quedaba en medio de otra composición."""
+    capas = _capas() + [
+        Layer(id="dc", name="Sello", type=LayerType.IMAGE, category=LayerCategory.DECORATION,
+              src="l/sello.png", x=1260, y=80, width=300, height=180, z_index=3),
+    ]
+    places, _ = _colocar(1080, 1350, capas=capas)
+    sello = _por_categoria(places)["decoration"]
+    assert not sello.pinned, "la decoración no se ancla cuando se deduce la retícula"
+    producto = _por_categoria(places)["product"]
+    cta = _por_categoria(places)["cta"]
+    assert producto.y < sello.y < cta.y, "estaba entre el producto y el CTA en el arte"
+
+
+def test_fuera_de_la_reticula_la_decoracion_sigue_anclada():
+    """La regla vieja se mantiene: una plantilla genérica no sabe dónde ponerla."""
+    capas = _capas() + [
+        Layer(id="dc", name="Sello", type=LayerType.IMAGE, category=LayerCategory.DECORATION,
+              src="l/sello.png", x=1260, y=80, width=300, height=180, z_index=3),
+    ]
+    places, _ = _colocar(1080, 1350, layout="vertical_stack", capas=capas)
+    assert _por_categoria(places)["decoration"].pinned
