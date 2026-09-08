@@ -2221,3 +2221,18 @@ details .inventory { margin-top: 14px; }
 .format-card.needs-split .format-note { color: var(--warning); }
 .format-card.is-tight { border-color: color-mix(in srgb, var(--warning) 60%, var(--line)); }
 .format-card.is-tight .format-note { color: var(--warning); font-weight: 650; }
+
+/* Referencias opcionales de la carga, plegadas hasta que se necesiten. */
+.upload-references > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  color: var(--fg-soft);
+}
+.upload-references-fields {
+  display: grid;
+  gap: 14px;
+  padding-top: 12px;
+}
