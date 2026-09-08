@@ -1204,7 +1204,7 @@ async function renderLayers(): Promise<void> {
     state.selectedLayerId = project.layers.find((layer) => layer.category !== "background")?.id || null;
   }
   const layer = project.layers.find((item) => item.id === state.selectedLayerId) || null;
-  await loadTexts(project.project_id);
+  await Promise.all([loadTexts(project.project_id), loadFontLibrary()]);
   const projectOptions = state.campaign.map((item) =>
     '<option value="' + attr(item.project_id) + '"' + selected(item.project_id === project.project_id) + ">" + esc(item.name) + "</option>"
   ).join("");
@@ -1415,13 +1415,47 @@ function brandFontHtml(texts: ArtTexts): string {
   ].join("");
 }
 
+interface ClientFontCatalog {
+  id: string;
+  name: string;
+  fonts: { id: string; name: string }[];
+}
+let fontLibrary: ClientFontCatalog[] = [];
+
+async function loadFontLibrary(): Promise<void> {
+  try {
+    fontLibrary = await get<ClientFontCatalog[]>("/projects/font-library/catalog");
+  } catch {
+    fontLibrary = [];
+    toast("No se pudo cargar el catálogo de tipografías. Puedes volver a abrir Revisar capas.", "error");
+  }
+}
+
+function savedFontOptions(clientId: string, chosen = ""): string {
+  const fonts = fontLibrary.find((client) => client.id === clientId)?.fonts || [];
+  return '<option value="">Seleccionar tipografía</option>' + fonts.map((font) =>
+    '<option value="' + attr(font.id) + '"' + selected(font.id === chosen) + '>' + esc(font.name) + '</option>'
+  ).join("");
+}
+
 function brandFontFormHtml(): string {
   const others = state.campaign.length - 1;
+  const saved = activeProject()?.meta?.client_fonts as { client_id?: string; font?: string; font_bold?: string } | undefined;
+  const clientId = saved?.client_id || "";
   return [
+    '<label class="field"><span>Tipografías guardadas por cliente</span><select id="font-client">',
+    '<option value="">Subir archivos propios</option>',
+    ...fontLibrary.map((client) => '<option value="' + attr(client.id) + '"' + selected(client.id === clientId) + '>' + esc(client.name) + ' · ' + String(client.fonts.length) + ' fuentes</option>'),
+    '</select></label>',
+    '<div id="saved-font-fields"' + (clientId ? '' : ' hidden') + '><p class="muted">Estas fuentes quedan guardadas para futuras campañas, aunque borres el KV.</p><div class="form-grid">',
+    '<label class="field"><span>Cara redonda</span><select id="saved-font">', savedFontOptions(clientId, saved?.font), '</select></label>',
+    '<label class="field"><span>Cara negrita · opcional</span><select id="saved-font-bold">', savedFontOptions(clientId, saved?.font_bold), '</select></label></div></div>',
+    '<div id="uploaded-font-fields"' + (clientId ? ' hidden' : '') + '>',
     '<div class="form-grid"><label class="field"><span>Cara redonda</span>',
     '<input id="brand-font" type="file" accept=".ttf,.otf"></label>',
     '<label class="field"><span>Cara negrita · opcional</span>',
     '<input id="brand-font-bold" type="file" accept=".ttf,.otf"></label></div>',
+    "</div>",
     others > 0
       ? '<label class="choice" style="margin-top:10px"><input id="brand-font-all" type="checkbox" checked> ' +
         "Aplicar a los " + String(state.campaign.length) + " KV de la campaña</label>"
@@ -1433,8 +1467,11 @@ function brandFontFormHtml(): string {
 async function saveBrandFont(project: Project): Promise<void> {
   const regular = query<HTMLInputElement>("#brand-font")?.files?.[0] || null;
   const bold = query<HTMLInputElement>("#brand-font-bold")?.files?.[0] || null;
-  if (!regular && !bold) {
-    toast("Elige al menos un archivo de tipografía.", "error");
+  const clientId = query<HTMLSelectElement>("#font-client")?.value || "";
+  const savedFont = query<HTMLSelectElement>("#saved-font")?.value || "";
+  const savedBold = query<HTMLSelectElement>("#saved-font-bold")?.value || "";
+  if (clientId ? !savedFont : (!regular && !bold)) {
+    toast(clientId ? "Elige la cara redonda del cliente." : "Elige al menos un archivo de tipografía.", "error");
     return;
   }
   const toAll = query<HTMLInputElement>("#brand-font-all")?.checked ?? false;
@@ -1448,8 +1485,14 @@ async function saveBrandFont(project: Project): Promise<void> {
         target.name,
       );
       const data = new FormData();
-      if (regular) data.append("font", regular);
-      if (bold) data.append("font_bold", bold);
+      if (clientId) {
+        data.append("client_id", clientId);
+        data.append("saved_font", savedFont);
+        if (savedBold) data.append("saved_font_bold", savedBold);
+      } else {
+        if (regular) data.append("font", regular);
+        if (bold) data.append("font_bold", bold);
+      }
       const result = await post<any>(
         "/projects/" + target.project_id + "/references/font",
         data,
@@ -1690,6 +1733,17 @@ function bindCopyEditor(project: Project): void {
   query("#open-brand-font")?.addEventListener("click", () => {
     const form = query<HTMLElement>("#brand-font-form");
     if (form) form.hidden = !form.hidden;
+  });
+  query("#font-client")?.addEventListener("change", () => {
+    const clientId = query<HTMLSelectElement>("#font-client")?.value || "";
+    const savedFields = query<HTMLElement>("#saved-font-fields");
+    const uploadFields = query<HTMLElement>("#uploaded-font-fields");
+    if (savedFields) savedFields.hidden = !clientId;
+    if (uploadFields) uploadFields.hidden = !!clientId;
+    for (const id of ["#saved-font", "#saved-font-bold"]) {
+      const select = query<HTMLSelectElement>(id);
+      if (select) select.innerHTML = savedFontOptions(clientId);
+    }
   });
   query("#save-brand-font")?.addEventListener("click", () => void saveBrandFont(project));
   queryAll<HTMLButtonElement>(".zoom-copy").forEach((button) => {

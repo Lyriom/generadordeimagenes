@@ -1181,6 +1181,13 @@ async def replace_product(
     )
 
 
+@router.get("/font-library/catalog", summary="Tipografías guardadas por cliente")
+def client_font_catalog() -> list[dict]:
+    from ..services import client_fonts
+
+    return client_fonts.catalog()
+
+
 @router.post(
     "/{project_id}/references/font",
     response_model=FontReferenceResponse,
@@ -1190,6 +1197,9 @@ async def upload_brand_font(
     project_id: str,
     font: UploadFile | None = File(None, description="Cara redonda .ttf/.otf"),
     font_bold: UploadFile | None = File(None, description="Cara negrita .ttf/.otf"),
+    client_id: str | None = Form(None),
+    saved_font: str | None = Form(None),
+    saved_font_bold: str | None = Form(None),
 ) -> FontReferenceResponse:
     """Añade la tipografía de marca después de importar el KV.
 
@@ -1199,22 +1209,45 @@ async def upload_brand_font(
     """
     project = load_project_or_404(project_id)
     uploads = [("font", font), ("font_bold", font_bold)]
-    if not any(item is not None and item.filename for _, item in uploads):
+    has_upload = any(item is not None and item.filename for _, item in uploads)
+    has_saved = bool(saved_font or saved_font_bold)
+    if has_saved and (has_upload or not client_id or not saved_font):
+        raise bad_request("Elija fuentes del cliente o suba archivos, sin mezclar ambos.")
+    if not has_upload and not has_saved:
         raise bad_request("Suba al menos una de las dos caras (redonda o negrita).")
 
     warnings: list[str] = []
     try:
+        from ..services import client_fonts
+
+        prepared: list[tuple[str, bytes, str]] = []
+        for field, font_id in [("font", saved_font), ("font_bold", saved_font_bold)]:
+            if font_id:
+                payload, suffix = client_fonts.read_font(client_id or "", font_id)
+                prepared.append((field, payload, suffix))
         for field, upload in uploads:
             if upload is None or not upload.filename:
                 continue
             payload = await _read_upload(upload, 10 * 1024 * 1024)
             suffix = validate_font_bytes(payload, upload.filename)
+            prepared.append((field, payload, suffix))
+        for field, payload, suffix in prepared:
             # El nombre lleva la huella del archivo: el renderer cachea la
             # tipografía por ruta, así que reusar "font.ttf" devolvía la anterior.
             digest = hashlib.sha256(payload).hexdigest()[:12]
             rel = f"references/{field}_{digest}{suffix}"
             storage.write_bytes(project.project_id, rel, payload)
             setattr(project.references, field, rel)
+
+        if has_saved:
+            project.meta["client_fonts"] = {
+                "client_id": client_id, "font": saved_font, "font_bold": saved_font_bold,
+            }
+            # Evita mezclar la negrita de otro cliente al elegir solo redonda.
+            if saved_font and not saved_font_bold:
+                project.references.font_bold = None
+        else:
+            project.meta.pop("client_fonts", None)
 
         # Lo ya reescrito se recalcula: su cuerpo y su caja venían medidos
         # contra la cara anterior.

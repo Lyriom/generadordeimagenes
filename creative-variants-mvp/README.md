@@ -913,3 +913,19 @@ si hay `OPENAI_API_KEY`; usa `OPENAI_VISION_MODEL`, `OPENAI_VISION_ENDPOINT` y
 `PRODUCT_VISION_TIMEOUT`. La generación de variantes no consulta este clasificador.
 Este paso categoriza cajas existentes: no añade detecciones, agrupa bloques ni
 cambia el orden de lectura. Las pruebas simulan HTTP y no consumen saldo.
+
+### Tipografías permanentes por cliente
+
+En **Revisar capas → Tipografía de marca**, el selector de cliente ofrece las
+100 fuentes de **Marcimex** (Coco Sharp, Museo Sans y Goldplay), importadas del ZIP
+proporcionado. Elija redonda y, opcionalmente, negrita y pulse **Guardar tipografía**;
+también puede aplicarlas a todos los KV de la campaña. La selección queda en el
+proyecto y los textos ya reescritos se recalculan con esas fuentes.
+
+El catálogo original vive en `backend/app/assets/client_fonts/<cliente>/`, junto
+con las licencias incluidas en el ZIP. Está versionado y entra en la imagen Docker
+mediante `COPY app`: sobrevive a reinicios, despliegues y limpieza de proyectos.
+Cada KV recibe su propia copia. El ZIP original y los metadatos `__MACOSX` no son
+necesarios para desplegar. Para incorporar otro cliente se añade una carpeta con
+sus fuentes y un `catalog.json` siguiendo el mismo formato; la interfaz lo lista
+automáticamente. Las subidas manuales siguen siendo referencias del KV.

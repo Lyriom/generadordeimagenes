@@ -1,0 +1,506 @@
+{
+  "id": "marcimex",
+  "name": "Marcimex",
+  "fonts": [
+    {
+      "id": "938330d20676e125355b",
+      "name": "Latinotype - Goldplay Alt Black",
+      "file": "938330d20676e125355b.otf"
+    },
+    {
+      "id": "6a0769f60a7c8ca00b39",
+      "name": "Latinotype - Goldplay Alt Black It",
+      "file": "6a0769f60a7c8ca00b39.otf"
+    },
+    {
+      "id": "d1cbc2618da6324fd77e",
+      "name": "Latinotype - Goldplay Alt Bold",
+      "file": "d1cbc2618da6324fd77e.otf"
+    },
+    {
+      "id": "71e52b68f48d0c64ad9d",
+      "name": "Latinotype - Goldplay Alt Bold It",
+      "file": "71e52b68f48d0c64ad9d.otf"
+    },
+    {
+      "id": "6ab2b650da024e98f2ef",
+      "name": "Latinotype - Goldplay Alt Light",
+      "file": "6ab2b650da024e98f2ef.otf"
+    },
+    {
+      "id": "f639d3957a94214f1ed8",
+      "name": "Latinotype - Goldplay Alt Light It",
+      "file": "f639d3957a94214f1ed8.otf"
+    },
+    {
+      "id": "0dc7f2947a931a3cc418",
+      "name": "Latinotype - Goldplay Alt Medium",
+      "file": "0dc7f2947a931a3cc418.otf"
+    },
+    {
+      "id": "fe9322ca73ec92cc4294",
+      "name": "Latinotype - Goldplay Alt Medium It",
+      "file": "fe9322ca73ec92cc4294.otf"
+    },
+    {
+      "id": "7d3809b850da09cdfa9f",
+      "name": "Latinotype - Goldplay Alt Regular",
+      "file": "7d3809b850da09cdfa9f.otf"
+    },
+    {
+      "id": "b7fe4693314cead0fef6",
+      "name": "Latinotype - Goldplay Alt Regular It",
+      "file": "b7fe4693314cead0fef6.otf"
+    },
+    {
+      "id": "83a4cee5d613676af8b3",
+      "name": "Latinotype - Goldplay Alt SemiBold",
+      "file": "83a4cee5d613676af8b3.otf"
+    },
+    {
+      "id": "04f154d07152234c17ff",
+      "name": "Latinotype - Goldplay Alt SemiBold It",
+      "file": "04f154d07152234c17ff.otf"
+    },
+    {
+      "id": "ee235a01801e01198af8",
+      "name": "Latinotype - Goldplay Alt Thin",
+      "file": "ee235a01801e01198af8.otf"
+    },
+    {
+      "id": "927365500867e80f0c0a",
+      "name": "Latinotype - Goldplay Alt Thin It",
+      "file": "927365500867e80f0c0a.otf"
+    },
+    {
+      "id": "d4ce59c18cde984faf92",
+      "name": "Latinotype - Goldplay Black",
+      "file": "d4ce59c18cde984faf92.otf"
+    },
+    {
+      "id": "c87d1c194288c257fff0",
+      "name": "Latinotype - Goldplay Black It",
+      "file": "c87d1c194288c257fff0.otf"
+    },
+    {
+      "id": "74a61d9ecddb9304deed",
+      "name": "Latinotype - Goldplay Bold",
+      "file": "74a61d9ecddb9304deed.otf"
+    },
+    {
+      "id": "24062e10b8db8eb85c59",
+      "name": "Latinotype - Goldplay Bold It",
+      "file": "24062e10b8db8eb85c59.otf"
+    },
+    {
+      "id": "7fb1cce5ff87760c7dea",
+      "name": "Latinotype - Goldplay Light",
+      "file": "7fb1cce5ff87760c7dea.otf"
+    },
+    {
+      "id": "474211f07da1f173a4e8",
+      "name": "Latinotype - Goldplay Light It",
+      "file": "474211f07da1f173a4e8.otf"
+    },
+    {
+      "id": "ec3381fc32d9edafc6c6",
+      "name": "Latinotype - Goldplay Medium",
+      "file": "ec3381fc32d9edafc6c6.otf"
+    },
+    {
+      "id": "3cf43a937132a94ca0fe",
+      "name": "Latinotype - Goldplay Medium It",
+      "file": "3cf43a937132a94ca0fe.otf"
+    },
+    {
+      "id": "bfef2aa4026ec6c0723d",
+      "name": "Latinotype - Goldplay Regular",
+      "file": "bfef2aa4026ec6c0723d.otf"
+    },
+    {
+      "id": "1016844984bbb170edea",
+      "name": "Latinotype - Goldplay Regular It",
+      "file": "1016844984bbb170edea.otf"
+    },
+    {
+      "id": "3f3dbdfc7c1e7200989e",
+      "name": "Latinotype - Goldplay SemiBold",
+      "file": "3f3dbdfc7c1e7200989e.otf"
+    },
+    {
+      "id": "8aa94218fe81e6ba60db",
+      "name": "Latinotype - Goldplay SemiBold It",
+      "file": "8aa94218fe81e6ba60db.otf"
+    },
+    {
+      "id": "9220ecf8769c2c495f19",
+      "name": "Latinotype - Goldplay Thin",
+      "file": "9220ecf8769c2c495f19.otf"
+    },
+    {
+      "id": "ba79cfce920058953f0a",
+      "name": "Latinotype - Goldplay Thin It",
+      "file": "ba79cfce920058953f0a.otf"
+    },
+    {
+      "id": "5e21fb2f3ab7e2f47474",
+      "name": "Zetafonts - Coco Sharp Italic Variable",
+      "file": "5e21fb2f3ab7e2f47474.ttf"
+    },
+    {
+      "id": "fff63fa46837ba853359",
+      "name": "Zetafonts - Coco Sharp Variable",
+      "file": "fff63fa46837ba853359.ttf"
+    },
+    {
+      "id": "0534a82c4c7ca4bb84a5",
+      "name": "Zetafonts - CocoSharp Bold",
+      "file": "0534a82c4c7ca4bb84a5.otf"
+    },
+    {
+      "id": "e95ff5b4c0b4e5d1e089",
+      "name": "Zetafonts - CocoSharp Bold Italic",
+      "file": "e95ff5b4c0b4e5d1e089.otf"
+    },
+    {
+      "id": "b879138cbd6d60f9dee6",
+      "name": "Zetafonts - CocoSharp ExtraLight",
+      "file": "b879138cbd6d60f9dee6.otf"
+    },
+    {
+      "id": "4260a50bfd1f4263898f",
+      "name": "Zetafonts - CocoSharp ExtraLight Italic",
+      "file": "4260a50bfd1f4263898f.otf"
+    },
+    {
+      "id": "5d1d313db471683eddf1",
+      "name": "Zetafonts - CocoSharp Extrabold",
+      "file": "5d1d313db471683eddf1.otf"
+    },
+    {
+      "id": "3e919299fcf6a40a6bfa",
+      "name": "Zetafonts - CocoSharp Extrabold Italic",
+      "file": "3e919299fcf6a40a6bfa.otf"
+    },
+    {
+      "id": "351635d4ffdc2b97f3f7",
+      "name": "Zetafonts - CocoSharp Heavy",
+      "file": "351635d4ffdc2b97f3f7.otf"
+    },
+    {
+      "id": "ed9aee77ab29f78036b6",
+      "name": "Zetafonts - CocoSharp Heavy Italic",
+      "file": "ed9aee77ab29f78036b6.otf"
+    },
+    {
+      "id": "649225b297a504d47c40",
+      "name": "Zetafonts - CocoSharp Italic",
+      "file": "649225b297a504d47c40.otf"
+    },
+    {
+      "id": "ba53004ea2eb0f7fc775",
+      "name": "Zetafonts - CocoSharp L Bold",
+      "file": "ba53004ea2eb0f7fc775.otf"
+    },
+    {
+      "id": "b93885718edc8453ae5c",
+      "name": "Zetafonts - CocoSharp L Bold Italic",
+      "file": "b93885718edc8453ae5c.otf"
+    },
+    {
+      "id": "50cd99e50b8125896d4e",
+      "name": "Zetafonts - CocoSharp L Extrabold",
+      "file": "50cd99e50b8125896d4e.otf"
+    },
+    {
+      "id": "8522855026952f073511",
+      "name": "Zetafonts - CocoSharp L Extrabold Italic",
+      "file": "8522855026952f073511.otf"
+    },
+    {
+      "id": "62aaca8067281df82435",
+      "name": "Zetafonts - CocoSharp L Extralight",
+      "file": "62aaca8067281df82435.otf"
+    },
+    {
+      "id": "cd46727ca238aacef644",
+      "name": "Zetafonts - CocoSharp L Extralight Italic",
+      "file": "cd46727ca238aacef644.otf"
+    },
+    {
+      "id": "ff1959d1acd92830a421",
+      "name": "Zetafonts - CocoSharp L Heavy",
+      "file": "ff1959d1acd92830a421.otf"
+    },
+    {
+      "id": "46a9cbd28c8fcc6962c3",
+      "name": "Zetafonts - CocoSharp L Heavy Italic",
+      "file": "46a9cbd28c8fcc6962c3.otf"
+    },
+    {
+      "id": "33d9f08d867b5558c0b1",
+      "name": "Zetafonts - CocoSharp L Italic",
+      "file": "33d9f08d867b5558c0b1.otf"
+    },
+    {
+      "id": "238339c71e647a44958e",
+      "name": "Zetafonts - CocoSharp L Light",
+      "file": "238339c71e647a44958e.otf"
+    },
+    {
+      "id": "97c8e4e739cb088af68a",
+      "name": "Zetafonts - CocoSharp L Light Italic",
+      "file": "97c8e4e739cb088af68a.otf"
+    },
+    {
+      "id": "8729eb4f98bd1580b211",
+      "name": "Zetafonts - CocoSharp L Regular",
+      "file": "8729eb4f98bd1580b211.otf"
+    },
+    {
+      "id": "4e941bce0e45d3725099",
+      "name": "Zetafonts - CocoSharp Light",
+      "file": "4e941bce0e45d3725099.otf"
+    },
+    {
+      "id": "cfe249e92c20c7d509aa",
+      "name": "Zetafonts - CocoSharp Light Italic",
+      "file": "cfe249e92c20c7d509aa.otf"
+    },
+    {
+      "id": "814b28db1e741ff6efec",
+      "name": "Zetafonts - CocoSharp Regular",
+      "file": "814b28db1e741ff6efec.otf"
+    },
+    {
+      "id": "537cd74d9b9c8876bb62",
+      "name": "Zetafonts - CocoSharp S Bold",
+      "file": "537cd74d9b9c8876bb62.otf"
+    },
+    {
+      "id": "25eff99e49f98213eb25",
+      "name": "Zetafonts - CocoSharp S Bold Italic",
+      "file": "25eff99e49f98213eb25.otf"
+    },
+    {
+      "id": "3e49dd2f927d1751f9f3",
+      "name": "Zetafonts - CocoSharp S Extrabold",
+      "file": "3e49dd2f927d1751f9f3.otf"
+    },
+    {
+      "id": "99ac0f59df4bbbb1aa7d",
+      "name": "Zetafonts - CocoSharp S Extrabold Italic",
+      "file": "99ac0f59df4bbbb1aa7d.otf"
+    },
+    {
+      "id": "16fd33862d52cc9b1510",
+      "name": "Zetafonts - CocoSharp S Extralight",
+      "file": "16fd33862d52cc9b1510.otf"
+    },
+    {
+      "id": "3dd5bb570c139d30fce0",
+      "name": "Zetafonts - CocoSharp S Extralight Italic",
+      "file": "3dd5bb570c139d30fce0.otf"
+    },
+    {
+      "id": "34e172e089339b9b1b14",
+      "name": "Zetafonts - CocoSharp S Heavy",
+      "file": "34e172e089339b9b1b14.otf"
+    },
+    {
+      "id": "84930b13cda865ffe972",
+      "name": "Zetafonts - CocoSharp S Heavy Italic",
+      "file": "84930b13cda865ffe972.otf"
+    },
+    {
+      "id": "a0fb5d3be5ef9e1ad76a",
+      "name": "Zetafonts - CocoSharp S Italic",
+      "file": "a0fb5d3be5ef9e1ad76a.otf"
+    },
+    {
+      "id": "df07d4b9f8de1d2f8ff1",
+      "name": "Zetafonts - CocoSharp S Light",
+      "file": "df07d4b9f8de1d2f8ff1.otf"
+    },
+    {
+      "id": "757fe417d1159de210f0",
+      "name": "Zetafonts - CocoSharp S Light Italic",
+      "file": "757fe417d1159de210f0.otf"
+    },
+    {
+      "id": "c3fddcba38d46857def7",
+      "name": "Zetafonts - CocoSharp S Regular",
+      "file": "c3fddcba38d46857def7.otf"
+    },
+    {
+      "id": "d5cde3c8f666a32da2ac",
+      "name": "Zetafonts - CocoSharp XL Bold",
+      "file": "d5cde3c8f666a32da2ac.otf"
+    },
+    {
+      "id": "c8aacd543474e08447e4",
+      "name": "Zetafonts - CocoSharp XL Bold Italic",
+      "file": "c8aacd543474e08447e4.otf"
+    },
+    {
+      "id": "9b71c03d16ca9945fbc6",
+      "name": "Zetafonts - CocoSharp XL Extrabold",
+      "file": "9b71c03d16ca9945fbc6.otf"
+    },
+    {
+      "id": "4770890b4ed6f22c13b3",
+      "name": "Zetafonts - CocoSharp XL Extrabold Italic",
+      "file": "4770890b4ed6f22c13b3.otf"
+    },
+    {
+      "id": "bdec2cb0b1f3b680742c",
+      "name": "Zetafonts - CocoSharp XL Extralight",
+      "file": "bdec2cb0b1f3b680742c.otf"
+    },
+    {
+      "id": "c8225776fdb76fe1c676",
+      "name": "Zetafonts - CocoSharp XL Extralight Italic",
+      "file": "c8225776fdb76fe1c676.otf"
+    },
+    {
+      "id": "5b5a27848939ba509cc2",
+      "name": "Zetafonts - CocoSharp XL Heavy",
+      "file": "5b5a27848939ba509cc2.otf"
+    },
+    {
+      "id": "6ea183b8f5f83bdc8cd0",
+      "name": "Zetafonts - CocoSharp XL Heavy Italic",
+      "file": "6ea183b8f5f83bdc8cd0.otf"
+    },
+    {
+      "id": "cf4e32cf536f6dc98b3d",
+      "name": "Zetafonts - CocoSharp XL Italic",
+      "file": "cf4e32cf536f6dc98b3d.otf"
+    },
+    {
+      "id": "63b3780d39041c06b5bc",
+      "name": "Zetafonts - CocoSharp XL Light",
+      "file": "63b3780d39041c06b5bc.otf"
+    },
+    {
+      "id": "60e05b8ba3b88de3d757",
+      "name": "Zetafonts - CocoSharp XL Light Italic",
+      "file": "60e05b8ba3b88de3d757.otf"
+    },
+    {
+      "id": "7e0f11fe96774cac5339",
+      "name": "Zetafonts - CocoSharp XL Regular",
+      "file": "7e0f11fe96774cac5339.otf"
+    },
+    {
+      "id": "659c185c3a8425199f13",
+      "name": "Zetafonts - CocoSharp XS Bold",
+      "file": "659c185c3a8425199f13.otf"
+    },
+    {
+      "id": "1bb55ec91c2864fa1aba",
+      "name": "Zetafonts - CocoSharp XS Bold Italic",
+      "file": "1bb55ec91c2864fa1aba.otf"
+    },
+    {
+      "id": "3520a1ad5a7c9feaa9ad",
+      "name": "Zetafonts - CocoSharp XS Extrabold",
+      "file": "3520a1ad5a7c9feaa9ad.otf"
+    },
+    {
+      "id": "624d2e39f584373b7dee",
+      "name": "Zetafonts - CocoSharp XS Extrabold Italic",
+      "file": "624d2e39f584373b7dee.otf"
+    },
+    {
+      "id": "b79f59ada50d3f49c143",
+      "name": "Zetafonts - CocoSharp XS Extralight",
+      "file": "b79f59ada50d3f49c143.otf"
+    },
+    {
+      "id": "e21beef5d23da37ea5b4",
+      "name": "Zetafonts - CocoSharp XS Extralight Italic",
+      "file": "e21beef5d23da37ea5b4.otf"
+    },
+    {
+      "id": "0a577198411f608e758e",
+      "name": "Zetafonts - CocoSharp XS Heavy",
+      "file": "0a577198411f608e758e.otf"
+    },
+    {
+      "id": "46fe6c550807fb9abffc",
+      "name": "Zetafonts - CocoSharp XS Heavy Italic",
+      "file": "46fe6c550807fb9abffc.otf"
+    },
+    {
+      "id": "810ba412d4a6d623a806",
+      "name": "Zetafonts - CocoSharp XS Italic",
+      "file": "810ba412d4a6d623a806.otf"
+    },
+    {
+      "id": "425ecc89ea2e92eb2e70",
+      "name": "Zetafonts - CocoSharp XS Light",
+      "file": "425ecc89ea2e92eb2e70.otf"
+    },
+    {
+      "id": "66b49f7f423ee0e78aeb",
+      "name": "Zetafonts - CocoSharp XS Light Italic",
+      "file": "66b49f7f423ee0e78aeb.otf"
+    },
+    {
+      "id": "9602c0a77f8947c676af",
+      "name": "Zetafonts - CocoSharp XS Regular",
+      "file": "9602c0a77f8947c676af.otf"
+    },
+    {
+      "id": "68e3b7f95415674605d0",
+      "name": "exljbris - MuseoSans-100",
+      "file": "68e3b7f95415674605d0.otf"
+    },
+    {
+      "id": "aa01da4d89552cc0c880",
+      "name": "exljbris - MuseoSans-100Italic",
+      "file": "aa01da4d89552cc0c880.otf"
+    },
+    {
+      "id": "ecc24f40f565ce3d863f",
+      "name": "exljbris - MuseoSans-300",
+      "file": "ecc24f40f565ce3d863f.otf"
+    },
+    {
+      "id": "1138074e495542a660f1",
+      "name": "exljbris - MuseoSans-300Italic",
+      "file": "1138074e495542a660f1.otf"
+    },
+    {
+      "id": "46428f2c539eecc8b06f",
+      "name": "exljbris - MuseoSans-500",
+      "file": "46428f2c539eecc8b06f.otf"
+    },
+    {
+      "id": "1f7fe83c703e5ab07a5c",
+      "name": "exljbris - MuseoSans-500Italic",
+      "file": "1f7fe83c703e5ab07a5c.otf"
+    },
+    {
+      "id": "c36ca8cd5566c156e23f",
+      "name": "exljbris - MuseoSans-700",
+      "file": "c36ca8cd5566c156e23f.otf"
+    },
+    {
+      "id": "df10f88d5947a5117d6e",
+      "name": "exljbris - MuseoSans-700Italic",
+      "file": "df10f88d5947a5117d6e.otf"
+    },
+    {
+      "id": "3523734aa4e5c25525d4",
+      "name": "exljbris - MuseoSans-900",
+      "file": "3523734aa4e5c25525d4.otf"
+    },
+    {
+      "id": "2b4a239914214abf74f5",
+      "name": "exljbris - MuseoSans-900Italic",
+      "file": "2b4a239914214abf74f5.otf"
+    }
+  ]
+}
