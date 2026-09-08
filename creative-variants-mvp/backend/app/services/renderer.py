@@ -35,7 +35,7 @@ from .imaging import (
     rounded_rect,
     style_palette,
 )
-from .layout_engine import CATEGORY_MAX_LINES, Placement, VariantPlan
+from .layout_engine import CATEGORY_MAX_LINES, MAX_UPSCALE, Placement, VariantPlan
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +386,18 @@ def draw_text_layer(
 
     placement.color = color
     placement.font_size = int(getattr(font, "size", start_size))
+    # La caja real del bloque vuelve a la colocación, como ya hacía la capa
+    # imagen. El puntaje se calcula DESPUÉS de renderizar: dejando aquí la caja
+    # planificada se juzgaba lo que se pensaba dibujar y no lo dibujado, y dos
+    # textos que se pisaban de verdad pasaban sin penalización —una pieza de
+    # 300x60 con el titular encima del subtítulo sacaba 92—.
+    if block_h > placement.height + 1:
+        warnings.append(
+            f"'{layer.name}' no cabe en su hueco: ocupa {block_h}px de "
+            f"{placement.height}px y se sale por abajo."
+        )
+    placement.x, placement.y = block_x, block_y
+    placement.width, placement.height = max(1, block_w), max(1, block_h)
     return block_box, warnings
 
 
@@ -420,6 +432,18 @@ def draw_image_layer(
     else:
         # Escala uniforme: se preserva exactamente la relación de aspecto original.
         scale = min(placement.width / asset.width, placement.height / asset.height)
+        # Y con tope. El planificador ya limita la ampliación, pero mide contra la
+        # caja de la capa, no contra los píxeles del PNG: un recorte separado de
+        # un banner de 325 px de alto tiene los píxeles que tiene, y llenar con él
+        # el hueco que se le asignó lo dejaba en bloques. Un producto nítido más
+        # pequeño se lee; uno grande y deshecho, no.
+        if scale > MAX_UPSCALE:
+            warnings.append(
+                f"'{layer.name}' se dejó a {MAX_UPSCALE:.0f}× su tamaño real "
+                f"({asset.width}x{asset.height}px): ampliarlo hasta llenar su hueco "
+                "lo deja pixelado."
+            )
+            scale = MAX_UPSCALE
         new_w = max(1, int(round(asset.width * scale)))
         new_h = max(1, int(round(asset.height * scale)))
     resized = asset.resize((new_w, new_h), Image.Resampling.LANCZOS)

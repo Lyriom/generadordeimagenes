@@ -211,15 +211,33 @@ def _proyecto() -> Project:
 
 
 def test_el_formato_que_obliga_a_recomponer_usa_la_reticula_del_arte():
-    """Y el que se parece al original no: ahí conservar el diseño es mejor."""
     project = _proyecto()
-    plans, _ = plan_variants(project, _Peticion(["1080x1350", "google_display_728x90"]))
+    plans, _ = plan_variants(project, _Peticion(["1080x1350"]))
     verticales = [p for p in plans if p.format == "1080x1350"]
-    banners = [p for p in plans if p.format == "google_display_728x90"]
     assert any(p.layout == SOURCE_FLOW_LAYOUT for p in verticales)
     # La otra mitad sigue probando familias distintas: la variedad vale.
     assert any(p.layout != SOURCE_FLOW_LAYOUT for p in verticales)
-    assert all(p.layout != SOURCE_FLOW_LAYOUT for p in banners)
+
+
+def test_una_tira_tambien_usa_la_reticula_aunque_la_proporcion_encaje():
+    """En 728x90 el titular de una familia genérica cae en la franja del producto.
+
+    Las zonas de una familia son fracciones del lienzo pensadas para formatos de
+    una pieza. En una tira salía «el producto invade 'Titular'» cuatro veces.
+    """
+    project = _proyecto()
+    plans, _ = plan_variants(project, _Peticion(["google_display_728x90"]))
+    assert any(p.layout == SOURCE_FLOW_LAYOUT for p in plans)
+
+
+def test_un_formato_normal_no_se_toca():
+    """La regla es para lo que no encaja: un arte cuadrado a un 4:5 se compone igual."""
+    project = _proyecto()
+    project.canvas.width, project.canvas.height = 1080, 1080
+    project.source.width, project.source.height = 1080, 1080
+    plans, _ = plan_variants(project, _Peticion(["1080x1350"]))
+    assert plans
+    assert all(p.layout != SOURCE_FLOW_LAYOUT for p in plans)
 
 
 def test_si_el_usuario_elige_los_layouts_no_se_le_cambian():

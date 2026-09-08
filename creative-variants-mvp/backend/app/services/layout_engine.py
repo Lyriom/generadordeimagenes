@@ -1018,6 +1018,7 @@ def build_placements(
             source_canvas
             if (
                 source_canvas is not None
+                and not derived
                 and category == LayerCategory.PRODUCT
                 and all(
                     len(layer.meta.get("replacement_box") or []) == 4 for layer in group
@@ -1779,9 +1780,21 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     # sí su orden de lectura. En esos, la mitad de las piezas se recomponen con la
     # retícula del arte y la otra mitad prueban familias distintas: la variedad
     # sigue valiendo, la plantilla a ciegas no.
+    #
+    # Y las tiras entran en el mismo grupo aunque su proporción no obligue a
+    # recomponer. Las zonas de una familia son fracciones del lienzo pensadas
+    # para formatos de una pieza: en 728x90 el titular cae en la franja del
+    # producto y sale «el producto invade 'Titular'» cuatro veces. Medido con el
+    # banner del caso real: las familias genéricas daban entre 50 y 70 puntos
+    # donde la retícula da más de 90.
     recomponer: set[str] = set()
     if getattr(request, "layouts", None) is None:
-        recomponer = set(formats_needing_recompose(project, list(dict.fromkeys(ctx.formats))))
+        formatos = list(dict.fromkeys(ctx.formats))
+        recomponer = set(formats_needing_recompose(project, formatos))
+        for fmt in formatos:
+            ancho, alto = SUPPORTED_FORMATS[fmt]
+            if ancho / max(1, alto) >= BANNER_ASPECT:
+                recomponer.add(fmt)
 
     plans: list[VariantPlan] = []
     hechas: dict[str, int] = {}
