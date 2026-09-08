@@ -106,6 +106,11 @@ class Item:
     #: Letras de la palabra más larga. Marca el ancho por debajo del cual el
     #: texto se parte, que es un límite duro y no una preferencia.
     longest_word: int = 6
+    #: Nombre para decirlo en un aviso, y con cuánta prioridad se conserva
+    #: cuando el formato no da para todo. Sale del orden que ya usa el motor
+    #: para resolver solapamientos: no hace falta una opinión nueva.
+    label: str = ""
+    priority: int = 50
 
     @property
     def is_text(self) -> bool:
@@ -238,13 +243,23 @@ def _fitted(item: Item, box_w: float, box_h: float, canvas_h: int) -> tuple[floa
 def _text_band(
     item: Item, font_px: float, cross_px: float, flow: str, canvas_w: int, canvas_h: int
 ) -> float:
-    """Banda que ocupa un texto compuesto a un cuerpo de letra dado, en píxeles."""
+    """Banda que ocupa un texto compuesto a un cuerpo de letra dado, en píxeles.
+
+    Los dos ejes no se calculan igual, y confundirlos era un error de bulto. En
+    una banda horizontal el ancho decide en cuántas líneas se parte el texto y
+    de ahí sale el alto que pide. En una columna es al revés: el alto decide
+    cuántas líneas caben apiladas y de ahí sale el ancho que necesita. Medir el
+    ancho contra el alto de la columna daba demandas diminutas, y con ellas una
+    tira de 320x50 declaraba que le caben cinco bloques.
+    """
     font_px = max(1.0, font_px)
     una_linea = max(1.0, item.chars * CHAR_WIDTH * font_px)
-    lineas = min(item.max_lines, max(1, math.ceil(una_linea / max(1.0, cross_px))))
     if flow == "y":
+        lineas = min(item.max_lines, max(1, math.ceil(una_linea / max(1.0, cross_px))))
         return (lineas * font_px * LINE_HEIGHT) / max(1, canvas_h)
-    return min(cross_px, una_linea / lineas * 1.12) / max(1, canvas_w)
+    caben = int(max(1.0, cross_px) // (font_px * LINE_HEIGHT))
+    lineas = max(1, min(item.max_lines, caben))
+    return (una_linea / lineas * 1.12) / max(1, canvas_w)
 
 
 def _demand(
@@ -261,8 +276,16 @@ def _demand(
     base = item.ref_y if flow == "y" else item.ref_x
     if item.is_text:
         piso = _text_band(item, MIN_FONT_PX, cross_px, flow, canvas_w, canvas_h)
+        # El tope de cuerpo de letra es una fracción del alto del lienzo, y en una
+        # tira de 50 px eso son 4 px: por debajo del mínimo legible. El tope nunca
+        # puede quedar por debajo del suelo.
         techo = _text_band(
-            item, item.font_cap * canvas_h, cross_px, flow, canvas_w, canvas_h
+            item,
+            max(MIN_FONT_PX, item.font_cap * canvas_h),
+            cross_px,
+            flow,
+            canvas_w,
+            canvas_h,
         )
         if flow == "x":
             # En columnas el suelo no es el cuerpo de letra: es la palabra más
@@ -348,8 +371,12 @@ def _solve(
     canvas_h: int,
     margin: tuple[float, float],
     reserve: float,
-) -> tuple[dict[str, Zone], float]:
-    """Reparte las bandas por un eje y devuelve las zonas y lo que llenan.
+) -> tuple[dict[str, Zone], float, bool]:
+    """Reparte las bandas por un eje: zonas, cuánto llenan y si cupieron holgadas.
+
+    «Holgadas» significa que cupo lo que el diseño pide, sin recortar a los
+    mínimos. Caber a la fuerza y caber bien no son lo mismo, y esa es la
+    diferencia entre una pieza publicable y una apretada.
 
     La puntuación es el área que el contenido llega a ocupar sobre el lienzo: la
     misma medida con la que después se juzga la pieza. Así el eje no se elige por
@@ -370,10 +397,8 @@ def _solve(
         - BAND_GAP * (len(grupos) - 1)
         - (reserve if flow == "y" else 0.0)
     )
-    if hueco <= 0:
-        return {}, 0.0
-    if not grupos:
-        return {}, 0.0
+    if hueco <= 0 or not grupos:
+        return {}, 0.0, False
 
     demandas: list[float] = []
     pisos: list[float] = []
@@ -395,9 +420,10 @@ def _solve(
         # Ni con los mínimos caben las bandas. Repartirlas de todas formas es lo
         # que dejaba una tira de 320x50 con siete bloques de siete píxeles y el
         # texto saliéndose del lienzo: en este eje no hay retícula posible.
-        return {}, 0.0
+        return {}, 0.0, False
 
-    if sum(demandas) > hueco:
+    holgado = sum(demandas) <= hueco
+    if not holgado:
         demandas = _trim(demandas, pisos, texto, hueco)
     else:
         demandas = _grow(demandas, techos, texto, hueco)
@@ -427,7 +453,32 @@ def _solve(
             fit_w, fit_h = _fitted(item, caja[0], caja[1], canvas_h)
             llenado += (fit_w * fit_h) / max(1, canvas_w * canvas_h)
         posicion += banda + gap
-    return zones, llenado
+    return zones, llenado, holgado
+
+
+def fits_comfortably(
+    items: list[Item],
+    source_canvas: tuple[int, int],
+    canvas_w: int,
+    canvas_h: int,
+    *,
+    margin: tuple[float, float] = (0.035, 0.035),
+    reserve: float = 0.0,
+) -> bool:
+    """¿Cabe lo que el diseño pide, sin recortar a los mínimos?
+
+    `viable` contesta si se puede repartir el lienzo; esto contesta si sale una
+    pieza publicable. En una tira de 300x60 cinco bloques caben *a la fuerza*,
+    cada uno en su ancho mínimo, y el resultado es el copy pisándose.
+    """
+    if len(items) < 2:
+        return True
+    axis = reading_axis(items, source_canvas)
+    tramos = clusters(items, axis)
+    return any(
+        _solve(tramos, axis, flow, canvas_w, canvas_h, margin, reserve)[2]
+        for flow in ("y", "x")
+    )
 
 
 def viable(
@@ -449,6 +500,50 @@ def viable(
         items, source_canvas, canvas_w, canvas_h, margin=margin, reserve=reserve
     )
     return bool(zones)
+
+
+@dataclass
+class Capacity:
+    """Cuántos bloques del arte aguanta un formato, y cuáles sobran."""
+
+    fits: int
+    total: int
+    #: Nombres de los que no caben, del menos importante al más.
+    dropped: list[str]
+
+    @property
+    def crowded(self) -> bool:
+        return bool(self.dropped)
+
+
+def capacity(
+    items: list[Item],
+    source_canvas: tuple[int, int],
+    canvas_w: int,
+    canvas_h: int,
+    *,
+    margin: tuple[float, float] = (0.035, 0.035),
+    reserve: float = 0.0,
+) -> Capacity:
+    """Cuántos bloques caben legibles en este lienzo, quitando los que sobran.
+
+    Se van soltando los menos importantes hasta que la retícula cabe con todo
+    por encima del suelo de legibilidad. Sirve para decirlo **antes** de
+    generar: en una tira de 300x60 no entran cuatro bloques de copy y tres
+    productos, y entregar la pieza apretada sin avisar es hacer perder el
+    tiempo a quien la pidió.
+    """
+    restantes = sorted(items, key=lambda item: -item.priority)
+    sobran: list[Item] = []
+    while len(restantes) > 1 and not fits_comfortably(
+        restantes, source_canvas, canvas_w, canvas_h, margin=margin, reserve=reserve
+    ):
+        sobran.append(restantes.pop())
+    return Capacity(
+        fits=len(restantes),
+        total=len(items),
+        dropped=[item.label or item.key for item in sobran],
+    )
 
 
 def derive_zones(
@@ -480,7 +575,7 @@ def derive_zones(
         (flow, *_solve(tramos, axis, flow, canvas_w, canvas_h, margin, reserve))
         for flow in ("y", "x")
     ]
-    flow, zones, llenado = max(candidatos, key=lambda candidato: candidato[2])
+    flow, zones, llenado, _ = max(candidatos, key=lambda candidato: candidato[2])
     if not zones:
         return {}, []
     bloques = len(_groups(tramos, axis, flow))

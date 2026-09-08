@@ -109,6 +109,21 @@ export interface FormatPreset {
   source_url: string;
 }
 
+/** Cuántos bloques del arte entran en un formato, y cuáles sobran. */
+export interface FormatFit {
+  id: string;
+  width: number;
+  height: number;
+  fits: number;
+  total: number;
+  dropped: string[];
+}
+
+export interface FormatFitResponse {
+  project_id: string;
+  formats: FormatFit[];
+}
+
 export interface Capabilities {
   segmentation: Record<string, any>;
   ocr: Record<string, any>;

@@ -16,6 +16,8 @@ import type {
   ArtTextLayer,
   ArtTexts,
   Capabilities,
+  FormatFit,
+  FormatFitResponse,
   FormatPreset,
   Layer,
   ProductGroup,
@@ -203,6 +205,8 @@ interface State {
   selectedLayerId: string | null;
   selectedFormats: Set<string>;
   formatPlatform: string;
+  /** Qué cabe en cada formato, según el KV más apretado de la campaña. */
+  formatFit: Record<string, FormatFit>;
   products: File[];
   individualProducts: Set<string>;
   groups: ProductGroup[];
@@ -239,6 +243,7 @@ const state: State = {
   selectedLayerId: null,
   selectedFormats: new Set(["meta_feed_4_5", "meta_stories", "meta_reels"]),
   formatPlatform: "Todos",
+  formatFit: {},
   products: [],
   individualProducts: new Set(),
   groups: [],
@@ -499,6 +504,7 @@ async function refreshAll(): Promise<void> {
   state.campaign = await Promise.all(
     state.campaignIds.map((id) => get<Project>("/projects/" + id)),
   );
+  state.formatFit = await peorCupoPorFormato(state.campaignIds);
   if (!state.activeId || !state.campaignIds.includes(state.activeId)) {
     state.activeId = state.campaignIds[0] || null;
   }
@@ -2370,6 +2376,36 @@ function selectedProductFiles(): File[] {
 const MIN_LAYERS_TO_RECOMPOSE = 3;
 const MIN_SOURCE_COVERAGE = 0.45;
 
+/** Qué cabe en cada formato, tomando el KV más apretado de la campaña.
+ *
+ * Lo que se elige aquí se aplica a todos, así que manda el que menos aguanta,
+ * igual que con la cobertura. El cálculo es del backend: es la misma geometría
+ * con la que después se compone la pieza, y duplicarla aquí sería garantizar
+ * que las dos respuestas se separen. */
+async function peorCupoPorFormato(ids: string[]): Promise<Record<string, FormatFit>> {
+  if (!ids.length) return {};
+  const respuestas = await Promise.all(
+    ids.map((id) =>
+      get<FormatFitResponse>("/projects/" + id + "/formats").catch(() => null)),
+  );
+  const peor: Record<string, FormatFit> = {};
+  for (const respuesta of respuestas) {
+    for (const cupo of respuesta?.formats || []) {
+      const previo = peor[cupo.id];
+      if (!previo || cupo.total - cupo.fits > previo.total - previo.fits) {
+        peor[cupo.id] = cupo;
+      }
+    }
+  }
+  return peor;
+}
+
+/** Lo que sobra en un formato: los elementos que no entran con tamaño legible. */
+function sobraEnFormato(spec: FormatPreset): string[] {
+  const cupo = state.formatFit[spec.id];
+  return cupo && cupo.total > cupo.fits ? cupo.dropped : [];
+}
+
 function coberturaEnFormato(sw: number, sh: number, tw: number, th: number): number {
   if (Math.min(sw, sh, tw, th) <= 0) return 0;
   const escala = Math.min(tw / sw, th / sh);
@@ -2425,17 +2461,32 @@ function formatCard(spec: FormatPreset): string {
   ].join(";");
   const encaja = formatoRecomendado(spec);
   const separa = necesitaSeparar(spec);
-  const nota = encaja
-    ? "Encaja con tu KV"
-    : separa
-      ? "Se separará el arte · llena el " + String(Math.round(coberturaDelKv(spec) * 100)) + "%"
-      : esc(spec.platform) + (spec.recommended ? " · recomendado" : "");
+  const sobra = sobraEnFormato(spec);
+  const cupo = state.formatFit[spec.id];
+  // La capacidad manda sobre lo demás: que la proporción encaje no sirve de nada
+  // si el copy no cabe. Decirlo aquí es decirlo antes de generar.
+  const nota = sobra.length && cupo
+    ? "Solo entran " + String(cupo.fits) + " de " + String(cupo.total) + " elementos · sobra " +
+      esc(sobra.slice(0, 2).join(", ")) + (sobra.length > 2 ? " +" + String(sobra.length - 2) : "")
+    : encaja
+      ? "Encaja con tu KV"
+      : separa
+        ? "Se separará el arte · llena el " + String(Math.round(coberturaDelKv(spec) * 100)) + "%"
+        : esc(spec.platform) + (spec.recommended ? " · recomendado" : "");
   return [
-    '<label class="format-card', encaja ? " is-fit" : separa ? " needs-split" : "", '"><input class="format-check" type="checkbox" value="', attr(spec.id), '"',
+    '<label class="format-card', sobra.length ? " is-tight" : encaja ? " is-fit" : separa ? " needs-split" : "", '"><input class="format-check" type="checkbox" value="', attr(spec.id), '"',
     checked(state.selectedFormats.has(spec.id)), '><span class="format-shape" style="', attr(style), '"><i class="safe-zone"></i></span>',
     '<span class="format-copy"><strong>', esc(spec.placement), '</strong><span>', String(spec.width), "×", String(spec.height), " · ", esc(spec.ratio),
     '</span><span class="format-note">', nota, "</span></span></label>",
   ].join("");
+}
+
+/** Los formatos elegidos en los que no cabe el arte completo. */
+function apretadosElegidos(): string[] {
+  const catalog = state.capabilities?.format_catalog || [];
+  return catalog
+    .filter((spec) => state.selectedFormats.has(spec.id) && sobraEnFormato(spec).length)
+    .map((spec) => String(spec.width) + "×" + String(spec.height));
 }
 
 function formatSelectorHtml(allowAuto: boolean): string {
@@ -2447,7 +2498,10 @@ function formatSelectorHtml(allowAuto: boolean): string {
   // Recomendar es ordenar: primero los que salen del KV tal como está, después
   // los que obligan a separarlo. Leer la proporción del arte y no hacer nada con
   // ella era dejarle el trabajo al usuario.
-  const visible = [...filtrados].sort((a, b) => Number(formatoRecomendado(b)) - Number(formatoRecomendado(a)));
+  // Los que no aguantan el arte completo caen al final: primero lo que sale bien.
+  const visible = [...filtrados].sort((a, b) =>
+    (Number(sobraEnFormato(a).length > 0) - Number(sobraEnFormato(b).length > 0)) ||
+    (Number(formatoRecomendado(b)) - Number(formatoRecomendado(a))));
   const filters = platforms.map((platform) =>
     '<button type="button" class="platform-filter' + (platform === state.formatPlatform ? " is-active" : "") +
     '" data-platform="' + attr(platform) + '">' + esc(platform) + "</button>"
@@ -2459,6 +2513,11 @@ function formatSelectorHtml(allowAuto: boolean): string {
     '<div id="manual-formats"', allowAuto && state.autoFormats ? " hidden" : "", '><div class="format-platforms">', filters, '</div><div class="format-grid">',
     visible.map(formatCard).join(""), "</div></div>",
     '<p class="muted tiny" style="margin:14px 0 0">Las líneas blancas marcan dónde deben quedar logo, producto, copy y legales.</p>',
+    apretadosElegidos().length
+      ? '<p class="notice" style="margin:12px 0 0"><strong>' + esc(apretadosElegidos().join(", ")) +
+        '</strong>: en ' + (apretadosElegidos().length > 1 ? "esos formatos" : "ese formato") +
+        ' no entra el arte completo con tamaño legible. Las piezas se generan igual, pero saldrán apretadas: quita los elementos que sobran en <strong>Revisar capas</strong> o elige un formato más grande.</p>'
+      : "",
     catalog.some(necesitaSeparar)
       ? '<p class="notice" style="margin:12px 0 0">Los formatos marcados <strong>no encajan con la proporción de tu KV</strong>, así que para llenarlos el motor separará el arte en capas —copy con OCR, objetos recortados, fondo reconstruido— y lo recompondrá. Tarda más y el resultado ya no es el arte original intacto: si prefieres fidelidad, quédate con los de arriba.</p>'
       : "",

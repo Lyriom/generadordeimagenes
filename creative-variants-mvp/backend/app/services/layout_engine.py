@@ -860,6 +860,23 @@ REFLOW_REFERENCE_STACKED = "vertical_stack"
 REFLOW_REFERENCE_WIDE = "product_left"
 
 
+def _reflow_inputs(
+    layers: Iterable[Layer], source_canvas: tuple[int, int], width: int, height: int
+) -> tuple[list[source_layout.Item], dict[str, Any]]:
+    """Los bloques del arte y los márgenes con los que se mide un formato."""
+    agrupadas: dict[LayerCategory, list[Layer]] = {}
+    for layer in layers:
+        if layer.category == LayerCategory.BACKGROUND or not layer.visible:
+            continue
+        agrupadas.setdefault(layer.category, []).append(layer)
+    margen = SAFE_MARGIN * min(width, height)
+    opciones: dict[str, Any] = {
+        "margin": (margen / max(1, width), margen / max(1, height)),
+        "reserve": (1.0 - LEGAL_FOOT) if LayerCategory.LEGAL in agrupadas else 0.0,
+    }
+    return _source_items(agrupadas, source_canvas), opciones
+
+
 def reflow_viable(
     layers: Iterable[Layer], source_canvas: tuple[int, int], width: int, height: int
 ) -> bool:
@@ -870,21 +887,21 @@ def reflow_viable(
     original a escala. Elegir el layout sin preguntarlo dejaba el texto fuera
     del lienzo y 39 puntos.
     """
-    agrupadas: dict[LayerCategory, list[Layer]] = {}
-    for layer in layers:
-        if layer.category == LayerCategory.BACKGROUND or not layer.visible:
-            continue
-        agrupadas.setdefault(layer.category, []).append(layer)
-    hay_legal = LayerCategory.LEGAL in agrupadas
-    margen = SAFE_MARGIN * min(width, height)
-    return source_layout.viable(
-        _source_items(agrupadas, source_canvas),
-        source_canvas,
-        width,
-        height,
-        margin=(margen / max(1, width), margen / max(1, height)),
-        reserve=(1.0 - LEGAL_FOOT) if hay_legal else 0.0,
-    )
+    items, opciones = _reflow_inputs(layers, source_canvas, width, height)
+    return source_layout.viable(items, source_canvas, width, height, **opciones)
+
+
+def format_capacity(
+    layers: Iterable[Layer], source_canvas: tuple[int, int], width: int, height: int
+) -> source_layout.Capacity:
+    """Cuántos bloques del arte aguanta este formato, y cuáles sobran.
+
+    Es la pregunta que había que contestar **antes** de generar: en 300x60 no
+    entran cuatro bloques de copy y tres productos, y entregar la pieza apretada
+    sin decirlo es hacerle perder el tiempo a quien la pidió.
+    """
+    items, opciones = _reflow_inputs(layers, source_canvas, width, height)
+    return source_layout.capacity(items, source_canvas, width, height, **opciones)
 
 
 def _reference_share(category: LayerCategory, layout_key: str, index: int) -> float:
@@ -932,6 +949,12 @@ def _source_items(
                 (y1 - y0) / max(1, source_h),
             )
             clave = category.value if len(bloque) > 1 else bloque[0].id
+            etiqueta = (
+                f"{len(bloque)} productos"
+                if len(bloque) > 1
+                else (bloque[0].name or category.value)
+            )
+            prioridad = PRIORITY.get(category, 10)
             imagenes = [layer for layer in bloque if not layer.is_text]
             if imagenes:
                 # Varias piezas del mismo bloque se colocan en fila salvo que la
@@ -948,6 +971,8 @@ def _source_items(
                         max_upscale=MAX_UPSCALE,
                         ref_y=ref_y,
                         ref_x=ref_x,
+                        label=etiqueta,
+                        priority=prioridad,
                     )
                 )
                 continue
@@ -965,6 +990,8 @@ def _source_items(
                         (len(palabra) for layer in bloque for palabra in (layer.content or "").split()),
                         default=6,
                     ),
+                    label=etiqueta,
+                    priority=prioridad,
                 )
             )
     return items
@@ -1801,6 +1828,25 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     # sortean: se ofrecen donde pueden salir bien, y la mitad de las piezas de un
     # formato van por ahí. La otra mitad sigue probando familias distintas,
     # porque la variedad vale; la plantilla a ciegas donde no cabe, no.
+    # Lo primero, antes de plantear nada: decir en qué formatos no entra el arte
+    # completo. Entregar doce piezas apretadas y explicarlo después es tarde, y
+    # el usuario no tiene forma de saber que el problema era la capacidad del
+    # formato y no el motor.
+    for fmt in dict.fromkeys(ctx.formats):
+        ancho, alto = SUPPORTED_FORMATS[fmt]
+        cupo = format_capacity(ctx.layers, ctx.source_canvas, ancho, alto)
+        if not cupo.crowded:
+            continue
+        sobran = ", ".join(f"«{nombre}»" for nombre in cupo.dropped[:5])
+        if len(cupo.dropped) > 5:
+            sobran += f" y {len(cupo.dropped) - 5} más"
+        warnings.append(
+            f"En {ancho}x{alto} solo entran {cupo.fits} de los {cupo.total} elementos "
+            f"del arte con tamaño legible: sobran {sobran}. Las piezas se generan "
+            "igual, pero saldrán apretadas. Quite esos elementos en Ajustes finos "
+            "o elija un formato más grande."
+        )
+
     source_aspect = project.canvas.width / max(1, project.canvas.height)
     reservados: dict[str, list[str]] = {}
     #: Formatos en los que una familia genérica no da una pieza publicable: sus

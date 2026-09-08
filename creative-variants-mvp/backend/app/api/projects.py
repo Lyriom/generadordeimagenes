@@ -44,6 +44,8 @@ from ..models import (
     ExtractRequest,
     ExtractResponse,
     FontReferenceResponse,
+    FormatFit,
+    FormatFitResponse,
     GenerateRequest,
     GenerateResponse,
     Layer,
@@ -72,6 +74,7 @@ from ..services import (
     analysis,
     art_text,
     autopilot,
+    layout_engine,
     product_identity,
     psd_import,
     replacement,
@@ -84,6 +87,7 @@ from ..services import (
     storage,
     variants as variants_service,
 )
+from ..models.schemas import SUPPORTED_FORMATS
 from ..services.analysis import Z_ORDER
 from ..services.imaging import box_mask
 from ..services.security import (
@@ -1528,6 +1532,36 @@ def auto(project_id: str, request: AutoRequest | None = None):
 
     task = auto_task.delay(project_id, request.model_dump())  # type: ignore[attr-defined]
     return {"task_id": task.id, "status": "PENDING"}
+
+
+@router.get(
+    "/{project_id}/formats",
+    response_model=FormatFitResponse,
+    summary="Qué elementos del arte entran en cada formato",
+)
+def format_fit(project_id: str) -> FormatFitResponse:
+    """Cuántos bloques del arte aguanta cada formato, y cuáles sobran.
+
+    Es la pregunta que hay que contestar **antes** de generar. En una tira de
+    300x60 no entran cuatro bloques de copy y tres productos: la pieza sale con
+    el copy pisándose, y decirlo después de generar doce es tarde.
+    """
+    project = load_project_or_404(project_id)
+    source = (project.canvas.width, project.canvas.height)
+    salida: list[FormatFit] = []
+    for clave, (ancho, alto) in SUPPORTED_FORMATS.items():
+        cupo = layout_engine.format_capacity(project.layers, source, ancho, alto)
+        salida.append(
+            FormatFit(
+                id=clave,
+                width=ancho,
+                height=alto,
+                fits=cupo.fits,
+                total=cupo.total,
+                dropped=cupo.dropped,
+            )
+        )
+    return FormatFitResponse(project_id=project.project_id, formats=salida)
 
 
 @router.get(

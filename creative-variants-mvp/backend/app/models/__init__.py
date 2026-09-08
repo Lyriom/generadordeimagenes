@@ -45,6 +45,8 @@ from .schemas import (  # noqa: F401
     ExtractRequest,
     ExtractResponse,
     FontReferenceResponse,
+    FormatFit,
+    FormatFitResponse,
     GenerateRequest,
     GenerateResponse,
     HealthResponse,

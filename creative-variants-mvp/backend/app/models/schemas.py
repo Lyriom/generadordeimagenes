@@ -563,3 +563,21 @@ class CapabilitiesResponse(BaseModel):
     format_catalog: list[dict[str, Any]] = Field(default_factory=list)
     layouts: list[dict[str, str]]
     intensities: list[str]
+
+
+class FormatFit(BaseModel):
+    """Cuánto del arte aguanta un formato, para decirlo antes de generar."""
+
+    id: str
+    width: int
+    height: int
+    #: Bloques del arte que caben con todo legible, y cuántos hay en total.
+    fits: int
+    total: int
+    #: Nombres de los que sobran, del menos importante al más.
+    dropped: list[str] = Field(default_factory=list)
+
+
+class FormatFitResponse(BaseModel):
+    project_id: str
+    formats: list[FormatFit] = Field(default_factory=list)

@@ -2219,3 +2219,5 @@ details .inventory { margin-top: 14px; }
 .format-card.is-fit .format-note { color: var(--success); font-weight: 650; }
 .format-card.needs-split { border-style: dashed; }
 .format-card.needs-split .format-note { color: var(--warning); }
+.format-card.is-tight { border-color: color-mix(in srgb, var(--warning) 60%, var(--line)); }
+.format-card.is-tight .format-note { color: var(--warning); font-weight: 650; }

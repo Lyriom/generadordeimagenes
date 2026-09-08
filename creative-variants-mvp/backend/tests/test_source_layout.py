@@ -345,3 +345,90 @@ def test_la_pieza_igual_al_kv_sigue_estando_en_los_formatos_cercanos():
     project = _proyecto()
     plans, _ = plan_variants(project, _Peticion(["google_display_320x50"]))
     assert any(p.layout == "faithful" for p in plans)
+
+
+# ------------------------------------------------------- capacidad del formato
+def _capas_reales() -> list[Layer]:
+    """Las que salieron de separar el banner del caso real, con tres productos."""
+    capas = [
+        Layer(id="sb1", name="Subtítulo", type=LayerType.TEXT,
+              category=LayerCategory.SUBHEADLINE, content="ESPECIAL DE",
+              x=33, y=88, width=322, height=54, z_index=5),
+        Layer(id="hd", name="Titular", type=LayerType.TEXT, category=LayerCategory.HEADLINE,
+              content="ELECTROMENORES", x=31, y=148, width=588, height=68, z_index=6),
+        Layer(id="sb2", name="Subtítulo 2", type=LayerType.TEXT,
+              category=LayerCategory.SUBHEADLINE, content="12 MESES SIN INTERESES",
+              x=37, y=240, width=369, height=31, z_index=5),
+        Layer(id="pr", name="Precio", type=LayerType.TEXT, category=LayerCategory.PRICE,
+              content="30% OFF", x=1628, y=135, width=205, height=58, z_index=6),
+        Layer(id="dc", name="Decoración", type=LayerType.IMAGE,
+              category=LayerCategory.DECORATION, src="l/d.png",
+              x=1258, y=78, width=306, height=185, z_index=3),
+    ]
+    capas += [
+        Layer(id=f"p{i}", name=f"Producto {i + 1}", type=LayerType.IMAGE,
+              category=LayerCategory.PRODUCT, src=f"l/p{i}.png",
+              x=798 + i * 130, y=53, width=125, height=235, z_index=4)
+        for i in range(3)
+    ]
+    return capas
+
+
+def test_una_tira_dice_cuantos_elementos_le_caben():
+    """La pregunta que había que contestar antes de generar, no después."""
+    from app.services.layout_engine import format_capacity
+
+    capas = _capas_reales()
+    tira = format_capacity(capas, BANNER, 300, 60)
+    assert tira.crowded
+    assert tira.total == 6, "tres productos cuentan como un bloque"
+    assert tira.fits < tira.total
+    # Se sueltan los menos importantes primero, con el mismo orden que ya usa el
+    # motor para resolver solapamientos.
+    assert tira.dropped[0] == "Decoración"
+    assert "Titular" not in tira.dropped and "3 productos" not in tira.dropped
+
+
+def test_un_formato_grande_aguanta_el_arte_completo():
+    from app.services.layout_engine import format_capacity
+
+    for ancho, alto in ((1080, 1350), (1080, 1080), (1200, 628)):
+        cupo = format_capacity(_capas_reales(), BANNER, ancho, alto)
+        assert not cupo.crowded, f"{ancho}x{alto} debería aguantar todo"
+        assert cupo.fits == cupo.total
+
+
+def test_cuanto_mas_pequena_la_tira_menos_le_entra():
+    from app.services.layout_engine import format_capacity
+
+    capas = _capas_reales()
+    cabidas = [format_capacity(capas, BANNER, w, h).fits for w, h in ((300, 60), (728, 90), (970, 90))]
+    assert cabidas[0] < cabidas[1] <= cabidas[2]
+
+
+def test_se_avisa_antes_de_generar_y_una_vez_por_formato():
+    """Doce piezas apretadas con la explicación al final es hacer perder el tiempo."""
+    project = _proyecto()
+    project.layers = _capas_reales()
+    peticion = _Peticion(["youtube_companion", "google_display_970x90"])
+    peticion.count = 8
+    plans, warnings = plan_variants(project, peticion)
+    assert plans, "se genera igual: avisar no es negarse"
+    apretados = [w for w in warnings if "solo entran" in w]
+    # Uno por formato apretado y no uno por pieza: ocho variantes, dos avisos.
+    assert len(apretados) == 2, apretados
+    assert sum(1 for w in apretados if "300x60" in w) == 1
+    assert sum(1 for w in apretados if "970x90" in w) == 1
+    tira = next(w for w in apretados if "300x60" in w)
+    assert "«Decoración»" in tira and "«Subtítulo 2»" in tira
+    assert "Ajustes finos" in tira
+
+
+def test_caber_a_la_fuerza_no_es_caber():
+    """Con los mínimos cabe casi todo; con lo que el diseño pide, no."""
+    capas = _capas_reales()
+    items, opciones = __import__(
+        "app.services.layout_engine", fromlist=["_reflow_inputs"]
+    )._reflow_inputs(capas, BANNER, 300, 60)
+    assert source_layout.viable(items, BANNER, 300, 60, **opciones)
+    assert not source_layout.fits_comfortably(items, BANNER, 300, 60, **opciones)
