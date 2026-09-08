@@ -860,6 +860,33 @@ REFLOW_REFERENCE_STACKED = "vertical_stack"
 REFLOW_REFERENCE_WIDE = "product_left"
 
 
+def reflow_viable(
+    layers: Iterable[Layer], source_canvas: tuple[int, int], width: int, height: int
+) -> bool:
+    """¿Se puede reconstruir la retícula del arte en este formato?
+
+    En una tira de 320x50 con siete bloques la respuesta es no: no hay sitio
+    para siete bandas legibles, y ahí la pieza sale mejor conservando el diseño
+    original a escala. Elegir el layout sin preguntarlo dejaba el texto fuera
+    del lienzo y 39 puntos.
+    """
+    agrupadas: dict[LayerCategory, list[Layer]] = {}
+    for layer in layers:
+        if layer.category == LayerCategory.BACKGROUND or not layer.visible:
+            continue
+        agrupadas.setdefault(layer.category, []).append(layer)
+    hay_legal = LayerCategory.LEGAL in agrupadas
+    margen = SAFE_MARGIN * min(width, height)
+    return source_layout.viable(
+        _source_items(agrupadas, source_canvas),
+        source_canvas,
+        width,
+        height,
+        margin=(margen / max(1, width), margen / max(1, height)),
+        reserve=(1.0 - LEGAL_FOOT) if hay_legal else 0.0,
+    )
+
+
 def _reference_share(category: LayerCategory, layout_key: str, index: int) -> float:
     zonas = LAYOUTS[layout_key]["zones"]
     zona = zonas.get(category.value) or DEFAULT_ZONES.get(
@@ -934,6 +961,10 @@ def _source_items(
                     font_cap=CATEGORY_FONT_CAPS.get(category, 0.06),
                     max_lines=CATEGORY_MAX_LINES.get(category, 2),
                     chars=max(len((layer.content or "").strip()) for layer in bloque),
+                    longest_word=max(
+                        (len(palabra) for layer in bloque for palabra in (layer.content or "").split()),
+                        default=6,
+                    ),
                 )
             )
     return items
@@ -1766,35 +1797,33 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
         preferred=ctx.bias.get("preferred_layouts"),
     )
 
-    # La primera variante de cada formato compatible reproduce el diseño original.
-    # Así, tras cambiar el producto de un KV, siempre hay una pieza "igual al KV".
+    # Qué sabe hacer cada formato con este arte. Los dos layouts sintéticos no se
+    # sortean: se ofrecen donde pueden salir bien, y la mitad de las piezas de un
+    # formato van por ahí. La otra mitad sigue probando familias distintas,
+    # porque la variedad vale; la plantilla a ciegas donde no cabe, no.
     source_aspect = project.canvas.width / max(1, project.canvas.height)
-    faithful_pending: set[str] = set()
+    reservados: dict[str, list[str]] = {}
     if getattr(request, "layouts", None) is None:
+        necesitan = set(formats_needing_recompose(project, list(dict.fromkeys(ctx.formats))))
         for fmt in dict.fromkeys(ctx.formats):
-            fmt_w, fmt_h = SUPPORTED_FORMATS[fmt]
-            if abs((fmt_w / fmt_h) / source_aspect - 1.0) <= FAITHFUL_ASPECT_TOLERANCE:
-                faithful_pending.add(fmt)
-
-    # Un formato que no se parece al de origen no puede conservar el diseño, pero
-    # sí su orden de lectura. En esos, la mitad de las piezas se recomponen con la
-    # retícula del arte y la otra mitad prueban familias distintas: la variedad
-    # sigue valiendo, la plantilla a ciegas no.
-    #
-    # Y las tiras entran en el mismo grupo aunque su proporción no obligue a
-    # recomponer. Las zonas de una familia son fracciones del lienzo pensadas
-    # para formatos de una pieza: en 728x90 el titular cae en la franja del
-    # producto y sale «el producto invade 'Titular'» cuatro veces. Medido con el
-    # banner del caso real: las familias genéricas daban entre 50 y 70 puntos
-    # donde la retícula da más de 90.
-    recomponer: set[str] = set()
-    if getattr(request, "layouts", None) is None:
-        formatos = list(dict.fromkeys(ctx.formats))
-        recomponer = set(formats_needing_recompose(project, formatos))
-        for fmt in formatos:
             ancho, alto = SUPPORTED_FORMATS[fmt]
-            if ancho / max(1, alto) >= BANNER_ASPECT:
-                recomponer.add(fmt)
+            pool: list[str] = []
+            if abs((ancho / alto) / source_aspect - 1.0) <= FAITHFUL_ASPECT_TOLERANCE:
+                # Tras cambiar el producto de un KV siempre tiene que haber una
+                # pieza "igual al KV".
+                pool.append(FAITHFUL_LAYOUT)
+            # Las tiras entran aunque su proporción no obligue a recomponer: las
+            # zonas de una familia son fracciones del lienzo pensadas para
+            # formatos de una pieza, y en 728x90 el titular cae en la franja del
+            # producto —«el producto invade 'Titular'», cuatro veces—. Pero solo
+            # si la retícula cabe: en 320x50 con siete bloques no cabe, y
+            # forzarla dejaba el texto fuera del lienzo.
+            if (fmt in necesitan or ancho / max(1, alto) >= BANNER_ASPECT) and reflow_viable(
+                ctx.layers, ctx.source_canvas, ancho, alto
+            ):
+                pool.append(SOURCE_FLOW_LAYOUT)
+            if pool:
+                reservados[fmt] = pool
 
     plans: list[VariantPlan] = []
     hechas: dict[str, int] = {}
@@ -1802,11 +1831,9 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
         fmt = ctx.formats[index % len(ctx.formats)]
         orden = hechas.get(fmt, 0)
         hechas[fmt] = orden + 1
-        if fmt in faithful_pending:
-            layout_key = FAITHFUL_LAYOUT
-            faithful_pending.discard(fmt)
-        elif fmt in recomponer and orden % 2 == 0:
-            layout_key = SOURCE_FLOW_LAYOUT
+        elegibles = reservados.get(fmt)
+        if elegibles and orden % 2 == 0:
+            layout_key = elegibles[(orden // 2) % len(elegibles)]
         else:
             layout_key = layout_keys[index]
         plans.append(_build_plan(ctx, index, fmt, layout_key, ctx.seed * 1000 + index))

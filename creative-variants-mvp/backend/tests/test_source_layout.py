@@ -142,7 +142,7 @@ def test_el_texto_no_se_queda_en_una_rendija():
     por_cat = _por_categoria(places)
     for clave in ("headline", "price", "cta"):
         alto = por_cat[clave].height
-        assert alto >= source_layout.MIN_FONT * 1350, f"'{clave}' quedó ilegible: {alto}px"
+        assert alto >= source_layout.MIN_FONT_PX, f"'{clave}' quedó ilegible: {alto}px"
 
 
 def test_el_titular_no_se_come_la_pieza():
@@ -307,3 +307,36 @@ def test_un_combo_sigue_viajando_como_un_bloque():
     assert len(productos) == 3
     alturas = {p.y for p in productos}
     assert len(alturas) == 1, "los tres van en la misma banda, uno al lado del otro"
+
+
+def test_el_suelo_de_legibilidad_es_en_pixeles():
+    """En proporción al lienzo daba 1 px en una tira de 50 y todo parecía caber.
+
+    Con siete bloques en 320x50 la retícula aceptaba repartir bandas de siete
+    píxeles: el texto acababa fuera del lienzo y la pieza en 39 puntos.
+    """
+    textos = [
+        source_layout.Item(
+            key=f"t{i}", box=(i * 0.12, 0.1, 0.11, 0.8),
+            font_cap=0.06, max_lines=2, chars=18, longest_word=9,
+        )
+        for i in range(8)
+    ]
+    assert source_layout.derive_zones(textos, BANNER, 320, 50) == ({}, [])
+    # Y con sitio de verdad, la misma retícula sale.
+    zones, notas = source_layout.derive_zones(textos, BANNER, 1080, 1350)
+    assert len(zones) == 8 and notas
+
+
+def test_la_reticula_se_ofrece_solo_donde_cabe():
+    from app.services.layout_engine import reflow_viable
+
+    assert reflow_viable(_capas(), BANNER, 728, 90)
+    # Un lienzo diminuto no aguanta ni una banda legible por bloque.
+    assert not reflow_viable(_capas(), BANNER, 120, 30)
+
+
+def test_la_pieza_igual_al_kv_sigue_estando_en_los_formatos_cercanos():
+    project = _proyecto()
+    plans, _ = plan_variants(project, _Peticion(["google_display_320x50"]))
+    assert any(p.layout == "faithful" for p in plans)

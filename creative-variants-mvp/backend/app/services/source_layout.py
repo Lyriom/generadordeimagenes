@@ -63,10 +63,12 @@ GROUP_OVERLAP = 0.5
 #: no es una banda: es una capa aplastada contra la de al lado.
 MIN_BAND = 0.05
 
-#: Cuerpo de letra mínimo para que un texto se lea, relativo al alto del lienzo.
-#: Son unos 14 px en una pieza de 628 de alto y 30 en una de 1350: el mínimo que
-#: recomiendan las guías de display para el texto principal.
-MIN_FONT = 0.022
+#: Cuerpo de letra mínimo para que un texto se lea, **en píxeles**. Es el mínimo
+#: que recomiendan las guías de display para el texto principal (12 px de suelo,
+#: 14 para el cuerpo). En proporción al lienzo no vale: medido así, un 320x50
+#: daba un suelo de 1 px y la retícula aceptaba repartir siete bandas de siete
+#: píxeles en una tira donde no cabe ninguna.
+MIN_FONT_PX = 13.0
 
 #: Aire entre bandas, relativo al lado por el que fluyen.
 BAND_GAP = 0.022
@@ -101,10 +103,21 @@ class Item:
     font_cap: float = 0.06
     max_lines: int = 2
     chars: int = 0
+    #: Letras de la palabra más larga. Marca el ancho por debajo del cual el
+    #: texto se parte, que es un límite duro y no una preferencia.
+    longest_word: int = 6
 
     @property
     def is_text(self) -> bool:
         return self.aspect is None
+
+
+def _word_floor(item: Item) -> float:
+    """Ancho mínimo de una columna de texto: su palabra más larga.
+
+    Más estrecha, la parte por la mitad, y no hay cuerpo de letra que lo arregle.
+    """
+    return max(1.0, item.longest_word * CHAR_WIDTH * MIN_FONT_PX)
 
 
 def _centre(box: Zone, axis: str) -> float:
@@ -223,10 +236,10 @@ def _fitted(item: Item, box_w: float, box_h: float, canvas_h: int) -> tuple[floa
 
 
 def _text_band(
-    item: Item, font_rel: float, cross_px: float, flow: str, canvas_w: int, canvas_h: int
+    item: Item, font_px: float, cross_px: float, flow: str, canvas_w: int, canvas_h: int
 ) -> float:
-    """Banda que ocupa un texto compuesto a un cuerpo de letra dado."""
-    font_px = max(1.0, font_rel * canvas_h)
+    """Banda que ocupa un texto compuesto a un cuerpo de letra dado, en píxeles."""
+    font_px = max(1.0, font_px)
     una_linea = max(1.0, item.chars * CHAR_WIDTH * font_px)
     lineas = min(item.max_lines, max(1, math.ceil(una_linea / max(1.0, cross_px))))
     if flow == "y":
@@ -247,10 +260,16 @@ def _demand(
     """
     base = item.ref_y if flow == "y" else item.ref_x
     if item.is_text:
-        piso = _text_band(item, MIN_FONT, cross_px, flow, canvas_w, canvas_h)
-        techo = _text_band(item, item.font_cap, cross_px, flow, canvas_w, canvas_h)
-        piso = max(MIN_BAND, min(piso, techo))
-        return max(piso, min(base, techo)), piso, max(techo, piso)
+        piso = _text_band(item, MIN_FONT_PX, cross_px, flow, canvas_w, canvas_h)
+        techo = _text_band(
+            item, item.font_cap * canvas_h, cross_px, flow, canvas_w, canvas_h
+        )
+        if flow == "x":
+            # En columnas el suelo no es el cuerpo de letra: es la palabra más
+            # larga. Una columna que no la aguanta la parte por la mitad.
+            piso = max(piso, _word_floor(item) / max(1, canvas_w))
+        piso = max(MIN_BAND, piso)
+        return max(piso, min(base, max(techo, piso))), piso, max(techo, piso)
 
     canvas_flow = canvas_h if flow == "y" else canvas_w
     techo = 1.0
@@ -372,6 +391,12 @@ def _solve(
         techos.append(max(techo for _, _, techo in medidas))
         texto.append(all(item.is_text for item in grupo))
 
+    if sum(pisos) > hueco:
+        # Ni con los mínimos caben las bandas. Repartirlas de todas formas es lo
+        # que dejaba una tira de 320x50 con siete bloques de siete píxeles y el
+        # texto saliéndose del lienzo: en este eje no hay retícula posible.
+        return {}, 0.0
+
     if sum(demandas) > hueco:
         demandas = _trim(demandas, pisos, texto, hueco)
     else:
@@ -403,6 +428,27 @@ def _solve(
             llenado += (fit_w * fit_h) / max(1, canvas_w * canvas_h)
         posicion += banda + gap
     return zones, llenado
+
+
+def viable(
+    items: list[Item],
+    source_canvas: tuple[int, int],
+    canvas_w: int,
+    canvas_h: int,
+    *,
+    margin: tuple[float, float] = (0.035, 0.035),
+    reserve: float = 0.0,
+) -> bool:
+    """¿Cabe la retícula del arte en este lienzo con todo legible?
+
+    Sirve para no elegir este layout donde no puede salir bien: en una tira de
+    320x50 con siete bloques la respuesta es no, y ahí la pieza se compone mejor
+    conservando el diseño original a escala.
+    """
+    zones, _ = derive_zones(
+        items, source_canvas, canvas_w, canvas_h, margin=margin, reserve=reserve
+    )
+    return bool(zones)
 
 
 def derive_zones(
