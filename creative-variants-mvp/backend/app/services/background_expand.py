@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+import cv2
 import numpy as np
 from PIL import Image
 
@@ -31,17 +32,25 @@ from ..models import Project
 from ..providers import ProviderUnavailableError, get_inpainting_provider
 from ..providers.magnific import MODELS, MagnificSceneProvider
 from . import storage
-from .imaging import dilate_mask, fit_contain, hex_to_rgb, load_alpha, load_flat_rgb, save_mask, style_palette
+from .imaging import dilate_mask, fit_contain, load_flat_rgb, save_mask
 
 logger = logging.getLogger(__name__)
 
-#: Qué se le pide al modelo. Solo fondo: el arte final no se delega nunca.
+#: Qué se le pide al modelo. Solo fondo, y liso.
+#:
+#: El primer intento pedía «continúa la escena hacia afuera». Al llenar el 78%
+#: de un lienzo eso deja de ser rellenar y pasa a ser generar: Ideogram devolvió
+#: una ilustración plana con casas, figuras y franjas de colores, y el copy
+#: quedaba ilegible encima. Un fondo publicitario no tiene que continuar nada:
+#: tiene que ser un campo limpio que no compita con el mensaje. Eso sí lo saben
+#: hacer, y es lo que la pieza necesita.
 EXPAND_INSTRUCTION = (
-    "Continúa hacia afuera el fondo de esta pieza publicitaria en la zona "
-    "marcada, siguiendo sus colores, su iluminación, sus degradados y sus "
-    "texturas. No dibujes productos, personas, logotipos, letras, números ni "
-    "precios. No añadas marcos, bordes ni viñetas. El resultado debe parecer "
-    "la misma escena fotografiada con un encuadre más amplio."
+    "Rellena la zona marcada con un fondo publicitario LISO y limpio: un campo "
+    "de color plano o un degradado suave, con los mismos colores, la misma "
+    "iluminación y el mismo tono que el resto de la imagen. Nada de dibujos: "
+    "sin objetos, sin productos, sin personas, sin edificios, sin figuras, sin "
+    "logotipos, sin letras, sin números, sin patrones, sin franjas, sin marcos "
+    "ni viñetas. Solo color."
 )
 
 #: Cuánto se puede ampliar la plancha antes de que se le vean los píxeles. Es
@@ -53,6 +62,20 @@ SHARP_UPSCALE = 1.6
 
 #: Cuánto se mete la máscara dentro de la plancha para que la costura no se vea.
 SEAM = 10
+
+#: Cuánto del lienzo se puede inventar. Por encima de esto el modelo ya no
+#: rellena, compone: pedirle el 78% de un 1080x1350 devolvía una ilustración
+#: entera. Ahí es mejor la plancha difuminada, que al menos es el arte.
+MAX_INVENTED = 0.58
+
+#: Cuánto puede desviarse el color medio de lo generado respecto de la plancha,
+#: en distancia RGB. Un fondo del mismo KV no se va muy lejos.
+MAX_COLOR_DRIFT = 62.0
+
+#: Y cuántas veces más cargado de bordes puede ser lo generado. Un fondo liso
+#: no tiene ninguno; una escena dibujada, muchos. Es la medida que distingue
+#: «me devolvió un fondo» de «me devolvió un dibujo».
+MAX_DETAIL_RATIO = 2.4
 
 
 def relative_path(width: int, height: int) -> str:
@@ -75,6 +98,48 @@ def _scene_provider(model: str | None, plancha_limpia: bool) -> MagnificScenePro
         return None
     escena = MagnificSceneProvider(model=elegido)
     return escena if escena.available() else None
+
+
+def _detail(gris: np.ndarray, zona: np.ndarray) -> float:
+    """Densidad de bordes en una zona: 0 en un fondo liso, alta en un dibujo."""
+    if not zona.any():
+        return 0.0
+    bordes = np.abs(cv2.Laplacian(cv2.GaussianBlur(gris, (5, 5), 0), cv2.CV_32F))
+    return float((bordes[zona] > 8.0).mean())
+
+
+def _acceptable(salida: Image.Image, mask: np.ndarray) -> str | None:
+    """¿Lo generado es un fondo? Devuelve el motivo si no lo es.
+
+    Se compara con la propia plancha, que es la referencia que importa: el color
+    medio no puede irse lejos y lo generado no puede estar mucho más cargado de
+    bordes que el arte. Sin esta comprobación se entregaba una ilustración de
+    colores planos con el copy ilegible encima, y con 96 puntos.
+    """
+    pixeles = np.asarray(salida.convert("RGB"))
+    gris = cv2.cvtColor(pixeles, cv2.COLOR_RGB2GRAY)
+    generado = mask > 127
+    arte = mask <= 24
+    if not generado.any() or not arte.any():
+        return None
+
+    deriva = float(
+        np.linalg.norm(
+            pixeles[generado].mean(axis=0).astype(np.float64)
+            - pixeles[arte].mean(axis=0).astype(np.float64)
+        )
+    )
+    if deriva > MAX_COLOR_DRIFT:
+        return f"el color no se parece al del arte (distancia {deriva:.0f})"
+
+    detalle_arte = _detail(gris, arte)
+    detalle_generado = _detail(gris, generado)
+    if detalle_generado > max(0.02, detalle_arte * MAX_DETAIL_RATIO):
+        return (
+            f"lo generado salió dibujado en vez de liso "
+            f"({detalle_generado * 100:.0f}% de bordes frente al {detalle_arte * 100:.0f}% del arte)"
+        )
+    return None
 
 
 def _plate(project: Project):
@@ -129,6 +194,13 @@ def expand(
         return None, warnings
 
     base = load_flat_rgb(plate)
+    fitted = fit_contain(base.size[0], base.size[1], width, height)
+    inventado = 1.0 - (fitted[0] * fitted[1]) / float(width * height)
+    if inventado > MAX_INVENTED:
+        # A partir de aquí el modelo no rellena, compone: y lo que compone no es
+        # un fondo. La plancha difuminada es peor de mirar pero sigue siendo el
+        # arte, y no se pelea con el copy.
+        return None, warnings
     if cover_upscale(base.size, width, height) <= SHARP_UPSCALE:
         # La plancha llena el lienzo con píxeles de verdad: no hay nada que
         # inventar, y recortarla es mejor que reducir el arte para hacer sitio.
@@ -146,8 +218,11 @@ def expand(
 
     fitted_w, fitted_h = fit_contain(base.size[0], base.size[1], width, height)
     offset = ((width - fitted_w) // 2, (height - fitted_h) // 2)
-    primary, _ = style_palette(base, alpha=load_alpha(plate))
-    lienzo = Image.new("RGB", (width, height), hex_to_rgb(primary))
+    # El color de partida es el promedio de la propia plancha, no una paleta de
+    # estilo: si el modelo deja algún trozo sin tocar, ese trozo tiene que ser
+    # del KV. Una paleta saturada ahí es una franja que no pega con nada.
+    medio = tuple(int(v) for v in np.asarray(base.convert("RGB")).reshape(-1, 3).mean(axis=0))
+    lienzo = Image.new("RGB", (width, height), medio)
     lienzo.paste(base.resize((fitted_w, fitted_h), Image.Resampling.LANCZOS), offset)
 
     mask = np.full((height, width), 255, dtype=np.uint8)
@@ -190,11 +265,21 @@ def expand(
 
     # El modelo elige su propio tamaño: se devuelve al del lienzo para que el
     # renderer no tenga que adivinar nada.
-    with Image.open(target) as salida:
+    with Image.open(target) as abierta:
+        salida = abierta.convert("RGB")
         if salida.size != (width, height):
-            salida.convert("RGB").resize((width, height), Image.Resampling.LANCZOS).save(
-                target, format="PNG"
-            )
+            salida = salida.resize((width, height), Image.Resampling.LANCZOS)
+        salida.save(target, format="PNG")
+
+    motivo = _acceptable(salida, mask)
+    if motivo is not None:
+        logger.info("fondo extendido descartado en %s: %s", project.project_id, motivo)
+        warnings.append(
+            f"El fondo extendido para {width}x{height} se descartó porque {motivo}: "
+            "la pieza usa la plancha del arte difuminada."
+        )
+        target.unlink(missing_ok=True)
+        return None, warnings
     usado = escena if escena is not None else provider
     logger.info(
         "fondo extendido a %sx%s en %s con %s",
