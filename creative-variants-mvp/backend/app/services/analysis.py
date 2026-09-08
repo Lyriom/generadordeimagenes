@@ -399,6 +399,10 @@ def analyze_project(
         layer_extraction.write_mask(project, layer, mask)
         layers.append(layer)
 
+    from . import semantic_layers
+
+    warnings.extend(semantic_layers.classify(project, layers))
+
     # ------------------------------------- logo subido aparte (si no se detectó)
     logo_layer = _uploaded_logo_layer(project, layers)
     if logo_layer is not None:

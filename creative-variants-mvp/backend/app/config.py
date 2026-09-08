@@ -155,6 +155,7 @@ class Settings:
         # Reconocer el producto de un recorte para poder escalarlo por su tamaño
         # real. Se pide una familia de una lista cerrada y con `detail: low`, así
         # que es una consulta mínima y se hace una sola vez por recorte.
+        self.enable_layer_vision: bool = _env_bool("ENABLE_LAYER_VISION", True)
         self.enable_product_vision: bool = _env_bool("ENABLE_PRODUCT_VISION", True)
         self.openai_vision_model: str = os.getenv("OPENAI_VISION_MODEL", "gpt-4o-mini")
         self.openai_vision_endpoint: str = os.getenv(

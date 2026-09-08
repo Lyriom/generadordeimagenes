@@ -13,6 +13,7 @@ import tempfile
 # El entorno debe quedar configurado ANTES de importar la app (settings es singleton).
 _TMP_DATA = tempfile.mkdtemp(prefix="cvmvp-tests-")
 os.environ["DATA_DIR"] = _TMP_DATA
+os.environ["ENABLE_LAYER_VISION"] = "false"
 os.environ["ENABLE_OCR"] = "false"
 os.environ["SEGMENTATION_PROVIDER"] = "local"
 os.environ["INPAINTING_PROVIDER"] = "opencv"

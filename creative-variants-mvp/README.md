@@ -898,3 +898,18 @@ del backend.
 7. Mover la generación a un worker asíncrono cuando se supere el volumen del MVP.
 8. Añadir exportación `.ai` nativa si Adobe publica una API de escritura adecuada.
 9. Leer los modos de fusión del PSD y aplicarlos al componer (multiplicar, trama, etc.).
+
+### Clasificación visual del arte
+
+El análisis de JPG/PNG consulta una vez a visión con el arte y las cajas numeradas
+para asignar las categorías de las capas. Las categorías válidas del modelo
+prevalecen sobre la heurística; una respuesta incompleta, duplicada, inválida o
+un fallo de red conserva las categorías anteriores y añade una advertencia.
+El resultado se guarda en el proyecto y se reutiliza mientras no cambien el arte,
+las cajas, el texto, el modelo o el endpoint. No se hacen reintentos automáticos.
+
+`ENABLE_LAYER_VISION=false` desactiva esta consulta. Por defecto está habilitada
+si hay `OPENAI_API_KEY`; usa `OPENAI_VISION_MODEL`, `OPENAI_VISION_ENDPOINT` y
+`PRODUCT_VISION_TIMEOUT`. La generación de variantes no consulta este clasificador.
+Este paso categoriza cajas existentes: no añade detecciones, agrupa bloques ni
+cambia el orden de lectura. Las pruebas simulan HTTP y no consumen saldo.
