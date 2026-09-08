@@ -1803,10 +1803,21 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     # porque la variedad vale; la plantilla a ciegas donde no cabe, no.
     source_aspect = project.canvas.width / max(1, project.canvas.height)
     reservados: dict[str, list[str]] = {}
+    #: Formatos en los que una familia genérica no da una pieza publicable: sus
+    #: zonas son fracciones del lienzo pensadas para formatos de una pieza, y en
+    #: una tira el titular cae en la franja del producto. Ahí las variantes no se
+    #: reparten con las familias: una pieza con el producto encima del titular no
+    #: es una alternativa de estilo, está rota. Solo se les ofrece la retícula, y
+    #: solo si cabe; si no cabe se vuelve a las familias, porque tres piezas
+    #: idénticas son peores que tres con defectos distintos.
+    apretados: set[str] = set()
     if getattr(request, "layouts", None) is None:
         necesitan = set(formats_needing_recompose(project, list(dict.fromkeys(ctx.formats))))
         for fmt in dict.fromkeys(ctx.formats):
             ancho, alto = SUPPORTED_FORMATS[fmt]
+            tira = ancho / max(1, alto) >= BANNER_ASPECT
+            if tira or fmt in necesitan:
+                apretados.add(fmt)
             pool: list[str] = []
             if abs((ancho / alto) / source_aspect - 1.0) <= FAITHFUL_ASPECT_TOLERANCE:
                 # Tras cambiar el producto de un KV siempre tiene que haber una
@@ -1818,7 +1829,7 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
             # producto —«el producto invade 'Titular'», cuatro veces—. Pero solo
             # si la retícula cabe: en 320x50 con siete bloques no cabe, y
             # forzarla dejaba el texto fuera del lienzo.
-            if (fmt in necesitan or ancho / max(1, alto) >= BANNER_ASPECT) and reflow_viable(
+            if fmt in apretados and reflow_viable(
                 ctx.layers, ctx.source_canvas, ancho, alto
             ):
                 pool.append(SOURCE_FLOW_LAYOUT)
@@ -1831,9 +1842,14 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
         fmt = ctx.formats[index % len(ctx.formats)]
         orden = hechas.get(fmt, 0)
         hechas[fmt] = orden + 1
-        elegibles = reservados.get(fmt)
-        if elegibles and orden % 2 == 0:
-            layout_key = elegibles[(orden // 2) % len(elegibles)]
+        elegibles = reservados.get(fmt) or []
+        if orden == 0 and FAITHFUL_LAYOUT in elegibles:
+            # Una sola: reproducir el diseño es determinista y la segunda saldría
+            # idéntica. Tras cambiar el producto de un KV siempre tiene que haber
+            # una pieza «igual al KV», pero una basta.
+            layout_key = FAITHFUL_LAYOUT
+        elif SOURCE_FLOW_LAYOUT in elegibles:
+            layout_key = SOURCE_FLOW_LAYOUT
         else:
             layout_key = layout_keys[index]
         plans.append(_build_plan(ctx, index, fmt, layout_key, ctx.seed * 1000 + index))

@@ -211,12 +211,17 @@ def _proyecto() -> Project:
 
 
 def test_el_formato_que_obliga_a_recomponer_usa_la_reticula_del_arte():
+    """Y solo eso: una familia genérica ahí no da una pieza publicable.
+
+    Medido con el banner del caso, las familias daban entre 50 y 58 puntos con
+    «el producto invade 'Titular'»; la retícula, entre 73 y 88. Una pieza con el
+    producto encima del titular no es una alternativa de estilo, está rota.
+    """
     project = _proyecto()
     plans, _ = plan_variants(project, _Peticion(["1080x1350"]))
     verticales = [p for p in plans if p.format == "1080x1350"]
-    assert any(p.layout == SOURCE_FLOW_LAYOUT for p in verticales)
-    # La otra mitad sigue probando familias distintas: la variedad vale.
-    assert any(p.layout != SOURCE_FLOW_LAYOUT for p in verticales)
+    assert verticales
+    assert all(p.layout == SOURCE_FLOW_LAYOUT for p in verticales)
 
 
 def test_una_tira_tambien_usa_la_reticula_aunque_la_proporcion_encaje():
