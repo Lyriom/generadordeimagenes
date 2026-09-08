@@ -1075,6 +1075,19 @@ def build_placements(
                 width, height = fit_contain(
                     layer.width, layer.height, target_w, target_h, allow_upscale=True
                 )
+                # Tope de ampliación. Un recorte del arte tiene los píxeles que
+                # tiene: estirarlo cinco veces para llenar su casilla lo deja
+                # borroso y, peor, convierte un bloque decorativo pequeño en el
+                # fondo de la pieza. Es lo que pasaba al recomponer un banner en
+                # vertical: un rectángulo de color se comía el lienzo.
+                if width > layer.width * MAX_UPSCALE:
+                    width, height = fit_contain(
+                        layer.width,
+                        layer.height,
+                        int(layer.width * MAX_UPSCALE),
+                        int(layer.height * MAX_UPSCALE),
+                        allow_upscale=True,
+                    )
                 font_size = None
 
             valign = CATEGORY_VALIGN.get(category, "center") if layer.is_text else "center"
@@ -1488,6 +1501,11 @@ def _build_plan(
         notes=notes,
     )
 
+
+#: Cuánto se puede ampliar un recorte del arte sobre su tamaño original. Más allá
+#: de esto los píxeles no dan y el elemento deja de ser lo que era: un bloque
+#: decorativo pequeño acaba haciendo de fondo de la pieza.
+MAX_UPSCALE = 2.0
 
 #: Un arte con menos capas que esto no se puede recomponer: no hay piezas que
 #: mover, solo una imagen que colocar. Ahí el formato de salida tiene que

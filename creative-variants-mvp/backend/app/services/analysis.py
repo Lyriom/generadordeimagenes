@@ -330,7 +330,17 @@ def analyze_project(
         layers.append(layer)
 
     # ----------------------------------------------------------- capas de texto
+    # Un bloque de color con su copy dentro se recorta como una imagen, con el
+    # texto ya pintado. Si además se saca ese texto como capa aparte, al
+    # recomponer la pieza el mismo mensaje aparece dos veces: una dentro del
+    # bloque y otra suelta encima. Se queda el bloque, que es lo que conserva el
+    # diseño, y se dice cuántos textos no se pudieron separar.
+    tapados = 0
     for payload in text_payloads:
+        caja = (payload["x"], payload["y"], payload["width"], payload["height"])
+        if any(_overlap_ratio(caja, region) > 0.6 for region in aceptadas):
+            tapados += 1
+            continue
         category: LayerCategory = payload["category"]
         layer = Layer(
             name=_unique_name(CATEGORY_LABELS_ES[category], used_names),
@@ -376,6 +386,12 @@ def analyze_project(
     if not any(layer.category == LayerCategory.LOGO for layer in layers):
         warnings.append(
             "No se identificó un logo. Puede subirlo aparte o crear la capa a mano."
+        )
+    if tapados:
+        warnings.append(
+            f"{tapados} texto(s) van pintados dentro de bloques del arte y no se "
+            "separaron: sacarlos aparte los pondría dos veces en la pieza. Para "
+            "editarlos, quite antes ese bloque en Ajustes finos."
         )
     if not any(layer.type == LayerType.TEXT for layer in layers):
         warnings.append(

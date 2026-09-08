@@ -245,3 +245,57 @@ def test_no_se_queda_dos_veces_con_el_mismo_objeto(monkeypatch, client, project)
     assert (110, 108, 180, 140) not in cajas, "se quedó con la caja anidada"
     assert (100, 100, 200, 160) in cajas
     assert (380, 120, 140, 150) in cajas
+
+
+def test_el_copy_pintado_dentro_de_un_bloque_no_se_saca_aparte(monkeypatch, client, project):
+    """Sacarlo pondría el mismo mensaje dos veces: dentro del bloque y suelto encima."""
+    from app.models import Project as ProjectModel
+    from app.providers.base import Detection, OcrResult, TextRegion
+    from app.services import analysis, ocr as ocr_service, storage
+    from app.services import segmentation as seg_service
+
+    # Un bloque de color con su copy dentro, y un titular suelto fuera de él.
+    bloque = Detection(x=40, y=40, width=300, height=200, score=0.9)
+    monkeypatch.setattr(seg_service, "detect_regions", lambda *a, **k: ([bloque], []))
+    monkeypatch.setattr(seg_service, "refine_box", lambda *a, **k: None)
+    monkeypatch.setattr(analysis, "detect_faces", lambda *a, **k: [])
+    monkeypatch.setattr(
+        ocr_service,
+        "run_ocr",
+        lambda *a, **k: OcrResult(
+            regions=[
+                TextRegion(text="ESPECIAL DE ELECTROMENORES", x=70, y=90, width=220, height=40),
+                TextRegion(text="30% OFF", x=420, y=300, width=140, height=50),
+            ],
+            provider="falso",
+        ),
+    )
+
+    cargado: ProjectModel = storage.load_project(project["project_id"])
+    layers, warnings, *_ = analysis.analyze_project(
+        cargado, run_segmentation=True, run_ocr=True, max_regions=12, extract=False
+    )
+    textos = [l.content for l in layers if l.type.value == "text"]
+    assert any("30% OFF" in (t or "") for t in textos), "el titular de fuera sí se separa"
+    assert not any("ELECTROMENORES" in (t or "") for t in textos), "el de dentro no"
+    assert any("dentro de bloques del arte" in w for w in warnings)
+
+
+def test_un_recorte_no_se_amplia_sin_limite():
+    """Un bloque decorativo pequeño no puede acabar haciendo de fondo."""
+    import random
+
+    from app.models import Layer, LayerCategory, LayerType
+    from app.services.layout_engine import MAX_UPSCALE, build_placements
+
+    pequeno = Layer(
+        id="d1", name="Bloque", type=LayerType.IMAGE, category=LayerCategory.DECORATION,
+        src="layers/d.png", x=800, y=55, width=380, height=230, z_index=2,
+    )
+    placements, _ = build_placements(
+        [pequeno], "product_center_headline_top", 1080, 1350, random.Random(3),
+        intensity="moderate",
+    )
+    puesto = next(p for p in placements if p.layer.id == "d1")
+    assert puesto.width <= pequeno.width * MAX_UPSCALE + 2
+    assert puesto.height <= pequeno.height * MAX_UPSCALE + 2
