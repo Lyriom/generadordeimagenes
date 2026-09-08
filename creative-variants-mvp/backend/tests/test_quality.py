@@ -189,3 +189,35 @@ def test_faithful_reproduction_is_not_penalised(client: TestClient, project: dic
     assert not any("margen" in w for w in variant["quality"]["warnings"])
     assert not any("espacio vacío" in w for w in variant["quality"]["warnings"])
     assert not any("saturada" in w for w in variant["quality"]["warnings"])
+
+
+def test_el_castigo_por_vacio_crece_con_el_hueco():
+    """Con un único umbral, una pieza al 25% sacaba 100 y adelantaba a otra al 56%.
+
+    Entre una pieza minimalista y un arte suelto sobre un relleno no hay una
+    frontera, hay un degradado, y el castigo tiene que seguirlo.
+    """
+    from app.services.quality import AIRY_FILL, EMPTY_FILL
+
+    assert EMPTY_FILL < AIRY_FILL < 1.0
+
+    def puntaje(ancho: int, alto: int) -> int:
+        capa = Layer(id="p", name="Producto", type=LayerType.IMAGE,
+                     category=LayerCategory.PRODUCT, src="l/p.png",
+                     x=0, y=0, width=ancho, height=alto, z_index=3)
+        texto = Layer(id="t", name="Titular", type=LayerType.TEXT,
+                      category=LayerCategory.HEADLINE, content="OFERTA",
+                      x=0, y=0, width=600, height=120, z_index=6)
+        plan = _plan(
+            [
+                Placement(layer=capa, x=60, y=300, width=ancho, height=alto, z_index=3),
+                Placement(layer=texto, x=60, y=80, width=600, height=120, z_index=6,
+                          font_size=70),
+            ]
+        )
+        return evaluate_variant(_project(), plan).score
+
+    holgada = puntaje(880, 620)   # relleno alto
+    justa = puntaje(520, 380)     # por debajo del relleno sano
+    escasa = puntaje(300, 240)    # casi todo fondo
+    assert holgada > justa > escasa, (holgada, justa, escasa)

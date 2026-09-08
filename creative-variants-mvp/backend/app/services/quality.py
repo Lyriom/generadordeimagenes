@@ -20,6 +20,12 @@ MIN_TEXT_CONTRAST = 4.5
 PRODUCT_COVERAGE_RANGE = (0.06, 0.68)
 #: Cobertura de contenido (unión de cajas, sin escenografía a sangre).
 FILL_RANGE = (0.16, 0.95)
+#: Desde aquí hacia abajo la composición empieza a notarse vacía. No es un
+#: acantilado: el castigo crece con el hueco, porque entre una pieza minimalista
+#: y un arte suelto sobre un relleno no hay una frontera, hay un degradado. Con
+#: un único umbral en 0.16 una pieza que cubría el 25% del lienzo sacaba 100 y
+#: adelantaba en la lista a otra bien compuesta que cubría el 56%.
+AIRY_FILL = 0.34
 #: Un elemento que cubre este porcentaje del lienzo es escenografía.
 FULL_BLEED_RATIO = 0.92
 #: Por debajo de esta cobertura la pieza no es una composición, es un arte suelto
@@ -356,7 +362,7 @@ def evaluate_variant(
     content = [p for p in placements if not _is_full_bleed(p, canvas_w, canvas_h)]
     filled = _union_coverage(content, canvas_w, canvas_h)
     metrics["fill_ratio"] = round(filled, 4)
-    low, high = FILL_RANGE
+    _, high = FILL_RANGE
     # Por debajo de esto no es "le falta aire": es un arte pequeño sobre un
     # relleno de color, que es lo que salía al meter un banner en un formato
     # vertical. No es una pieza a la que le falte un retoque.
@@ -370,9 +376,15 @@ def evaluate_variant(
             f"La pieza es casi todo fondo: el contenido cubre el {filled * 100:.0f}% "
             "del lienzo. Este formato no se puede sacar de este arte.",
         )
-    elif filled < low:
-        penalties += 8
-        warnings.append("La composición tiene demasiado espacio vacío.")
+    elif filled < AIRY_FILL and not all(p.pinned for p in content):
+        # Una reproducción fiel va donde el diseñador lo puso: si el KV aprobado
+        # es aireado, eso es su diseño y no un defecto de la pieza.
+        falta = (AIRY_FILL - filled) / max(1e-6, AIRY_FILL - EMPTY_FILL)
+        penalties += int(round(4 + 14 * min(1.0, falta)))
+        warnings.append(
+            "La composición tiene demasiado espacio vacío: el contenido cubre el "
+            f"{filled * 100:.0f}% del lienzo."
+        )
     elif filled > high:
         penalties += 6
         warnings.append("La composición está saturada: falta aire entre elementos.")
