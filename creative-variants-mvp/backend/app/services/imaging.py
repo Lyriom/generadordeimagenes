@@ -435,6 +435,76 @@ def overall_detail(image: np.ndarray, mask: np.ndarray) -> float:
     return float(np.abs(bordes)[fuera].mean())
 
 
+#: Cuánto puede desviarse el color medio de lo rellenado respecto de lo que
+#: quedó del arte, en distancia RGB. Un fondo del mismo KV no se va lejos.
+FILL_MAX_COLOR_DRIFT = 62.0
+
+#: Y cuántas veces más cargado de bordes puede estar lo rellenado. Un fondo liso
+#: no tiene ninguno; unas letras, un dibujo o los restos de un texto mal borrado
+#: tienen muchos. Es la medida que distingue «me devolvió un fondo» de «me
+#: devolvió algo dibujado».
+FILL_MAX_DETAIL_RATIO = 2.4
+
+
+def edge_density(gray: np.ndarray, zone: np.ndarray, threshold: float = 8.0) -> float:
+    """Densidad de bordes en una zona: 0 en un fondo liso, alta en un dibujo."""
+    if not zone.any():
+        return 0.0
+    bordes = np.abs(cv2.Laplacian(cv2.GaussianBlur(gray, (5, 5), 0), cv2.CV_32F))
+    return float((bordes[zone] > threshold).mean())
+
+
+def fill_looks_invented(
+    filled: Image.Image,
+    reference: Image.Image,
+    mask: np.ndarray,
+    *,
+    max_color_drift: float = FILL_MAX_COLOR_DRIFT,
+    max_detail_ratio: float = FILL_MAX_DETAIL_RATIO,
+) -> str | None:
+    """¿Lo que devolvió el modelo es fondo, o se puso a dibujar?
+
+    Devuelve el motivo cuando no es fondo, y `None` cuando pasa. La referencia
+    es lo que quedó **del arte**, que es la única vara honesta: se compara el
+    color medio de lo rellenado con el del arte, y su carga de bordes con la del
+    arte. Un fondo publicitario continúa el KV; unas letras inventadas dentro
+    del hueco de un producto, o los restos de un texto que se pidió borrar, se
+    delatan por los bordes.
+
+    Sin esto se entregaban las dos cosas sin que nadie se enterara: una plancha
+    con «IND MERR» escrito donde estaba el producto y el copy medio borrado
+    asomando debajo del copy nuevo.
+    """
+    pixeles = np.asarray(filled.convert("RGB"))
+    referencia = np.asarray(reference.convert("RGB"))
+    if pixeles.shape != referencia.shape or pixeles.shape[:2] != mask.shape[:2]:
+        return None
+    rellenado = mask > 127
+    arte = mask <= 24
+    if not rellenado.any() or not arte.any():
+        return None
+
+    deriva = float(
+        np.linalg.norm(
+            pixeles[rellenado].mean(axis=0).astype(np.float64)
+            - referencia[arte].mean(axis=0).astype(np.float64)
+        )
+    )
+    if deriva > max_color_drift:
+        return f"el color no se parece al del arte (distancia {deriva:.0f})"
+
+    gris = cv2.cvtColor(pixeles, cv2.COLOR_RGB2GRAY)
+    gris_ref = cv2.cvtColor(referencia, cv2.COLOR_RGB2GRAY)
+    detalle_arte = edge_density(gris_ref, arte)
+    detalle_relleno = edge_density(gris, rellenado)
+    if detalle_relleno > max(0.02, detalle_arte * max_detail_ratio):
+        return (
+            f"salió dibujado en vez de liso ({detalle_relleno * 100:.0f}% de "
+            f"bordes frente al {detalle_arte * 100:.0f}% del arte)"
+        )
+    return None
+
+
 def hard_edge_ratio(image: np.ndarray, mask: np.ndarray, threshold: float = 8.0) -> float:
     """Qué parte de la plancha tiene bordes marcados, sin contar el producto.
 

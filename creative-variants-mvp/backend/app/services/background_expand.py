@@ -24,7 +24,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import cv2
 import numpy as np
 from PIL import Image
 
@@ -33,7 +32,13 @@ from ..models import Project
 from ..providers import ProviderUnavailableError, get_inpainting_provider
 from ..providers.magnific import MODELS, MagnificSceneProvider
 from . import storage
-from .imaging import dilate_mask, fit_contain, load_flat_rgb, save_mask
+from .imaging import (
+    dilate_mask,
+    fill_looks_invented,
+    fit_contain,
+    load_flat_rgb,
+    save_mask,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,15 +74,6 @@ SEAM = 10
 #: entera. Ahí es mejor la plancha difuminada, que al menos es el arte.
 MAX_INVENTED = 0.58
 
-#: Cuánto puede desviarse el color medio de lo generado respecto de la plancha,
-#: en distancia RGB. Un fondo del mismo KV no se va muy lejos.
-MAX_COLOR_DRIFT = 62.0
-
-#: Y cuántas veces más cargado de bordes puede ser lo generado. Un fondo liso
-#: no tiene ninguno; una escena dibujada, muchos. Es la medida que distingue
-#: «me devolvió un fondo» de «me devolvió un dibujo».
-MAX_DETAIL_RATIO = 2.4
-
 
 def relative_path(width: int, height: int) -> str:
     return f"backgrounds/expanded_{width}x{height}.png"
@@ -99,55 +95,6 @@ def _scene_provider(model: str | None, plancha_limpia: bool) -> MagnificScenePro
         return None
     escena = MagnificSceneProvider(model=elegido)
     return escena if escena.available() else None
-
-
-def _detail(gris: np.ndarray, zona: np.ndarray) -> float:
-    """Densidad de bordes en una zona: 0 en un fondo liso, alta en un dibujo."""
-    if not zona.any():
-        return 0.0
-    bordes = np.abs(cv2.Laplacian(cv2.GaussianBlur(gris, (5, 5), 0), cv2.CV_32F))
-    return float((bordes[zona] > 8.0).mean())
-
-
-def _acceptable(
-    salida: Image.Image, base: Image.Image, mask: np.ndarray
-) -> str | None:
-    """¿Lo generado es un fondo? Devuelve el motivo si no lo es.
-
-    La referencia es **la plancha original**, no el interior de la salida: un
-    modelo sin máscara regenera la imagen entera, y comparar el dibujo con el
-    dibujo lo dejaría pasar siempre. El color medio de lo generado no puede irse
-    lejos del del arte, y lo generado no puede estar mucho más cargado de
-    bordes: un fondo liso no tiene ninguno, un dibujo tiene muchos. Sin esta
-    comprobación se entregaba una ilustración con casas y figuras, con el copy
-    ilegible encima y 96 puntos.
-    """
-    pixeles = np.asarray(salida.convert("RGB"))
-    referencia = np.asarray(base.convert("RGB"))
-    gris = cv2.cvtColor(pixeles, cv2.COLOR_RGB2GRAY)
-    gris_ref = cv2.cvtColor(referencia, cv2.COLOR_RGB2GRAY)
-    generado = mask > 127
-    arte = mask <= 24
-    if not generado.any() or not arte.any():
-        return None
-
-    deriva = float(
-        np.linalg.norm(
-            pixeles[generado].mean(axis=0).astype(np.float64)
-            - referencia[arte].mean(axis=0).astype(np.float64)
-        )
-    )
-    if deriva > MAX_COLOR_DRIFT:
-        return f"el color no se parece al del arte (distancia {deriva:.0f})"
-
-    detalle_arte = _detail(gris_ref, arte)
-    detalle_generado = _detail(gris, generado)
-    if detalle_generado > max(0.02, detalle_arte * MAX_DETAIL_RATIO):
-        return (
-            f"lo generado salió dibujado en vez de liso "
-            f"({detalle_generado * 100:.0f}% de bordes frente al {detalle_arte * 100:.0f}% del arte)"
-        )
-    return None
 
 
 def _plate(project: Project):
@@ -290,7 +237,7 @@ def expand(
                     salida = salida.resize((width, height), Image.Resampling.LANCZOS)
                 salida.save(target, format="PNG")
 
-            motivo = _acceptable(salida, lienzo, mask)
+            motivo = fill_looks_invented(salida, lienzo, mask)
             if motivo is None:
                 logger.info(
                     "fondo extendido a %sx%s en %s con %s",

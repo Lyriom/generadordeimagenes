@@ -144,3 +144,56 @@ def test_empty_composition_is_not_scored_100(client: TestClient):
         assert quality["metrics"]["text_elements"] == 0.0
         assert any("no tiene texto" in warning for warning in quality["warnings"])
         assert any("elemento" in warning for warning in quality["warnings"])
+
+
+# --------------------------------------- lo que devuelve el modelo se comprueba
+def test_una_plancha_con_letras_inventadas_se_descarta():
+    """Le pides borrar un producto y escribe «IND MERR» en el hueco.
+
+    Salía en la plancha sin que nadie se enterara, y debajo del copy nuevo
+    asomaba el copy viejo medio borrado. Las dos cosas se delatan por los
+    bordes: un fondo liso no tiene ninguno.
+    """
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    from app.services.imaging import fill_looks_invented
+
+    referencia = Image.new("RGB", (400, 400), (40, 60, 120))
+    mask = np.zeros((400, 400), dtype=np.uint8)
+    mask[120:280, 120:280] = 255
+
+    liso = referencia.copy()
+    ImageDraw.Draw(liso).rectangle([120, 120, 280, 280], fill=(44, 64, 124))
+    assert fill_looks_invented(liso, referencia, mask) is None
+
+    # Un dibujo en la paleta del KV: el color medio no lo delata, los bordes sí.
+    dibujado = referencia.copy()
+    trazo = ImageDraw.Draw(dibujado)
+    for y in range(122, 280, 12):
+        trazo.line([(122, y), (278, y)], fill=(14, 34, 94), width=6)
+        trazo.line([(122, y + 6), (278, y + 6)], fill=(66, 86, 146), width=6)
+    motivo = fill_looks_invented(dibujado, referencia, mask)
+    assert motivo is not None and "dibujado" in motivo, motivo
+
+
+def test_un_color_que_no_pega_tambien_se_descarta():
+    import numpy as np
+    from PIL import Image, ImageDraw
+
+    from app.services.imaging import fill_looks_invented
+
+    referencia = Image.new("RGB", (400, 400), (40, 60, 120))
+    mask = np.zeros((400, 400), dtype=np.uint8)
+    mask[120:280, 120:280] = 255
+    salida = referencia.copy()
+    ImageDraw.Draw(salida).rectangle([120, 120, 280, 280], fill=(240, 200, 40))
+    motivo = fill_looks_invented(salida, referencia, mask)
+    assert motivo is not None and "color" in motivo
+
+
+def test_el_texto_se_borra_con_mas_margen_que_un_objeto():
+    """La caja del OCR viene pegada a las letras: con el margen normal quedaban restos."""
+    from app.services.inpainting import TEXT_DILATE_FACTOR
+
+    assert TEXT_DILATE_FACTOR > 1.0
