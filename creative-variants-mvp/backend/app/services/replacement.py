@@ -108,7 +108,7 @@ def resolve_target(project: Project, layer_id: str | None) -> Layer:
     if not options:
         raise ValueError(
             "El KV no tiene ninguna capa imagen reemplazable. Importe un PSD con capas "
-            "o cree la capa del producto en Ajustes finos."
+            "o cree la capa del producto en Revisar capas."
         )
     return options[0]
 

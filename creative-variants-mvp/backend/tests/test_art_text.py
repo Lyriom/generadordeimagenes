@@ -785,7 +785,7 @@ def test_removing_wins_over_rewriting(client: TestClient, tmp_path):
 def test_moving_a_rewritten_text_by_hand_keeps_the_new_place(
     client: TestClient, tmp_path
 ):
-    """Mover el texto en Ajustes finos y luego reescribirlo no debe devolverlo de un salto."""
+    """Mover el texto en Revisar capas y luego reescribirlo no debe devolverlo de un salto."""
     project = psd_project(client, tmp_path)
     project_id = project["project_id"]
     price = price_layer(project)

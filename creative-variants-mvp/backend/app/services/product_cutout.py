@@ -185,13 +185,13 @@ def detect_product(
         rgba.close()
         raise NoProductFoundError(
             "El recorte no encontró un producto en la imagen "
-            f"(solo {coverage:.1%} del arte). Márquelo a mano en Ajustes finos."
+            f"(solo {coverage:.1%} del arte). Márquelo a mano en Revisar capas."
         )
     if coverage > MAX_AREA_RATIO:
         rgba.close()
         raise NoProductFoundError(
             f"Lo recortado ocupa el {coverage:.0%} del arte: sigue siendo la escena "
-            "completa, no un producto. Márquelo a mano en Ajustes finos."
+            "completa, no un producto. Márquelo a mano en Revisar capas."
         )
 
     box = mask_bbox(alpha, threshold=24)
@@ -228,7 +228,7 @@ def detect_product(
     )
     layer.warnings.append(
         "Producto recortado automáticamente de la fotografía. Revise el borde en "
-        "Ajustes finos antes de producir."
+        "Revisar capas antes de producir."
     )
 
     # PNG de la capa: el recorte real, sin reescalar.
@@ -332,7 +332,7 @@ def _scene_pass(
         raise NoProductFoundError(
             "El recorte trajo la escena completa, no un producto. Para separarlos "
             "hace falta un modelo de edición de Magnific (MAGNIFIC_SCENE_MODEL); "
-            f"'{scene.model_id}' no está disponible. Márquelo a mano en Ajustes finos."
+            f"'{scene.model_id}' no está disponible. Márquelo a mano en Revisar capas."
         )
 
     emptied = Path(scene.empty(str(plate), output_path=str(workdir / "vacio.png")))
@@ -349,7 +349,7 @@ def _scene_pass(
         raise NoProductFoundError(
             "No se pudo aislar un producto de la fotografía: ni al vaciarla cambió "
             "nada reconocible ni el recorte encontró un sujeto. Márquelo a mano en "
-            "Ajustes finos."
+            "Revisar capas."
         )
 
     avisos = [

@@ -824,7 +824,7 @@ def import_psd_layers(
     else:
         warnings.append(
             f"Se importaron {len(layers)} capas del PSD con recortes exactos. Revise las "
-            "categorías en Ajustes finos: los nombres de capa de Photoshop suelen ser genéricos."
+            "categorías en Revisar capas: los nombres de capa de Photoshop suelen ser genéricos."
         )
     project.meta["psd_layer_scan"]["summary"] = {
         status: sum(1 for item in inventory if item["status"] == status)

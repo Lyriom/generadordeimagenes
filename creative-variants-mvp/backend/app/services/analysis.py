@@ -1,7 +1,7 @@
 """Descomposición asistida del arte aplanado en capas.
 
 Un JPG/PNG aplanado no contiene capas: esto es una aproximación. El resultado
-siempre trae confianza y advertencias para que el usuario corrija en Ajustes finos.
+siempre trae confianza y advertencias para que el usuario corrija en Revisar capas.
 """
 from __future__ import annotations
 
@@ -410,7 +410,7 @@ def analyze_project(
     # ------------------------------------------------------------- advertencias
     if not any(layer.category == LayerCategory.PRODUCT for layer in layers):
         warnings.append(
-            "No se identificó un producto. Créelo a mano en Ajustes finos "
+            "No se identificó un producto. Créelo a mano en Revisar capas "
             "para obtener mejores composiciones."
         )
     if not any(layer.category == LayerCategory.LOGO for layer in layers):
@@ -421,12 +421,12 @@ def analyze_project(
         warnings.append(
             f"{tapados} texto(s) van pintados dentro de bloques del arte y no se "
             "separaron: sacarlos aparte los pondría dos veces en la pieza. Para "
-            "editarlos, quite antes ese bloque en Ajustes finos."
+            "editarlos, quite antes ese bloque en Revisar capas."
         )
     if not any(layer.type == LayerType.TEXT for layer in layers):
         warnings.append(
             "No hay capas de texto: las variantes saldrán sin titular, precio ni CTA. "
-            "Escriba los textos en Ajustes finos (o habilite el OCR)."
+            "Escriba los textos en Revisar capas (o habilite el OCR)."
         )
     warnings.append(
         "La separación desde un arte aplanado es aproximada: revise máscaras y "

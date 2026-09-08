@@ -494,7 +494,7 @@ def apply(
         if style is None:
             raise ArtTextError(
                 f"'{layer.name}' no tiene texto reconocible en sus píxeles: no se puede "
-                "reescribir. Cree una capa de texto encima en Ajustes finos."
+                "reescribir. Cree una capa de texto encima en Revisar capas."
             )
         origin = {
             "src": layer.src,

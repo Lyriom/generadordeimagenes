@@ -1,7 +1,7 @@
 """Servicio OCR: ejecuta RapidOCR (si está) y clasifica los textos en categorías.
 
 No se intenta identificar la tipografía real: se usa una fuente por defecto y el
-usuario puede cambiarla en Ajustes finos.
+usuario puede cambiarla en Revisar capas.
 """
 from __future__ import annotations
 

@@ -421,7 +421,7 @@ def test_se_avisa_antes_de_generar_y_una_vez_por_formato():
     assert sum(1 for w in apretados if "970x90" in w) == 1
     tira = next(w for w in apretados if "300x60" in w)
     assert "«Decoración»" in tira and "«Subtítulo 2»" in tira
-    assert "Ajustes finos" in tira
+    assert "Revisar capas" in tira
 
 
 def test_caber_a_la_fuerza_no_es_caber():

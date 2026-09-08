@@ -1646,7 +1646,7 @@ def _planning(project: Project, request) -> tuple[_Planning | None, list[str]]:
 
     if not working_layers:
         warnings.append(
-            "No hay elementos utilizables. Marque y recorte al menos uno en Ajustes finos."
+            "No hay elementos utilizables. Marque y recorte al menos uno en Revisar capas."
         )
         return None, warnings
 
@@ -1843,7 +1843,7 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
         warnings.append(
             f"En {ancho}x{alto} solo entran {cupo.fits} de los {cupo.total} elementos "
             f"del arte con tamaño legible: sobran {sobran}. Las piezas se generan "
-            "igual, pero saldrán apretadas. Quite esos elementos en Ajustes finos "
+            "igual, pero saldrán apretadas. Quite esos elementos en Revisar capas "
             "o elija un formato más grande."
         )
 

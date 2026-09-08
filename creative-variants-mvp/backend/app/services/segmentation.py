@@ -56,7 +56,7 @@ def detect_regions(image_path: str, max_regions: int = 12) -> tuple[list[Detecti
     if not detections:
         warnings.append(
             "No se detectaron regiones automáticamente. Cree las capas manualmente "
-            "en Ajustes finos."
+            "en Revisar capas."
         )
     return detections, warnings
 

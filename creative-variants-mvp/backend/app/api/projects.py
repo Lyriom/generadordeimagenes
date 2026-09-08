@@ -307,12 +307,12 @@ async def create_project(
                 project.warnings.append(reason or "No se pudieron importar las capas del PSD.")
             else:
                 project.warnings.append(
-                    "PSD aplanado sin importar capas: marque los elementos en Ajustes finos."
+                    "PSD aplanado sin importar capas: marque los elementos en Revisar capas."
                 )
         else:
             project.warnings.append(
                 "Un arte aplanado no contiene capas: la separación es aproximada y "
-                "editable en Ajustes finos."
+                "editable en Revisar capas."
             )
         storage.save_project(project)
         return project
@@ -411,7 +411,7 @@ def create_project_from_ingest(request: IngestImportRequest) -> Project:
         else:
             project.warnings.append(
                 "Un arte aplanado no contiene capas: la separación es aproximada y "
-                "editable en Ajustes finos."
+                "editable en Revisar capas."
             )
         storage.save_project(project)
         return project
@@ -539,7 +539,7 @@ def _project_from_piece(
             project.warnings.append(reason or "No se importaron las capas del PSD.")
         else:
             project.warnings.append(
-                "PSD aplanado sin importar capas: marque los elementos en Ajustes finos."
+                "PSD aplanado sin importar capas: marque los elementos en Revisar capas."
             )
         storage.save_project(project)
         return project
