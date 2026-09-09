@@ -1612,6 +1612,67 @@ input[type="range"] {
 }
 .layer-item small { color: var(--fg-muted); font-size: var(--fs-2xs); }
 
+/* Selección múltiple de capas. Un pliego con varias artes son treinta capas y
+   quitar las de las otras piezas de una en una era el paso más lento del flujo. */
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 10px;
+}
+.layer-row.is-picked { background: var(--accent-soft); }
+.layer-row .layer-item { min-width: 0; }
+.layer-pick {
+  display: grid;
+  place-items: center;
+  flex: none;
+  padding: 0 4px 0 8px;
+  cursor: pointer;
+}
+.layer-pick input { cursor: pointer; }
+
+.layer-group { margin-bottom: 10px; }
+.layer-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--surface-3);
+  cursor: pointer;
+  font-size: var(--fs-xs);
+}
+.layer-group-head strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.layer-group-head small { margin-left: auto; color: var(--fg-muted); font-size: var(--fs-2xs); }
+
+.layer-pickbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 16px 0;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent-soft-fg);
+  font-size: var(--fs-xs);
+}
+.layer-pickbar.is-idle {
+  margin: 6px 16px 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+}
+.layer-pickbar .pickbar-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+.layer-pickbar.is-idle .ghost-button { flex: none; margin-left: auto; }
+
 .layer-preview {
   position: relative;
   display: grid;

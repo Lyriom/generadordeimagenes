@@ -212,6 +212,10 @@ interface State {
   generationMode: "catalog" | "compose";
   /** Motor del fondo elegido. En el estado porque la lista de modelos lo sigue. */
   generationEngine: string;
+  /** Capas marcadas para borrar en bloque, por proyecto. */
+  layerPicks: Record<string, Set<string>>;
+  /** Última capa marcada, para el rango con shift. */
+  lastLayerPick: string | null;
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
@@ -250,6 +254,8 @@ const state: State = {
   groups: [],
   generationMode: "catalog",
   generationEngine: "auto",
+  layerPicks: {},
+  lastLayerPick: null,
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
@@ -1086,18 +1092,68 @@ export async function mountApp(): Promise<void> {
 // Las demás vistas se definen abajo para mantener un único bundle sin imports
 // dinámicos. Así una pestaña abierta sigue funcionando durante un despliegue.
 
+/** Capas marcadas de este KV. Se guarda por proyecto: la selección de un KV no
+ *  tiene sentido en otro, y sus ids ni existen. */
+function layerPicks(projectId: string): Set<string> {
+  if (!state.layerPicks[projectId]) state.layerPicks[projectId] = new Set();
+  return state.layerPicks[projectId];
+}
+
+/** El arte del PSD al que pertenece la capa, si el pliego lo traía.
+ *
+ *  Un PSD de agencia mete varias piezas en el mismo archivo y las guarda como
+ *  grupos. Cuando solo se quiere editar una, lo que hay que quitar son todas
+ *  las capas de las demás: por eso el grupo es la unidad de selección. */
+function layerGroup(layer: Layer): string {
+  const raw = String((layer.meta || {}).psd_group || "").trim();
+  if (!raw) return "";
+  // "09_Story/BG" y "09_Story" son el mismo arte: el subgrupo no separa piezas.
+  return raw.split("/")[0];
+}
+
 function layerItem(project: Project, layer: Layer): string {
   const preview = layer.src
     ? '<img class="layer-mini" src="' + attr(fileUrl(project.project_id, layer.src)) + '" alt="">'
     : '<span class="layer-mini"></span>';
+  const marcada = layerPicks(project.project_id).has(layer.id);
   return [
+    '<div class="layer-row', marcada ? " is-picked" : "", '">',
+    '<label class="layer-pick" title="Marcar para borrar en bloque">',
+    '<input type="checkbox" class="layer-pick-box" data-layer-id="', attr(layer.id), '"',
+    checked(marcada), "></label>",
     '<button class="layer-item', state.selectedLayerId === layer.id ? " is-active" : "",
     '" data-layer-id="', attr(layer.id), '" aria-pressed="',
     state.selectedLayerId === layer.id ? "true" : "false", '">', preview, "<span><strong>", esc(layer.name),
     "</strong><small>", esc(CATEGORY_LABELS[layer.category] || layer.category), " · ",
     String(layer.width), "×", String(layer.height), layer.visible ? "" : " · oculta",
-    "</small></span></button>",
+    "</small></span></button></div>",
   ].join("");
+}
+
+/** El listado, agrupado por arte cuando el PSD trae más de una. */
+function layerListHtml(project: Project, layers: Layer[]): string {
+  const grupos: string[] = [];
+  for (const layer of layers) {
+    const grupo = layerGroup(layer);
+    if (!grupos.includes(grupo)) grupos.push(grupo);
+  }
+  const conNombre = grupos.filter(Boolean);
+  if (conNombre.length < 2) return layers.map((layer) => layerItem(project, layer)).join("");
+
+  const marcadas = layerPicks(project.project_id);
+  return grupos.map((grupo) => {
+    const suyas = layers.filter((layer) => layerGroup(layer) === grupo);
+    const todas = suyas.length > 0 && suyas.every((layer) => marcadas.has(layer.id));
+    const titulo = grupo || "Sueltas (sin arte)";
+    return [
+      '<div class="layer-group"><label class="layer-group-head">',
+      '<input type="checkbox" class="layer-group-box" data-group="', attr(grupo), '"',
+      checked(todas), "> <strong>", esc(titulo), "</strong>",
+      '<small>', String(suyas.length), " capas</small></label>",
+      suyas.map((layer) => layerItem(project, layer)).join(""),
+      "</div>",
+    ].join("");
+  }).join("");
 }
 
 function optionList(values: Record<string, string>, current: string): string {
@@ -1209,7 +1265,7 @@ async function renderLayers(): Promise<void> {
   const layers = [...project.layers]
     .filter((item) => item.category !== "background")
     .sort((a, b) => b.z_index - a.z_index);
-  const layerList = layers.map((item) => layerItem(project, item)).join("");
+  const layerList = layerListHtml(project, layers);
   const preview = layer
     ? [
         '<div class="layer-preview"><img id="mask-source" src="/api/projects/', attr(project.project_id),
@@ -1259,7 +1315,9 @@ async function renderLayers(): Promise<void> {
     '<button class="ghost-button" id="show-detections">Ver detecciones</button></div>',
     '<div class="layer-workbench">',
     '<section class="card flush"><div class="card-head" style="padding:16px 16px 0"><div><h2>Capas</h2><p>', String(layers.length), " elementos</p></div>",
-    '<button class="icon-button" id="new-layer" title="Crear capa">+</button></div><div class="layer-list">', layerList || '<div class="notice">Sin capas.</div>', "</div></section>",
+    '<button class="icon-button" id="new-layer" title="Crear capa">+</button></div>',
+    layerPickBar(project, layers),
+    '<div class="layer-list">', layerList || '<div class="notice">Sin capas.</div>', "</div></section>",
     '<section class="card"><div class="card-head"><div><h2>Vista de máscara</h2><p>Verde = píxeles incluidos</p></div></div>', preview, "</section>",
     layer ? layerEditor(layer) : '<section class="card layer-editor">' + emptyState("◇", "Selecciona una capa", "Elige una capa del panel izquierdo.") + "</section>",
     "</div>",
@@ -1273,6 +1331,33 @@ async function renderLayers(): Promise<void> {
   bindStepFooter("layers");
   bindCopyEditor(project);
   bindLayerActions(project, layer, layers);
+}
+
+/** Barra de borrado en bloque. Aparece al marcar la primera capa.
+ *
+ *  Un pliego con cuatro artes son treinta capas, y quitar las de los otros tres
+ *  de una en una —con su confirmación cada vez— era el paso más lento de todo
+ *  el flujo. El backend ya aceptaba una lista; lo que faltaba era poder armarla. */
+function layerPickBar(project: Project, layers: Layer[]): string {
+  const marcadas = layerPicks(project.project_id);
+  const total = layers.filter((layer) => marcadas.has(layer.id)).length;
+  if (!total) {
+    return [
+      '<div class="layer-pickbar is-idle">',
+      '<span class="muted tiny">Marca capas con su casilla para borrarlas en bloque. ',
+      "Con <strong>Mayús</strong> se marca todo el tramo.</span>",
+      '<button class="ghost-button small" id="pick-all-layers">Marcar todas</button>',
+      "</div>",
+    ].join("");
+  }
+  return [
+    '<div class="layer-pickbar">',
+    "<span><strong>", String(total), "</strong> de ", String(layers.length), " marcadas</span>",
+    '<span class="pickbar-actions">',
+    '<button class="ghost-button small" id="clear-layer-picks">Ninguna</button>',
+    '<button class="danger-button small" id="delete-layer-picks">Eliminar ', String(total), "</button>",
+    "</span></div>",
+  ].join("");
 }
 
 function orderEditor(layers: Layer[]): string {
@@ -1757,10 +1842,107 @@ function bindCopyEditor(project: Project): void {
   });
 }
 
+function bindLayerPicks(project: Project, layers: Layer[]): void {
+  const marcadas = layerPicks(project.project_id);
+  // El orden del rango es el de la pantalla, no el de profundidad: agrupado por
+  // arte los dos no coinciden, y con Mayús se marcaría un tramo que no es el
+  // que se ve. Se lee de las casillas ya pintadas.
+  const orden = queryAll<HTMLInputElement>(".layer-pick-box")
+    .map((box) => box.dataset.layerId || "")
+    .filter(Boolean);
+
+  const repintar = () => void renderLayers();
+
+  queryAll<HTMLInputElement>(".layer-pick-box").forEach((box) => {
+    box.addEventListener("click", (event) => {
+      const id = box.dataset.layerId!;
+      const rango = (event as MouseEvent).shiftKey && state.lastLayerPick;
+      if (rango) {
+        // Las capas de un mismo arte llegan seguidas del PSD, así que el tramo
+        // es justo lo que se quiere marcar.
+        const desde = orden.indexOf(state.lastLayerPick!);
+        const hasta = orden.indexOf(id);
+        if (desde >= 0 && hasta >= 0) {
+          const [a, b] = desde < hasta ? [desde, hasta] : [hasta, desde];
+          for (const entre of orden.slice(a, b + 1)) {
+            if (box.checked) marcadas.add(entre);
+            else marcadas.delete(entre);
+          }
+        }
+      } else if (box.checked) {
+        marcadas.add(id);
+      } else {
+        marcadas.delete(id);
+      }
+      state.lastLayerPick = id;
+      repintar();
+    });
+  });
+
+  queryAll<HTMLInputElement>(".layer-group-box").forEach((box) => {
+    box.addEventListener("click", () => {
+      const grupo = box.dataset.group ?? "";
+      for (const item of layers) {
+        if (layerGroup(item) !== grupo) continue;
+        if (box.checked) marcadas.add(item.id);
+        else marcadas.delete(item.id);
+      }
+      repintar();
+    });
+  });
+
+  query("#pick-all-layers")?.addEventListener("click", () => {
+    for (const item of layers) marcadas.add(item.id);
+    repintar();
+  });
+  query("#clear-layer-picks")?.addEventListener("click", () => {
+    marcadas.clear();
+    state.lastLayerPick = null;
+    repintar();
+  });
+
+  query("#delete-layer-picks")?.addEventListener("click", async () => {
+    const ids = layers.filter((item) => marcadas.has(item.id)).map((item) => item.id);
+    if (!ids.length) return;
+    const nombres = layers
+      .filter((item) => marcadas.has(item.id))
+      .map((item) => item.name);
+    const confirmado = await confirmAction({
+      title: "¿Eliminar " + String(ids.length) + " capa(s)?",
+      lines: [
+        nombres.slice(0, 6).join(", ") + (nombres.length > 6
+          ? " y " + String(nombres.length - 6) + " más."
+          : "."),
+        "Se quitan de este KV y no se puede deshacer.",
+      ],
+      confirm: "Sí, eliminar las " + String(ids.length),
+    });
+    if (!confirmado) return;
+    busy("Eliminando capas", String(ids.length) + " capas de " + project.name, 20);
+    try {
+      // Una sola petición: el endpoint ya aceptaba la lista entera.
+      await put("/projects/" + project.project_id + "/layers", { updates: [], delete: ids });
+      marcadas.clear();
+      state.lastLayerPick = null;
+      if (state.selectedLayerId && ids.includes(state.selectedLayerId)) {
+        state.selectedLayerId = null;
+      }
+      await refreshProject(project.project_id);
+      toast(String(ids.length) + " capas eliminadas.", "success");
+      await renderLayers();
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      idle();
+    }
+  });
+}
+
 function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]): void {
   query<HTMLSelectElement>("#active-kv")?.addEventListener("change", async (event) => {
     state.activeId = (event.currentTarget as HTMLSelectElement).value;
     state.selectedLayerId = null;
+    state.lastLayerPick = null;
     saveSession();
     await navigate("layers");
   });
@@ -1770,6 +1952,7 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
       await renderLayers();
     });
   });
+  bindLayerPicks(project, layers);
   query("#analyze-project")?.addEventListener("click", () => runProjectAction(
     "Detectando elementos", () => post("/projects/" + project.project_id + "/analyze", {
       run_ocr: true, run_segmentation: true, max_regions: 20, extract: true,

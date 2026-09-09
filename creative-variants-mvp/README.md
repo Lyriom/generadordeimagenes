@@ -331,6 +331,29 @@ del mismo aviso—, y sus capas no comparten identificador. La interfaz traduce
 cada texto a la capa equivalente de cada pieza por categoría y posición dentro de
 ella, que es lo que hace que una tabla sirva para toda la campaña.
 
+### Un PSD con varias artes: quitar las que no toca, de una vez
+
+Un pliego de agencia mete varias piezas en el mismo archivo. Cuando trae
+**artboards** de Photoshop, el importador ya separa cada pieza en su propio KV y
+no hay nada que borrar. Cuando no los trae, todas las capas caen en el mismo KV
+y hay que quitar las de las demás piezas para trabajar con una.
+
+En **paso 2 → Capas**, cada capa lleva una casilla:
+
+- Marcar varias y **«Eliminar N»** las quita en **una sola petición**, con una
+  única confirmación que dice qué se va.
+- **Mayús** marca todo el tramo entre la última casilla y la que se pulsa. Las
+  capas de una misma pieza llegan seguidas del PSD, así que el tramo suele ser
+  justo lo que se busca.
+- Si el PSD trae grupos, el listado **se agrupa por pieza** y la cabecera de cada
+  grupo marca todas sus capas de golpe: quitar el arte que no toca es un clic.
+  Solo se agrupa si hay más de una pieza; con una sola el listado va plano.
+
+Borrar una capa además **rehace la plancha de fondo**. Al ocultar un elemento
+aplanado se borra del fondo para que no quede de fantasma; si luego se borraba la
+capa, esa marca se iba con ella pero el agujero inpintado se quedaba, y el fondo
+salía con un claro sin nada que lo tapara.
+
 ### Dos modos de generar, y el producto solo entra en uno
 
 El paso 4 tiene dos pestañas y la diferencia importa:

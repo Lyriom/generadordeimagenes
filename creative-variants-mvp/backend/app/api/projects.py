@@ -906,7 +906,15 @@ def update_layers(project_id: str, request: LayersUpdateRequest) -> Project:
 
         if request.delete:
             remove = set(request.delete)
+            borradas = [layer for layer in project.layers if layer.id in remove]
             project.layers = [layer for layer in project.layers if layer.id not in remove]
+            # La marca de "borrada del fondo" se va con la capa, pero el agujero
+            # que dejó en la plancha no: quedaba inpintado para siempre y sin
+            # nada que dibujar encima. Se rehace desde la copia limpia, que es
+            # lo que devuelve esos píxeles.
+            if any(layer.meta.get("erased_from_plate") for layer in borradas):
+                for warning in art_text.rebuild_plate(project):
+                    logger.info("capas borradas en %s: %s", project.project_id, warning)
 
         if request.order:
             order_map = {layer_id: index for index, layer_id in enumerate(request.order)}

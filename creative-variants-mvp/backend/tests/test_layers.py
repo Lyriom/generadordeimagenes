@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -165,6 +166,60 @@ def test_delete_layer(client: TestClient, project: dict):
     )
     assert response.status_code == 200
     assert all(layer["id"] != target for layer in response.json()["layers"])
+
+
+def test_several_layers_are_deleted_in_one_request(client: TestClient, project: dict):
+    """Un pliego con varias artes obliga a quitar muchas capas de golpe.
+
+    El endpoint ya recibía la lista entera; lo que faltaba era que la interfaz
+    pudiera armarla. Aquí se fija el contrato del que depende.
+    """
+    project_id = project["project_id"]
+    layers = create_manual_layers(client, project_id)
+    objetivos = [layers["legal"]["id"], layers["cta"]["id"], layers["headline"]["id"]]
+
+    response = client.put(
+        f"/projects/{project_id}/layers", json={"delete": objetivos}
+    )
+    assert response.status_code == 200, response.text
+    quedan = {layer["id"] for layer in response.json()["layers"]}
+    assert not quedan & set(objetivos)
+    # Y no se llevó por delante las demás.
+    assert len(quedan) >= 1
+
+
+def test_deleting_an_erased_layer_gives_the_background_back(
+    client: TestClient, project: dict
+):
+    """Borrar la capa tiene que devolver los píxeles que se le quitaron al fondo.
+
+    Al ocultar un elemento aplanado se borra de la plancha para que no quede de
+    fantasma. Si luego se borra la capa, esa marca se va con ella pero el
+    agujero inpintado se quedaba: un claro en el fondo sin nada que lo tape.
+    """
+    from app.services import art_text, storage
+
+    project_id = project["project_id"]
+    layers = create_manual_layers(client, project_id)
+    objetivo = layers["cta"]["id"]
+
+    # Ocultarla la borra de la plancha (queda la marca en su meta).
+    client.put(
+        f"/projects/{project_id}/layers",
+        json={"updates": [{"id": objetivo, "visible": False}]},
+    )
+    guardado = storage.load_project(project_id)
+    capa = guardado.layer_by_id(objetivo)
+    if not (capa and capa.meta.get("erased_from_plate")):
+        pytest.skip("este arte no tenía el elemento aplanado en el fondo")
+
+    client.put(f"/projects/{project_id}/layers", json={"delete": [objetivo]})
+    tras = storage.load_project(project_id)
+    # Sin capas marcadas, la plancha vuelve a ser la copia limpia.
+    assert not [
+        capa for capa in tras.layers if capa.meta.get("erased_from_plate")
+    ]
+    assert art_text.rebuild_plate(tras) == []
 
 
 def test_background_reconstruction(client: TestClient, project: dict):
