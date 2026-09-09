@@ -190,3 +190,61 @@ def test_sam_encodes_the_same_artwork_only_once(tmp_path):
     Image.new("RGB", (300, 300), (200, 200, 200)).save(ruta)
     proveedor.segment(str(ruta), box=(0, 0, 100, 100))
     assert falso.codificadas == 2
+
+
+# --------------------------------------------------- elegir motor a mano
+"""Un motor de pago pedido a mano no puede acabar en el local sin decirlo.
+
+Antes, elegir «Magnific» sin clave devolvía OpenCV con un aviso en el log del
+servidor y nada en pantalla: el usuario veía un fondo borroso y creía que era
+lo que había pedido a un modelo de pago.
+"""
+
+
+def test_an_explicitly_chosen_paid_engine_without_key_fails_loudly(monkeypatch):
+    from app.providers import ProviderUnavailableError, get_inpainting_provider
+
+    monkeypatch.setattr(settings, "magnific_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "openai_api_key", "", raising=False)
+
+    for motor in ("magnific", "openai"):
+        with pytest.raises(ProviderUnavailableError) as fallo:
+            get_inpainting_provider(motor)
+        assert "no está disponible" in str(fallo.value)
+
+
+def test_auto_still_falls_back_to_the_local_engine(monkeypatch):
+    """`auto` significa justo eso: bajar la cascada hasta lo que haya."""
+    from app.providers import get_inpainting_provider
+
+    monkeypatch.setattr(settings, "magnific_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "openai_api_key", "", raising=False)
+    monkeypatch.setattr(settings, "bfl_api_key", "", raising=False)
+
+    assert getattr(get_inpainting_provider("auto"), "name", "opencv") == "opencv"
+
+
+def test_a_model_from_another_engine_is_refused(monkeypatch):
+    """Pedir OpenAI con un modelo de Magnific era descartar la elección callando."""
+    from app.providers import ProviderUnavailableError, get_inpainting_provider
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-de-prueba", raising=False)
+    with pytest.raises(ProviderUnavailableError) as fallo:
+        get_inpainting_provider("openai", "ideogram-image-edit")
+    assert "no es del motor openai" in str(fallo.value)
+
+
+def test_the_chosen_openai_model_reaches_the_provider(monkeypatch):
+    from app.providers import get_inpainting_provider
+
+    monkeypatch.setattr(settings, "openai_api_key", "sk-de-prueba", raising=False)
+    proveedor = get_inpainting_provider("openai", "gpt-image-2.5-flare")
+    assert proveedor.name == "openai"
+    assert proveedor.model_id == "gpt-image-2.5-flare"
+
+
+def test_the_default_openai_model_is_one_that_exists():
+    """El predeterminado tiene que estar en el catálogo, no ser un id inventado."""
+    from app.providers import model_belongs_to
+
+    assert model_belongs_to("openai", settings.openai_image_model)

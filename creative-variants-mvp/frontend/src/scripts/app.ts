@@ -210,6 +210,8 @@ interface State {
   individualProducts: Set<string>;
   groups: ProductGroup[];
   generationMode: "catalog" | "compose";
+  /** Motor del fondo elegido. En el estado porque la lista de modelos lo sigue. */
+  generationEngine: string;
   selectedVariants: Set<string>;
   autoFormats: boolean;
   resultOrder: "score" | "generation";
@@ -247,6 +249,7 @@ const state: State = {
   individualProducts: new Set(),
   groups: [],
   generationMode: "catalog",
+  generationEngine: "auto",
   selectedVariants: new Set(),
   autoFormats: true,
   resultOrder: "score",
@@ -1586,17 +1589,12 @@ function copyRow(project: Project, item: ArtTextLayer): string {
     item.editable
       ? '<button class="button small save-copy" data-layer="' + attr(item.id) + '">Guardar texto</button>'
       : "",
-    state.campaign.length > 1
-      ? '<button class="ghost-button small copy-to-all" data-layer="' + attr(item.id) +
-        '" title="Aplica el mismo cambio a la capa equivalente de las demás piezas del PSD">' +
-        "A los " + String(state.campaign.length) + " KV</button>"
-      : "",
     item.rewritten
       ? '<button class="ghost-button small restore-copy" data-layer="' + attr(item.id) + '">Volver al original</button>'
       : "",
     item.part_of
       ? '<button class="ghost-button small unsplit-copy" data-layer="' + attr(item.id) +
-        '" title="Deshace la separación y devuelve las partes a su capa original">Volver a unir</button>'
+        '" title="Junta las partes en una sola capa, conservando lo que hayas cambiado en ellas">Volver a unir</button>'
       : "",
     '<label class="check"><input class="remove-copy" type="checkbox" data-layer="', attr(item.id), '"',
     checked(item.removed), "> Quitar del arte</label></div>",
@@ -1671,54 +1669,6 @@ async function sendCopyEdit(project: Project, payload: Record<string, unknown>):
     toast("Arte actualizado.", "success");
   } catch (error) {
     toast(errorMessage(error), "error");
-  } finally {
-    idle();
-  }
-}
-
-/** El mismo cambio en las demás piezas de la campaña.
- *
- *  Una campaña son ocho tamaños del mismo aviso; reescribir el precio ocho
- *  veces a mano es justo el trabajo que esta aplicación existe para quitar. Se
- *  traduce por categoría y posición, igual que los textos por producto. */
-async function copyEditToCampaign(
-  source: Project,
-  layerId: string,
-  payload: Record<string, unknown>,
-): Promise<void> {
-  const others = state.campaign.filter((item) => item.project_id !== source.project_id);
-  busy("Aplicando a la campaña", "Llevando el cambio a las demás piezas…", 15);
-  const sinPareja: string[] = [];
-  try {
-    for (let index = 0; index < others.length; index += 1) {
-      const target = others[index];
-      busyProgress(15 + Math.round((index / Math.max(1, others.length)) * 80), target.name);
-      const twin = twinLayerId(source, target, layerId);
-      if (!twin) {
-        sinPareja.push(target.name);
-        continue;
-      }
-      try {
-        const result = await post<any>(
-          "/projects/" + target.project_id + "/layers/" + twin + "/text",
-          payload,
-        );
-        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
-      } catch (error) {
-        sinPareja.push(target.name);
-        toast(target.name + ": " + errorMessage(error), "error");
-      }
-      await refreshProject(target.project_id);
-      await loadTexts(target.project_id, true);
-    }
-    const hechos = others.length - sinPareja.length;
-    if (hechos) toast("Aplicado en " + String(hechos) + " KV más.", "success");
-    if (sinPareja.length) {
-      toast(
-        "Sin capa equivalente en: " + sinPareja.join(", ") + ". Cámbialo en cada uno.",
-        "info",
-      );
-    }
   } finally {
     idle();
   }
@@ -1805,27 +1755,6 @@ function bindCopyEditor(project: Project): void {
       void sendCopyEdit(project, { layer_id: box.dataset.layer!, removed: box.checked }),
     );
   });
-  queryAll<HTMLButtonElement>(".copy-to-all").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const id = button.dataset.layer!;
-      const item = (state.texts[project.project_id] || EMPTY_TEXTS).layers.find(
-        (entry) => entry.id === id,
-      );
-      const field = query<HTMLTextAreaElement>('.copy-text[data-layer="' + id + '"]');
-      const removed = query<HTMLInputElement>('.remove-copy[data-layer="' + id + '"]')?.checked;
-      const content = (field?.value || "").trim();
-      // Se manda lo que hay en pantalla: primero se guarda en este KV y después
-      // se replica, para que las piezas no queden con textos distintos.
-      if (item?.editable && content) {
-        await sendCopyEdit(project, { layer_id: id, content });
-        await copyEditToCampaign(project, id, { content, removed });
-      } else {
-        await sendCopyEdit(project, { layer_id: id, removed: Boolean(removed) });
-        await copyEditToCampaign(project, id, { removed: Boolean(removed) });
-      }
-      await renderLayers();
-    });
-  });
 }
 
 function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]): void {
@@ -1852,19 +1781,38 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
     }), "layers",
   ));
   query("#rebuild-background")?.addEventListener("click", () => {
-    const modelOptions = (state.capabilities?.image_models || []).map((model) =>
-      '<option value="' + attr(model.id) + '">' + esc(model.label) + "</option>"
-    ).join("");
+    // La lista arranca vacía: «Automático» no elige modelo, lo hace el servidor.
+    const pintarModelos = (engine: string) => {
+      const select = query<HTMLSelectElement>("#background-model");
+      if (!select) return;
+      const opciones = modelOptionsFor(engine);
+      select.innerHTML = '<option value="">Predeterminado</option>' + opciones;
+      select.disabled = !opciones;
+      const nota = query<HTMLElement>("#background-model-note");
+      if (nota) {
+        nota.textContent = opciones
+          ? "Modelos de " + engineLabel(engine) + "."
+          : engine === "opencv"
+            ? "El motor local no usa modelos de IA."
+            : "Lo elige el servidor según las claves que tenga.";
+      }
+    };
     content().insertAdjacentHTML("afterbegin", [
       '<section class="card elevated" id="background-panel" style="margin-bottom:18px"><div class="card-head"><div><h2>Reconstruir fondo</h2><p>Elige el motor sin modificar las capas</p></div><button class="icon-button" id="close-background">×</button></div>',
       '<div class="form-grid"><label class="field"><span>Motor</span><select id="background-engine"><option value="auto">Automático</option><option value="opencv">Local · OpenCV</option>',
-      modelOptions ? '<option value="magnific">Magnific</option>' : "", '<option value="openai">OpenAI</option></select></label>',
-      '<label class="field"><span>Modelo Magnific</span><select id="background-model"><option value="">Predeterminado</option>', modelOptions, "</select></label></div>",
+      engineTakesModel("magnific") ? '<option value="magnific">Magnific</option>' : "",
+      engineTakesModel("openai") ? '<option value="openai">OpenAI</option>' : "",
+      '</select></label>',
+      '<label class="field"><span>Modelo de IA</span><select id="background-model"><option value="">Predeterminado</option></select>',
+      '<small id="background-model-note">Lo elige el servidor según las claves que tenga.</small></label></div>',
       '<label class="field" style="margin-top:12px"><span>Dirección visual</span><textarea id="background-prompt" placeholder="Fondo limpio, sin texto ni logos"></textarea></label>',
       '<div class="form-grid" style="margin-top:12px"><label class="field"><span>Expansión de máscara</span><input id="background-dilate" type="number" min="0" max="64" value="8"></label>',
       '<button class="button" id="run-background">Reconstruir</button></div></section>',
     ].join(""));
     query("#close-background")?.addEventListener("click", () => query("#background-panel")?.remove());
+    query<HTMLSelectElement>("#background-engine")?.addEventListener("change", (event) =>
+      pintarModelos((event.currentTarget as HTMLSelectElement).value),
+    );
     query("#run-background")?.addEventListener("click", () => runProjectAction(
       "Reconstruyendo fondo",
       () => post("/projects/" + project.project_id + "/reconstruct-background", {
@@ -3010,7 +2958,21 @@ async function renderGenerate(): Promise<void> {
       '<button class="button large full" id="run-generation" style="margin-top:20px">Sustituir productos y generar archivos</button></section>',
     ].join("");
   } else {
+    // Subir un producto y generar aquí es tirar la tanda: este modo recompone
+    // el KV y no mira el catálogo. Antes no lo avisaba nadie.
+    const cargados = selectedProductFiles().length + validGroups().length;
     body = [
+      cargados
+        ? [
+            '<div class="notice error" style="margin-bottom:16px">',
+            "<strong>Tienes ", String(cargados), " producto(s) cargado(s) y este modo no los usa.</strong> ",
+            "«Ajustes finos» recompone las capas del KV en varias medidas; el producto del arte ",
+            "se queda como está. Para sustituirlo por el que subiste, usa la otra pestaña.",
+            '<div class="button-row" style="margin-top:10px">',
+            '<button class="button" id="go-catalog-mode">Ir a «Sustituir producto · fiel»</button>',
+            "</div></div>",
+          ].join("")
+        : "",
       '<div class="notice" style="margin-bottom:16px">Ajustes finos sobre <strong>', esc(active.name), '</strong>: recompone las capas actuales sin usar el catálogo de productos.</div>',
       '<div class="grid two">', formatSelectorHtml(false), generationOptionsHtml("compose"), "</div>",
       '<div class="spacer"></div>', permissionsHtml(active),
@@ -3031,9 +2993,40 @@ async function renderGenerate(): Promise<void> {
   bindGenerate(active);
 }
 
+/** El nombre del motor tal como se lee en pantalla. */
+function engineLabel(engine: string): string {
+  if (engine === "magnific") return "Magnific";
+  if (engine === "openai") return "OpenAI";
+  if (engine === "opencv") return "el motor local";
+  return "Automático";
+}
+
+function engineOption(value: string, label: string, selected: string): string {
+  return '<option value="' + attr(value) + '"' +
+    (value === selected ? " selected" : "") + ">" + esc(label) + "</option>";
+}
+
+/** Modelos del motor elegido. Cada entrada del catálogo trae su `provider`.
+ *
+ *  Mezclarlos era ofrecer los quince de Magnific con OpenAI seleccionado y
+ *  descartar la elección en silencio al generar. */
+function modelOptionsFor(engine: string): string {
+  return (state.capabilities?.image_models || [])
+    .filter((model) => String(model.provider || "magnific") === engine)
+    .map((model) =>
+      '<option value="' + attr(model.id) + '">' + esc(model.label || model.id) + "</option>"
+    )
+    .join("");
+}
+
+/** ¿Ese motor elige modelo? El local no, y «Automático» lo decide el servidor. */
+function engineTakesModel(engine: string): boolean {
+  return Boolean(modelOptionsFor(engine));
+}
+
 function generationOptionsHtml(mode: "catalog" | "compose"): string {
-  const imageModels = state.capabilities?.image_models || [];
-  const models = imageModels.map((model) => '<option value="' + attr(model.id) + '">' + esc(model.label || model.id) + "</option>").join("");
+  const engine = state.generationEngine;
+  const models = modelOptionsFor(engine);
   const countMin = mode === "catalog" ? 2 : 4;
   const countMax = mode === "catalog" ? 6 : 30;
   const countValue = mode === "catalog" ? 3 : 12;
@@ -3046,10 +3039,21 @@ function generationOptionsHtml(mode: "catalog" | "compose"): string {
     '<section class="card elevated"><div class="card-head"><div><h2>Modelo y contexto</h2><p>Con qué motor se rehace el fondo y qué le pides</p></div></div>',
     '<label class="choice" style="margin-bottom:14px"><input id="regenerate-background" type="checkbox"> Rehacer el fondo con IA</label>',
     '<div class="form-grid"><label class="field"><span>Motor del fondo</span><select id="generation-provider">',
-    '<option value="opencv">Local · gratis</option><option value="magnific">Magnific · eliges el modelo (con costo)</option>',
-    '<option value="openai">OpenAI · IA de imagen (con costo)</option><option value="auto">Automático</option></select></label>',
-    '<label class="field"><span>Modelo de IA</span><select id="generation-model"><option value="">Predeterminado</option>', models,
-    '</select><small>Solo aplica con Magnific.</small></label></div>',
+    engineOption("opencv", "Local · gratis", engine),
+    engineOption("magnific", "Magnific · eliges el modelo (con costo)", engine),
+    engineOption("openai", "OpenAI · IA de imagen (con costo)", engine),
+    engineOption("auto", "Automático", engine),
+    '</select></label>',
+    '<label class="field"><span>Modelo de IA</span><select id="generation-model"',
+    models ? "" : " disabled",
+    '><option value="">Predeterminado</option>', models,
+    '</select><small>',
+    models
+      ? "Modelos de " + esc(engineLabel(engine)) + ". Cambia el motor para ver otros."
+      : engine === "opencv"
+        ? "El motor local no usa modelos de IA."
+        : "Lo elige el servidor según las claves que tenga.",
+    "</small></label></div>",
     '<label class="field" style="margin-top:14px"><span>Contexto · qué quieres del arte</span>',
     '<textarea id="generation-instruction" placeholder="Producto grande, titular arriba, composición minimal"></textarea>',
     "<small>Entiende: producto grande o pequeño, titular arriba, centrado, vertical, diagonal, dividido, izquierda, derecha, minimal.</small></label>",
@@ -3117,6 +3121,16 @@ function bindGenerate(project: Project): void {
       await renderGenerate();
     });
   });
+  query("#go-catalog-mode")?.addEventListener("click", async () => {
+    state.generationMode = "catalog";
+    state.autoFormats = true;
+    await renderGenerate();
+  });
+  // La lista de modelos sigue al motor: hay que repintar al cambiarlo.
+  query<HTMLSelectElement>("#generation-provider")?.addEventListener("change", async (event) => {
+    state.generationEngine = (event.currentTarget as HTMLSelectElement).value;
+    await renderGenerate();
+  });
   bindFormatSelector();
   query("#run-generation")?.addEventListener("click", () => {
     if (state.generationMode === "catalog") runCatalogGeneration();
@@ -3149,7 +3163,7 @@ function generationSettings(): Record<string, any> {
     product_position_instruction: null,
     seed: Number(query<HTMLInputElement>("#generation-seed")!.value),
     product_arrangement: "auto",
-    background_provider: query<HTMLSelectElement>("#generation-provider")!.value,
+    background_provider: state.generationEngine,
     background_model: query<HTMLSelectElement>("#generation-model")!.value || null,
     background_prompt: query<HTMLTextAreaElement>("#generation-background-prompt")!.value.trim() || null,
     regenerate_background: query<HTMLInputElement>("#regenerate-background")!.checked,

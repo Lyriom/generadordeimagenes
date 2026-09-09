@@ -147,7 +147,9 @@ class Settings:
         # Suavizado del borde al recomponer lo generado sobre el arte original.
         self.magnific_feather: int = _env_int("MAGNIFIC_FEATHER", 6)
         self.openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
-        self.openai_image_model: str = os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+        self.openai_image_model: str = os.getenv(
+            "OPENAI_IMAGE_MODEL", "gpt-image-2.5-sunburst"
+        )
         self.openai_image_quality: str = os.getenv("OPENAI_IMAGE_QUALITY", "medium")
         self.openai_image_endpoint: str = os.getenv(
             "OPENAI_IMAGE_ENDPOINT", "https://api.openai.com/v1/images/edits"

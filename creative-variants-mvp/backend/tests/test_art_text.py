@@ -7,6 +7,7 @@ tanda de un catálogo escriba su propio copy sin heredar el del producto anterio
 """
 from __future__ import annotations
 
+import itertools
 import pathlib
 
 import numpy as np
@@ -1081,6 +1082,174 @@ def test_the_pieces_can_be_put_back_together(client: TestClient, block_project):
     assert block["id"] in ids
     for part in parts:
         assert part["id"] not in ids
+
+
+def test_putting_the_pieces_back_keeps_what_was_written_in_them(
+    client: TestClient, block_project
+):
+    """Juntar no es deshacer: el precio nuevo no puede volver al viejo."""
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    precio = parts[1]
+    escrito = client.post(
+        f"/projects/{project_id}/layers/{precio['id']}/text",
+        json={"content": "$599.00"},
+    )
+    assert escrito.status_code == 200, escrito.text
+
+    response = client.post(f"/projects/{project_id}/layers/{parts[0]['id']}/unsplit")
+    assert response.status_code == 200, response.text
+
+    after = client.get(f"/projects/{project_id}").json()
+    merged = next(item for item in after["layers"] if item["id"] == block["id"])
+    for part in parts:
+        assert part["id"] not in [layer["id"] for layer in after["layers"]]
+
+    # Los píxeles del conjunto son nuevos, no el recorte con el que llegó.
+    assert merged["src"] != block["src"]
+    listed = client.get(f"/projects/{project_id}/texts").json()
+    fila = next(item for item in listed["layers"] if item["id"] == block["id"])
+    assert "$599.00" in fila["text"]
+    # Y la miniatura enseña el resultado, no el original que acaba de cambiar.
+    assert fila["src"] == merged["src"]
+
+    # Lo que importa: la tinta del precio nuevo está dentro del PNG unido.
+    precio_ahora = next(
+        item for item in client.get(f"/projects/{project_id}/texts").json()["layers"]
+        if item["id"] == block["id"]
+    )
+    assert precio_ahora["text"].strip()
+    with Image.open(storage.abs_path(project_id, merged["src"])) as opened:
+        pixels = np.asarray(opened.convert("RGBA"))
+    assert pixels.shape[:2] == (merged["height"], merged["width"])
+    assert pixels[..., 3].max() > 200, "el conjunto salió transparente"
+
+
+def test_a_piece_removed_before_merging_stays_out_of_the_art(
+    client: TestClient, block_project
+):
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    sello = parts[-1]
+    client.post(f"/projects/{project_id}/layers/{sello['id']}/text", json={"removed": True})
+
+    response = client.post(f"/projects/{project_id}/layers/{parts[0]['id']}/unsplit")
+    assert response.status_code == 200, response.text
+
+    merged = next(
+        item for item in client.get(f"/projects/{project_id}").json()["layers"]
+        if item["id"] == block["id"]
+    )
+    unido = storage.abs_path(project_id, merged["src"])
+    with Image.open(unido) as opened:
+        pixels = np.asarray(opened.convert("RGBA"))
+    # El hueco que ocupaba el sello quedó transparente: no volvió al juntarlas.
+    hueco = pixels[
+        sello["y"] - merged["y"] : sello["y"] - merged["y"] + sello["height"],
+        sello["x"] - merged["x"] : sello["x"] - merged["x"] + sello["width"],
+        3,
+    ]
+    assert hueco.size, "el sello cayó fuera de la caja del conjunto"
+    assert hueco.max() < 96
+    # Y las demás piezas sí están.
+    assert pixels[..., 3].max() > 200
+
+
+def test_the_original_comes_back_after_merging_edited_pieces(
+    client: TestClient, block_project
+):
+    """«Volver al original» sigue siendo la salida, incluso tras juntar."""
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    client.post(
+        f"/projects/{project_id}/layers/{parts[1]['id']}/text", json={"content": "$599.00"}
+    )
+    client.post(f"/projects/{project_id}/layers/{parts[0]['id']}/unsplit")
+
+    response = client.post(
+        f"/projects/{project_id}/layers/{block['id']}/text", json={"restore": True}
+    )
+    assert response.status_code == 200, response.text
+    restored = next(
+        item for item in client.get(f"/projects/{project_id}").json()["layers"]
+        if item["id"] == block["id"]
+    )
+    assert restored["src"] == block["src"]
+    assert [restored["x"], restored["y"], restored["width"], restored["height"]] == [
+        block["x"], block["y"], block["width"], block["height"]
+    ]
+
+
+def test_rewriting_the_pieces_does_not_make_them_invade_each_other(
+    client: TestClient, block_project
+):
+    """La caja de un texto reescrito mide su tinta, no el bloque tipográfico.
+
+    Un bloque mide ascendente más descendente: bastante más alto que los trazos
+    que se ven. Usarlo como caja hacía que el precio reescrito se solapara con
+    el rótulo de arriba y con el sello de abajo sin dibujar nada encima, y unas
+    cajas solapadas descuadran el reparto del diseño anclado y el control de
+    calidad. Aquí se comprueba lo que el arte necesita: que sigan sin pisarse.
+    """
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    antes = {p["id"]: dict(y=p["y"], h=p["height"]) for p in parts}
+
+    for parte, texto in zip(parts, ["Precio de muerte", "$900", "P. ANTES 1200"]):
+        respuesta = client.post(
+            f"/projects/{project_id}/layers/{parte['id']}/text", json={"content": texto}
+        )
+        assert respuesta.status_code == 200, respuesta.text
+
+    despues = [
+        capa
+        for capa in client.get(f"/projects/{project_id}").json()["layers"]
+        if capa["id"] in antes
+    ]
+    for a, b in itertools.combinations(despues, 2):
+        alto = min(a["y"] + a["height"], b["y"] + b["height"]) - max(a["y"], b["y"])
+        ancho = min(a["x"] + a["width"], b["x"] + b["width"]) - max(a["x"], b["x"])
+        assert not (alto > 0 and ancho > 0), (
+            f"'{a['name']}' y '{b['name']}' se solapan {ancho}x{alto} px tras reescribir"
+        )
+
+    # Y cada una sigue ocupando aproximadamente el alto que ocupaba: el cuerpo
+    # se elige para que la tinta nueva mida como la vieja.
+    for capa in despues:
+        original = antes[capa["id"]]
+        assert abs(capa["height"] - original["h"]) <= max(4, original["h"] * 0.25), (
+            f"'{capa['name']}' pasó de {original['h']}px de alto a {capa['height']}px"
+        )
+
+
+def test_a_rewritten_text_keeps_its_ink_where_the_original_had_it(
+    client: TestClient, block_project
+):
+    """Medir la caja por la tinta no puede mover el texto de sitio."""
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    parts = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    precio = parts[1]
+
+    client.post(
+        f"/projects/{project_id}/layers/{precio['id']}/text", json={"content": "$900"}
+    )
+    despues = next(
+        capa
+        for capa in client.get(f"/projects/{project_id}").json()["layers"]
+        if capa["id"] == precio["id"]
+    )
+    # La tinta arranca en la misma fila que la del recorte original.
+    assert despues["y"] == precio["y"]
+    origen = despues["meta"]["art_text"]
+    assert origen["box"][1] == precio["y"]
+    # Y el bloque que se dibuja de verdad es más alto que la caja: por eso hacía
+    # falta separar las dos medidas.
+    assert origen["block_height"] >= despues["height"]
 
 
 def test_a_single_piece_layer_refuses_to_split(client: TestClient, tmp_path):

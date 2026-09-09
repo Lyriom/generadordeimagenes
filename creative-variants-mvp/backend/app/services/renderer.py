@@ -253,6 +253,32 @@ def _text_block_size(
     return int(max(widths)), int(line_px * len(lines))
 
 
+def ink_offsets(
+    lines: list[str], font: FreeTypeFont, line_height: float
+) -> tuple[int, int]:
+    """Desplazamiento y alto de la **tinta** dentro del bloque de texto.
+
+    Un bloque tipográfico mide ascendente + descendente: mucho más que los
+    trazos que se ven. La caja de un copy del arte tiene que medir lo que
+    ocupaba el recorte original —su tinta—, o invade a sus vecinos sin dibujar
+    nada encima de ellos. Estos dos números traducen una en la otra.
+    """
+    ascent, descent = font.getmetrics()
+    line_px = int((ascent + descent) * line_height)
+    tops: list[int] = []
+    bottoms: list[int] = []
+    for index, line in enumerate(lines):
+        if not line:
+            continue
+        box = font.getbbox(line)
+        tops.append(index * line_px + box[1])
+        bottoms.append(index * line_px + box[3])
+    if not tops:
+        return 0, 0
+    top = min(tops)
+    return top, max(1, max(bottoms) - top)
+
+
 def fit_text(
     draw: ImageDraw.ImageDraw,
     text: str,
@@ -307,10 +333,12 @@ def draw_text_layer(
     # bloque que ocupa. Reajustarlo aquí lo encogería por un píxel de redondeo y
     # lo partiría en dos líneas que el diseño no tenía.
     art_text = bool(layer.meta.get("art_text"))
+    ink_top = 0
     if art_text:
         font = _load_font(font_path, start_size)
         lines = text.split("\n")
         block_w, block_h = _text_block_size(lines, font, draw, layer.line_height)
+        ink_top, _ = ink_offsets(lines, font, layer.line_height)
     else:
         font, lines, (block_w, block_h) = fit_text(
             draw,
@@ -324,7 +352,12 @@ def draw_text_layer(
         )
 
     # Posición vertical del bloque dentro de la caja asignada.
-    if placement.valign == "top":
+    if art_text:
+        # La caja de un copy del arte es su tinta: el bloque se sube lo que el
+        # tipo deja de aire arriba, y la primera fila de trazos cae exactamente
+        # donde caía la del original. Centrarlo aquí lo bajaría medio bloque.
+        block_y = placement.y - ink_top
+    elif placement.valign == "top":
         block_y = placement.y
     elif placement.valign == "bottom":
         block_y = placement.y + max(0, placement.height - block_h)
@@ -400,7 +433,7 @@ def draw_text_layer(
     # planificada se juzgaba lo que se pensaba dibujar y no lo dibujado, y dos
     # textos que se pisaban de verdad pasaban sin penalización —una pieza de
     # 300x60 con el titular encima del subtítulo sacaba 92—.
-    if block_h > placement.height + 1:
+    if not art_text and block_h > placement.height + 1:
         warnings.append(
             f"'{layer.name}' no cabe en su hueco: ocupa {block_h}px de "
             f"{placement.height}px y se sale por abajo."

@@ -9,6 +9,7 @@ from ..models.formats import format_catalog
 from ..models.schemas import INTENSITIES, SUPPORTED_FORMATS
 from ..providers import provider_status
 from ..providers.magnific import model_catalog
+from ..providers.openai_inpaint import model_catalog as openai_model_catalog
 from ..services.layout_engine import layout_catalog
 from ..services.psd_import import psd_available
 
@@ -43,7 +44,10 @@ def capabilities() -> CapabilitiesResponse:
         segmentation=status_info["segmentation"],
         ocr=status_info["ocr"],
         inpainting=status_info["inpainting"],
-        image_models=[ImageModelInfo(**item) for item in model_catalog()],
+        image_models=[
+            ImageModelInfo(**item)
+            for item in (*model_catalog(), *openai_model_catalog())
+        ],
         formats={key: list(value) for key, value in SUPPORTED_FORMATS.items()},
         format_catalog=format_catalog(),
         layouts=layout_catalog(),

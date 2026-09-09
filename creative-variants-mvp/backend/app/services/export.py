@@ -210,13 +210,16 @@ def _append_editable_text(parent, project: Project, placement: Placement) -> Non
     contenido = (layer.content or "").strip()
     font_path = renderer.resolve_font_path(project, layer.font_weight)
     start_size = placement.font_size or layer.font_size
-    if layer.meta.get("art_text"):
-        # El copy del arte ya viene medido y su caja es el bloque exacto. Volver
-        # a ajustarlo aquí lo partiría en líneas que el PNG no tiene, y el SVG
-        # dejaría de coincidir con la imagen que acompaña.
+    art_text = bool(layer.meta.get("art_text"))
+    ink_top = 0
+    if art_text:
+        # El copy del arte ya viene medido. Volver a ajustarlo aquí lo partiría
+        # en líneas que el PNG no tiene, y el SVG dejaría de coincidir con la
+        # imagen que acompaña.
         font = renderer.load_font(font_path, start_size)
         lines = contenido.split("\n")
         _block_w, block_h = renderer._text_block_size(lines, font, draw, layer.line_height)
+        ink_top, _ = renderer.ink_offsets(lines, font, layer.line_height)
     else:
         font, lines, (_block_w, block_h) = renderer.fit_text(
             draw,
@@ -231,7 +234,12 @@ def _append_editable_text(parent, project: Project, placement: Placement) -> Non
     font_size = int(font.size)
     ascent, descent = font.getmetrics()
     line_px = int((ascent + descent) * layer.line_height)
-    if placement.valign == "top":
+    if art_text:
+        # Igual que el renderer: la caja mide la tinta y el bloque se sube por
+        # su aire de arriba. Cualquier otra cuenta y el SVG deja de cuadrar con
+        # el PNG que lo acompaña.
+        block_y = placement.y - ink_top
+    elif placement.valign == "top":
         block_y = placement.y
     elif placement.valign == "bottom":
         block_y = placement.y + max(0, placement.height - block_h)

@@ -239,7 +239,10 @@ class ReconstructBackgroundRequest(BaseModel):
     )
     model: str | None = Field(
         default=None,
-        description="Modelo de Magnific (ver /capabilities → image_models).",
+        description=(
+            "Modelo de IA a usar. Tiene que ser del motor elegido en `provider` "
+            "(ver /capabilities → image_models: cada entrada trae su `provider`)."
+        ),
     )
 
 
@@ -312,7 +315,9 @@ class DetectProductRequest(BaseModel):
         default=None,
         description="Proveedor para limpiar el fondo tras el recorte (auto | opencv | magnific | …).",
     )
-    model: str | None = Field(default=None, description="Modelo de Magnific para el fondo.")
+    model: str | None = Field(
+        default=None, description="Modelo de IA para el fondo, del motor elegido."
+    )
     scene_model: str | None = Field(
         default=None,
         description=(
@@ -494,7 +499,10 @@ class AutoRequest(BaseModel):
     background_model: str | None = Field(
         default=None,
         max_length=80,
-        description="Modelo de Magnific a usar (ver /capabilities → image_models).",
+        description=(
+            "Modelo de IA a usar. Tiene que ser del motor elegido en "
+            "`background_provider` (ver /capabilities → image_models)."
+        ),
     )
     background_prompt: str | None = Field(default=None, max_length=800)
     regenerate_background: bool = False

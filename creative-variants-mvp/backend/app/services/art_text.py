@@ -38,6 +38,7 @@ from PIL import Image, ImageDraw
 from ..models import Layer, LayerCategory, LayerType, Project
 from . import layer_extraction, renderer, storage
 from .imaging import dilate_mask, rgb_to_hex
+from .layout_engine import Placement
 
 logger = logging.getLogger(__name__)
 
@@ -383,16 +384,21 @@ def _size_for_ink_height(font_path: str | None, sample: str, target: int) -> int
     return max(6, best)
 
 
-def _block_metrics(font, content: str, line_height: float) -> tuple[int, int, int]:
-    """(ancho, alto, desplazamiento de la tinta) del bloque tal como lo pinta el renderer."""
+def _block_metrics(font, content: str, line_height: float) -> tuple[int, int, int, int]:
+    """(ancho, alto del bloque, desplazamiento de la tinta, alto de la tinta).
+
+    El bloque es lo que el renderer dibuja; la tinta, lo que se ve. La caja de
+    la capa mide la tinta —igual que la medía el recorte original—, así que las
+    dos medidas hacen falta: una para dibujar y otra para ocupar sitio.
+    """
     lines = content.split("\n")
     ascent, descent = font.getmetrics()
     line_px = int((ascent + descent) * line_height)
     widths = [_SCRATCH.textlength(line, font=font) for line in lines]
     block_w = int(math.ceil(max(widths))) if widths else 1
     block_h = int(line_px * len(lines))
-    first = font.getbbox(lines[0]) if lines[0] else (0, 0, 0, 0)
-    return max(1, block_w), max(1, block_h), int(first[1])
+    ink_top, ink_h = renderer.ink_offsets(lines, font, line_height)
+    return max(1, block_w), max(1, block_h), ink_top, max(1, ink_h)
 
 
 def _choose_face(
@@ -507,6 +513,17 @@ def apply(
             "text_verified": layer.text_verified,
             "font_family": layer.font_family,
         }
+    if not origin.get("style"):
+        # Una capa que viene de juntar partes puede no traer estilo: el recorte
+        # original no tenía texto medible aunque sus piezas sí. Se mide ahora,
+        # sobre los píxeles que haya, sin perder el resto del original.
+        medido = measure(project, layer)
+        if medido is None:
+            raise ArtTextError(
+                f"'{layer.name}' no tiene texto reconocible en sus píxeles: no se puede "
+                "reescribir de una vez. Sepárela en partes y reescriba cada una."
+            )
+        origin = {**origin, "style": medido.as_dict()}
     style = TextStyle(**origin["style"])
 
     align = align or style.align
@@ -517,7 +534,7 @@ def apply(
         project, style, text, weight=weight, font_size=font_size
     )
     line_height = _line_height(font, style)
-    block_w, block_h, ink_top = _block_metrics(font, text, line_height)
+    block_w, block_h, ink_top, ink_h = _block_metrics(font, text, line_height)
 
     box_x, box_y, box_w, box_h = (int(value) for value in origin["box"])
     warnings: list[str] = []
@@ -540,7 +557,7 @@ def apply(
             size = max(8, int(size * 0.96))
             font = renderer.load_font(font_path, size)
             line_height = _line_height(font, style)
-            block_w, block_h, ink_top = _block_metrics(font, text, line_height)
+            block_w, block_h, ink_top, ink_h = _block_metrics(font, text, line_height)
         warnings.append(
             f"'{text[:28]}' no cabía en el hueco de '{layer.name}': se redujo de "
             f"{original_size} a {size} px para no pisar el elemento de al lado."
@@ -552,9 +569,13 @@ def apply(
         new_x = box_x + box_w - block_w
     else:
         new_x = box_x
-    # La tinta nueva empieza donde empezaba la vieja: el renderer centra el
-    # bloque en la caja, y la caja mide exactamente el bloque.
-    new_y = box_y - ink_top
+    # La tinta nueva empieza donde empezaba la vieja. La caja de la capa mide
+    # esa tinta —no el bloque tipográfico—: un bloque mide ascendente más
+    # descendente, bastante más alto que los trazos, y usarlo como caja hacía
+    # que un precio reescrito invadiera al rótulo de arriba y al sello de abajo
+    # sin dibujar nada sobre ellos. Cajas solapadas descuadran el reparto del
+    # diseño anclado y el control de calidad. El renderer sube el bloque por su
+    # `ink_top` para dejar los trazos en su sitio.
 
     if new_x < 0 or new_x + block_w > project.canvas.width:
         warnings.append(
@@ -569,6 +590,9 @@ def apply(
         # Distancia del borde del bloque a la primera fila de tinta. Es lo que
         # traduce la caja de la capa a la caja de tinta que sirve de ancla.
         "ink_top": ink_top,
+        # El bloque completo, para quien necesite saber cuánto se dibuja de
+        # verdad por encima y por debajo de la tinta.
+        "block_height": block_h,
     }
     layer.meta["mask_edited"] = True
     layer.type = LayerType.TEXT
@@ -594,9 +618,9 @@ def apply(
     if not layer.meta.get("removed_from_art"):
         layer.visible = True
     layer.x = max(0, new_x)
-    layer.y = max(0, new_y)
+    layer.y = max(0, box_y)
     layer.width = max(1, block_w)
-    layer.height = max(1, block_h)
+    layer.height = max(1, ink_h)
 
     # Sin la tipografía de marca el texto nuevo sale con la del sistema, y eso
     # no es publicable. El aviso va aquí, en el momento del cambio, y no solo en
@@ -627,6 +651,15 @@ def restore(project: Project, layer: Layer, *, rebuild: bool = True) -> list[str
     layer.font_family = origin.get("font_family") or layer.font_family
     layer.x, layer.y, layer.width, layer.height = box
     layer.meta.pop("erased_from_plate", None)
+    # Lo que dejó el haber juntado partes: la máscara de la suma cubría más que
+    # sus propios píxeles, y borraría de más si luego se quita del arte.
+    if layer.meta.pop("merged_parts", None):
+        layer.mask = origin.get("mask") or layer.mask
+        previo = origin.get("editable_content")
+        if previo:
+            layer.meta["editable_content"] = previo
+        else:
+            layer.meta.pop("editable_content", None)
     return rebuild_plate(project) if rebuild else []
 
 
@@ -1086,6 +1119,144 @@ def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
     ]
 
 
+def _part_touched(part: Layer) -> bool:
+    """¿Se le hizo algo a esta parte que no se pueda perder al juntarlas?"""
+    if (part.meta.get("art_text") or {}).get("applied"):
+        return True
+    return bool(part.meta.get("removed_from_art")) or not part.visible
+
+
+def _merge_box(parent: Layer, visible: list[Layer]) -> tuple[int, int, int, int]:
+    """La caja de la madre más lo que las partes hayan crecido al reescribirse.
+
+    Se parte de la caja original y no solo de las partes: si una se quitó, el
+    hueco que ocupaba sigue formando parte del elemento, y encogerse hasta las
+    que quedan movería el resto del arte.
+    """
+    left = min([parent.x] + [item.x for item in visible])
+    top = min([parent.y] + [item.y for item in visible])
+    right = max([parent.x + parent.width] + [item.x + item.width for item in visible])
+    bottom = max([parent.y + parent.height] + [item.y + item.height for item in visible])
+    return left, top, max(1, right - left), max(1, bottom - top)
+
+
+def _draw_part(
+    canvas: Image.Image, project: Project, part: Layer, corner: tuple[int, int]
+) -> list[str]:
+    """Pinta una parte en el lienzo del conjunto, con lo que dice hoy."""
+    offset_x, offset_y = corner
+    if part.type is LayerType.TEXT:
+        # Reescrita: sus píxeles ya no son el recorte, son el texto nuevo. Lo
+        # dibuja el mismo motor que compone las variantes, así que lo que se
+        # aplana aquí es exactamente lo que se iba a exportar.
+        placement = Placement(
+            layer=part,
+            x=part.x - offset_x,
+            y=part.y - offset_y,
+            width=max(1, part.width),
+            height=max(1, part.height),
+            z_index=part.z_index,
+            align=part.text_align,
+            valign="top",
+            pinned=True,
+            font_size=part.font_size,
+        )
+        _, warnings = renderer.draw_text_layer(canvas, placement, project)
+        return warnings
+
+    path = _layer_png(project, part)
+    if path is None:
+        return [f"'{part.name}' no tenía PNG que juntar: su hueco quedó vacío."]
+    with Image.open(path) as opened:
+        crop = opened.convert("RGBA")
+        canvas.paste(crop, (part.x - offset_x, part.y - offset_y), crop)
+    return []
+
+
+def _merge_parts(project: Project, parent: Layer, children: list[Layer]) -> list[str]:
+    """Aplana el estado actual de las partes sobre la capa madre.
+
+    Volver a unir no puede deshacer lo que se escribió en las partes: quien
+    separa una capa para cambiar solo el precio y luego la junta espera
+    encontrarse el precio nuevo, no el viejo. Así que la madre no vuelve tal
+    como estaba, vuelve con lo que las partes dicen hoy —y el original se
+    guarda en `art_text` para que «Volver al original» siga funcionando—.
+    """
+    visible = [
+        item for item in children
+        if item.visible and not item.meta.get("removed_from_art")
+    ]
+    # El estilo se mide sobre el recorte original, que aún está en disco: es lo
+    # que necesita `apply` si después se reescribe la capa entera de una vez.
+    style = measure(project, parent)
+    origin = {
+        "src": parent.src,
+        "content": parent.content or parent.meta.get("editable_content") or "",
+        "box": [parent.x, parent.y, parent.width, parent.height],
+        "type": parent.type.value,
+        "auto_contrast": parent.auto_contrast,
+        "export_as_text": parent.export_as_text,
+        "text_verified": parent.text_verified,
+        "font_family": parent.font_family,
+        "mask": parent.mask,
+        "editable_content": parent.meta.get("editable_content"),
+    }
+    if style is not None:
+        origin["style"] = style.as_dict()
+
+    if not visible:
+        # No quedó nada que pintar: el elemento entero se había quitado del arte.
+        parent.meta["art_text"] = {**origin, "applied": ""}
+        parent.meta["merged_parts"] = True
+        parent.meta["removed_from_art"] = True
+        parent.visible = False
+        return _sync_plate(project, parent, erase=None)
+
+    left, top, width, height = _merge_box(parent, visible)
+    canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    warnings: list[str] = []
+    for part in sorted(visible, key=lambda item: int(item.meta.get("split_index", 0))):
+        warnings.extend(_draw_part(canvas, project, part, (left, top)))
+
+    relative = f"layers/{parent.id[:8]}_unido.png"
+    buffer = io.BytesIO()
+    canvas.save(buffer, format="PNG", optimize=True)
+    storage.write_bytes(project.project_id, relative, buffer.getvalue())
+
+    # La madre queda como una imagen con los píxeles ya compuestos: el texto
+    # nuevo está dentro, no se vuelve a dibujar.
+    parent.type = LayerType.IMAGE
+    parent.src = relative
+    parent.x, parent.y, parent.width, parent.height = left, top, width, height
+    parent.content = None
+    parent.export_as_text = False
+    parent.auto_contrast = False
+    textos = [current_text(part) for part in visible]
+    parent.meta["art_text"] = {**origin, "applied": " ".join(t for t in textos if t)}
+    parent.meta["editable_content"] = " ".join(t for t in textos if t)
+    parent.meta["merged_parts"] = True
+    parent.meta["mask_edited"] = True
+
+    # La plancha tiene que seguir sin la tinta vieja de las partes reescritas, y
+    # la máscara de la madre sola no la cubre: la nueva es la suma de todas.
+    shape = (project.canvas.height, project.canvas.width)
+    union = np.zeros(shape, np.uint8)
+    for capa in [parent, *children]:
+        capa_mask = layer_extraction.ensure_mask(project, capa, persist=False)
+        if capa_mask.shape[:2] == shape:
+            union = np.maximum(union, capa_mask)
+    if union.any():
+        layer_extraction.write_mask(project, parent, union)
+
+    erased = any(part.meta.get("erased_from_plate") for part in children)
+    if erased:
+        parent.meta["erased_from_plate"] = True
+    else:
+        parent.meta.pop("erased_from_plate", None)
+    warnings.extend(rebuild_plate(project))
+    return warnings
+
+
 def unsplit(project: Project, parent_id: str) -> list[str]:
     """Vuelve a juntar las partes en la capa original."""
     stash = dict(project.meta.get("split_layers") or {})
@@ -1103,7 +1274,19 @@ def unsplit(project: Project, parent_id: str) -> list[str]:
     project.layers.insert(position, parent)
     del stash[parent_id]
     project.meta["split_layers"] = stash
-    return [f"Las partes volvieron a ser '{parent.name}'."]
+
+    # Sin nada escrito ni quitado, juntarlas es deshacer la separación: la madre
+    # vuelve tal cual y no se aplana ni se rehace nada.
+    touched = [item for item in children if _part_touched(item)]
+    if not touched:
+        return [f"Las partes volvieron a ser '{parent.name}'."]
+
+    warnings = _merge_parts(project, parent, children)
+    return [
+        f"Las partes volvieron a ser '{parent.name}', conservando lo que se cambió "
+        f"en {len(touched)} de ellas.",
+        *warnings,
+    ]
 
 
 # ------------------------------------------------------------------ inventario

@@ -869,18 +869,13 @@ def update_layers(project_id: str, request: LayersUpdateRequest) -> Project:
                 layer.content = layer.name
             if geometry_changed and layer.meta.get("art_text"):
                 # El ancla de un copy reescrito es la caja de su TINTA, y la
-                # geometría de la capa es la del bloque, que empieza más arriba.
-                # Guardar una por la otra subía el texto un poco en cada
-                # edición posterior.
-                art = layer.meta["art_text"]
+                # geometría de la capa ya mide eso mismo: se guarda tal cual.
+                # (Antes la capa medía el bloque tipográfico y aquí había que
+                # sumar el aire de arriba; sumarlo ahora subiría el texto un
+                # poco en cada edición posterior.)
                 layer.meta["art_text"] = {
-                    **art,
-                    "box": [
-                        layer.x,
-                        layer.y + int(art.get("ink_top", 0)),
-                        layer.width,
-                        layer.height,
-                    ],
+                    **layer.meta["art_text"],
+                    "box": [layer.x, layer.y, layer.width, layer.height],
                 }
 
             if geometry_changed and not layer.meta.get("mask_edited"):
@@ -1304,7 +1299,16 @@ def art_texts(project_id: str) -> ArtTextListResponse:
                 rewritten=bool(origin),
                 removed=bool(layer.meta.get("removed_from_art")) or not layer.visible,
                 in_plate=in_plate.get(layer.id, False),
-                src=origin.get("src") or layer.src,
+                # De una capa reescrita la miniatura enseña el recorte original:
+                # es la referencia contra la que se escribe. De una que viene de
+                # juntar partes, no: ahí los píxeles actuales son el resultado
+                # que se acaba de conservar, y mostrar el original enseñaría el
+                # precio viejo justo después de cambiarlo.
+                src=(
+                    layer.src
+                    if layer.meta.get("merged_parts")
+                    else origin.get("src") or layer.src
+                ),
                 style=ArtTextStyle(**style.as_dict()) if style else None,
                 # Solo tiene sentido preguntarlo de lo que aún no se ha tocado:
                 # una capa reescrita ya es un texto, y una parte ya está suelta.
@@ -1354,7 +1358,7 @@ def split_art_text(project_id: str, layer_id: str) -> ArtTextSplitResponse:
 @router.post(
     "/{project_id}/layers/{layer_id}/unsplit",
     response_model=ArtTextSplitResponse,
-    summary="Volver a juntar las piezas en la capa original",
+    summary="Volver a juntar las piezas, conservando lo que se cambió en ellas",
 )
 def unsplit_art_text(project_id: str, layer_id: str) -> ArtTextSplitResponse:
     project = load_project_or_404(project_id)

@@ -199,8 +199,17 @@ retirar de la pieza:
 rótulo «PRECIO OFERTA», el precio, el precio anterior y el sello «EXCLUSIVO
 ONLINE». Reescribir eso de una vez no sirve para lo que se hace siempre, que es
 cambiar el precio y nada más. Cuando una capa trae varias piezas, la lista lo
-avisa y ofrece separarlas; cada una pasa a ser un elemento normal —se reescribe,
-se quita y se exporta por su cuenta— y «Volver a unir» deshace la separación.
+avisa y ofrece separarlas; cada una pasa a ser un elemento normal: se reescribe,
+se quita y se exporta por su cuenta.
+
+No hace falta volver a unirlas para terminar. Las piezas que no se tocan salen
+con sus píxeles originales, así que separar en cuatro y cambiar solo el precio
+da el arte de siempre con el precio nuevo. **«Volver a unir»** está para cuando
+se quiere el elemento otra vez entero, y **conserva lo que se cambió en las
+piezas**: aplana el estado actual —el precio nuevo, el sello retirado— en una
+sola capa, y guarda el recorte original para que «Volver al original» siga
+funcionando. Si no se tocó ninguna pieza, juntarlas es exactamente deshacer la
+separación y no se aplana nada.
 
 Lo difícil no es cortar, es saber dónde. Un hueco no vale: en el arte real esas
 cuatro piezas están a 4, 4 y 11 px unas de otras, más cerca de lo que separa la
@@ -235,20 +244,30 @@ Qué se mide sobre los píxeles del original antes de escribir, y por qué:
   entonces a más del doble de cuerpo que el original.
 - **Paso entre líneas**, en píxeles, para reproducir la interlínea exacta.
 
-Dos garantías del render:
+Garantías del render:
 
 - Un copy reescrito **no lleva scrim ni píldora**. El color es el que eligió el
   diseñador sobre ese mismo fondo; taparlo con una caja gris sería estropear un
   precio que ya se leía.
+- **Su caja mide la tinta, no el bloque tipográfico.** Un bloque mide ascendente
+  más descendente: bastante más que los trazos que se ven. Guardarlo como caja
+  de la capa era hacer que un precio reescrito ocupara 194 px donde el recorte
+  original ocupaba 132, invadiendo al rótulo de arriba y al sello de abajo sin
+  dibujar nada encima de ellos. Cajas solapadas no se ven, pero descuadran el
+  reparto del diseño anclado y el control de calidad, y el arte salía con el
+  precio montado sobre el precio anterior. Ahora la capa ocupa lo que ocupaba el
+  recorte, y el renderer sube el bloque por su `ink_top` para dejar los trazos
+  en la misma fila que los viejos.
 - Crece **solo hacia donde su alineación se lo permite** y nunca dentro del
   vecino. Si no cabe, se reduce el cuerpo y se avisa con cuánto.
 - **Quitar del arte le gana a reescribir**: escribir un texto para un elemento
   retirado no lo devuelve a la pieza. Y si se mueve a mano en *Ajustes finos*,
   la siguiente edición respeta el sitio nuevo en vez de devolverlo de un salto.
 
-En una campaña de varias piezas, cada fila lleva **«A los N KV»**: aplica el
-mismo cambio a la capa equivalente de las demás piezas del PSD. Reescribir el
-precio ocho veces a mano es justo el trabajo que esta aplicación quita.
+Cada cambio vale para el KV que se está editando. En una campaña de varias
+piezas hay que hacerlo en cada una: replicarlo por categoría y posición acertaba
+la capa equivocada en cuanto dos KV no traían las mismas capas en el mismo
+orden, y un precio en el sitio de un rótulo es peor que escribirlo dos veces.
 
 ```bash
 GET  /projects/{id}/texts                      # qué dice cada elemento y si es editable
@@ -311,6 +330,23 @@ Los KV de una campaña suelen ser piezas del mismo PSD —el cuadrado y el verti
 del mismo aviso—, y sus capas no comparten identificador. La interfaz traduce
 cada texto a la capa equivalente de cada pieza por categoría y posición dentro de
 ella, que es lo que hace que una tabla sirva para toda la campaña.
+
+### Dos modos de generar, y el producto solo entra en uno
+
+El paso 4 tiene dos pestañas y la diferencia importa:
+
+- **«Sustituir producto · fiel»** es la del catálogo. Reemplaza el producto del
+  KV por el que se subió en el paso 3, conserva el tamaño nativo, el fondo, los
+  textos y todas las posiciones, y saca un arte por producto y KV.
+- **«Ajustes finos del KV activo»** recompone las capas del KV en varias medidas
+  y **no mira el catálogo de productos**: el producto del arte se queda como
+  está. Es el modo con motor de IA, contexto y dirección visual.
+
+Marcar una capa como *Producto original · eliminar y reemplazar* en el paso 2
+dice **cuál** capa se retira; no dispara el reemplazo. Ese lo dispara el botón
+de la primera pestaña. Cargar productos y generar en la segunda era tirar la
+tanda sin que nada lo advirtiera, así que ahora esa pestaña avisa y ofrece
+cambiar de modo.
 
 ## 2.c Tres reglas para obtener buenos resultados
 
@@ -785,15 +821,38 @@ reporta en las advertencias de la pieza.
 ```env
 INPAINTING_PROVIDER=auto      # usa el externo solo si hay credenciales
 OPENAI_API_KEY=...            # GPT Image (solo reconstruye el fondo)
+OPENAI_IMAGE_MODEL=gpt-image-2.5-sunburst   # ver la tabla de abajo
 BFL_API_KEY=...               # FLUX (Black Forest Labs)
 ADOBE_CLIENT_ID=...
 ADOBE_CLIENT_SECRET=...
 ADOBE_UPLOAD_BASE_URL=https://mi-dominio/publico
 ```
 
-Si la llamada externa falla, el backend cae automáticamente a OpenCV Inpaint y lo
-reporta en las advertencias. Las claves viven solo en el backend: **nunca** se exponen al
-frontend.
+OpenAI también trae catálogo, y aparece en `GET /capabilities` → `image_models`
+junto al de Magnific (cada entrada dice de qué `provider` es):
+
+| Modelo | Para qué sirve |
+| --- | --- |
+| `gpt-image-2.5-sunburst` | El más capaz de OpenAI. Inpainting con máscara: repinta solo el hueco. Es el valor por defecto. |
+| `gpt-image-2.5-flare` | Rápido y más barato, con la misma edición por máscara. |
+| `gpt-image-2` | La generación anterior. Sigue disponible; 2.5 la mejora. |
+
+**El modelo tiene que ser del motor elegido.** Pedir OpenAI con un modelo de
+Magnific —o al revés— devuelve un error que lo dice, en vez de descartar la
+elección en silencio como antes. La interfaz ya solo ofrece los del motor
+seleccionado, así que el caso no debería llegar.
+
+**Un motor de pago pedido a mano no acaba en el local.** `INPAINTING_PROVIDER=auto`
+baja la cascada hasta OpenCV —eso es lo que significa «auto»—, pero elegir
+«Magnific» u «OpenAI» en la interfaz sin su clave en el servidor ahora falla con
+el motivo. Antes devolvía un fondo de OpenCV con el nombre del motor de pago: un
+resultado local que parecía lo que se había pedido, y solo quedaba rastro en el
+log del servidor. Que haya clave tampoco garantiza que el modelo exista, así que
+`/health` publica `openai_model_known` para verlo antes de gastar una tanda.
+
+Si la llamada externa falla a mitad, el backend cae a OpenCV Inpaint y lo dice en
+las advertencias de la pieza, con el nombre del proveedor que falló. Las claves
+viven solo en el backend: **nunca** se exponen al frontend.
 
 ---
 

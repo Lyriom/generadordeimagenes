@@ -17,6 +17,47 @@ from ..services.imaging import resize_cover
 from .base import ProviderUnavailableError
 
 
+#: Los modelos de imagen de OpenAI que sirven para esto: los dos admiten
+#: `/v1/images/edits` con máscara, que es lo único que se les pide aquí.
+CATALOG: tuple[dict[str, object], ...] = (
+    {
+        "id": "gpt-image-2.5-sunburst",
+        "label": "GPT Image 2.5 Sunburst",
+        "description": (
+            "El más capaz de OpenAI para generar y editar. Inpainting con máscara: "
+            "repinta solo el hueco de lo borrado."
+        ),
+        "provider": "openai",
+        "supports_mask": True,
+        "resolutions": [],
+    },
+    {
+        "id": "gpt-image-2.5-flare",
+        "label": "GPT Image 2.5 Flare",
+        "description": "Rápido y más barato, con la misma edición por máscara.",
+        "provider": "openai",
+        "supports_mask": True,
+        "resolutions": [],
+    },
+    {
+        "id": "gpt-image-2",
+        "label": "GPT Image 2",
+        "description": "La generación anterior. Sigue disponible; 2.5 la mejora.",
+        "provider": "openai",
+        "supports_mask": True,
+        "resolutions": [],
+    },
+)
+
+MODELS: dict[str, dict[str, object]] = {str(item["id"]): item for item in CATALOG}
+DEFAULT_MODEL = "gpt-image-2.5-sunburst"
+
+
+def model_catalog() -> list[dict[str, object]]:
+    """Catálogo legible para la API y la interfaz (sin exponer claves)."""
+    return [dict(item) for item in CATALOG]
+
+
 def _openai_mask(mask_path: str) -> bytes:
     """Convierte blanco=borrar a alfa transparente, semántica de Images Edits."""
     with Image.open(mask_path) as source:
@@ -32,15 +73,29 @@ def _openai_mask(mask_path: str) -> bytes:
 class OpenAIInpaintProvider:
     name = "openai"
 
-    def __init__(self, api_key: str | None = None) -> None:
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
         self.api_key = settings.openai_api_key if api_key is None else api_key
         self.endpoint = settings.openai_image_endpoint
-        self.model = settings.openai_image_model
+        self.model_id = (model or settings.openai_image_model or DEFAULT_MODEL).strip()
         self.quality = settings.openai_image_quality
         self.timeout = settings.request_timeout
 
+    @property
+    def model(self) -> str:
+        return self.model_id
+
     def available(self) -> bool:
         return bool(self.api_key)
+
+    def unavailable_reason(self) -> str | None:
+        """Por qué no se puede usar, en una frase que sirva en pantalla."""
+        if not self.api_key:
+            return "falta OPENAI_API_KEY en el servidor"
+        if self.model_id not in MODELS:
+            # No se rechaza: OpenAI publica modelos nuevos antes de que este
+            # catálogo los conozca, y bloquear uno válido es peor que avisar.
+            return None
+        return None
 
     def fill(
         self,
@@ -70,7 +125,7 @@ class OpenAIInpaintProvider:
             "mask": ("mask.png", _openai_mask(mask_path), "image/png"),
         }
         data = {
-            "model": self.model,
+            "model": self.model_id,
             "prompt": instruction,
             "quality": self.quality,
             "size": "auto",
