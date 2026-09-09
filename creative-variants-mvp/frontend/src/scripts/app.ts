@@ -6,7 +6,6 @@ import {
   pollTask,
   post,
   put,
-  resetSessionId,
   sessionId,
   thumbnailUrl,
   upload,
@@ -305,6 +304,10 @@ function queryAll<T extends Element>(selector: string, root: ParentNode = docume
 
 function toast(message: string, kind: "success" | "error" | "info" = "info"): void {
   const region = query<HTMLElement>("#toast-region")!;
+  if (Array.from(region.children).some((item) =>
+    item.className === "toast " + kind && item.textContent === message,
+  )) return;
+  while (region.children.length >= 3) region.firstElementChild?.remove();
   const item = document.createElement("div");
   item.className = "toast " + kind;
   item.textContent = message;
@@ -441,8 +444,7 @@ function idle(): void {
   query<HTMLElement>("#busy-overlay")!.hidden = true;
 }
 
-/* La campaña se conserva durante la navegación interna. Al recargar, mountApp
-   borra estas referencias y elimina del backend la sesión anterior. */
+/* Conserva la campaña de esta pestaña también al recargar. */
 function saveSession(): void {
   try {
     sessionStorage.setItem("creative-campaign", JSON.stringify(state.campaignIds));
@@ -685,7 +687,6 @@ async function renderCampaign(): Promise<void> {
           '<label class="field"><span>Logo</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
           '<label class="field"><span>Tipografía</span><input id="font-file" type="file" accept=".ttf,.otf"></label>',
           "</div></details>",
-          '<label class="check"><input id="import-layers" type="checkbox" checked> Importar todas las capas reales del PSD</label>',
           '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button>',
           '</div></div></section>',
         ].join(""),
@@ -984,7 +985,6 @@ function bindUpload(): void {
     if (!files.length) return;
     const logo = query<HTMLInputElement>("#logo-file")?.files?.[0];
     const font = query<HTMLInputElement>("#font-file")?.files?.[0];
-    const importLayers = query<HTMLInputElement>("#import-layers")!.checked;
     const created: Project[] = [];
 
     // La barra se reparte por bytes, no por archivos: con un PSD de 200 MB y
@@ -1002,7 +1002,7 @@ function bindUpload(): void {
         const data = new FormData();
         data.append("artwork", artwork);
         data.append("name", artwork.name.replace(/\.[^.]+$/, ""));
-        data.append("import_layers", String(importLayers));
+        data.append("import_layers", "true");
         if (logo) data.append("logo", logo);
         if (font) data.append("font", font);
 
@@ -1046,23 +1046,16 @@ function bindUpload(): void {
 }
 
 export async function mountApp(): Promise<void> {
-  // Una recarga termina la sesión anterior. El backend borra únicamente los
-  // proyectos asociados a este navegador y después se crea una identidad nueva.
   try {
-    await del("/projects/session");
+    const saved = JSON.parse(sessionStorage.getItem("creative-campaign") || "[]");
+    state.campaignIds = Array.isArray(saved)
+      ? saved.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [];
+    state.activeId = sessionStorage.getItem("creative-active");
   } catch {
-    /* si el backend no responde, su barrido periódico eliminará los archivos */
+    state.campaignIds = [];
+    state.activeId = null;
   }
-  try {
-    sessionStorage.removeItem("creative-campaign");
-    sessionStorage.removeItem("creative-active");
-  } catch {
-    /* modo privado: el estado ya vive solo en memoria */
-  }
-  resetSessionId();
-  state.campaignIds = [];
-  state.campaign = [];
-  state.activeId = null;
 
   queryAll<HTMLButtonElement>(".nav-item").forEach((button) => {
     button.addEventListener("click", () => navigate(button.dataset.view as ViewName));
@@ -1073,7 +1066,7 @@ export async function mountApp(): Promise<void> {
 
   try {
     await refreshAll();
-    await navigate("campaign");
+    await navigate(state.campaign.length ? "layers" : "campaign");
   } catch (error) {
     state.health = null;
     renderChrome();

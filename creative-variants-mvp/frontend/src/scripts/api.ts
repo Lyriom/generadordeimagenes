@@ -7,8 +7,8 @@ const API_ROOT = "/api";
  * acumularlo llena el disco. El backend etiqueta cada proyecto con esta sesión
  * y barre por antigüedad; la interfaz solo lista lo de la sesión en curso.
  *
- * Va en `sessionStorage` únicamente para poder localizar y borrar el trabajo de
- * esta página durante el siguiente arranque. Cada recarga crea una sesión nueva. */
+ * sessionStorage conserva la identidad al recargar esta pestaña. */
+let memorySessionId: string | undefined;
 const SESSION_KEY = "creative-session";
 
 function newSessionId(): string {
@@ -25,7 +25,7 @@ export function sessionId(): string {
     return created;
   } catch {
     // Modo privado sin almacenamiento: una sesión por carga de página.
-    return newSessionId();
+    return memorySessionId ||= newSessionId();
   }
 }
 
@@ -73,8 +73,9 @@ function gatewayMessage(status: number): string {
   }
   if (status === 502 || status === 503 || status === 504) {
     return (
-      "El servidor no contestó a tiempo. Si era un PSD grande puede seguir " +
-      "trabajando: espere un momento y recargue antes de repetir la operación."
+      "El servidor no está disponible o no contestó a tiempo. Espera un momento " +
+      "antes de volver a intentarlo. Si estabas subiendo un PSD grande, puede " +
+      "seguir procesándose; actualiza para comprobarlo antes de subirlo otra vez."
     );
   }
   return `El servidor respondió ${status} y no dio detalle.`;
