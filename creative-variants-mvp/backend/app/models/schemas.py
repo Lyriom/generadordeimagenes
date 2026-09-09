@@ -562,6 +562,24 @@ class DeleteResponse(BaseModel):
     deleted: bool
 
 
+class ProjectsDeleteRequest(BaseModel):
+    """Quitar varios KV de una campaña de una vez.
+
+    Un PSD de agencia entra como veinte piezas y casi nunca se quieren las
+    veinte. Quitarlas una a una eran veinte peticiones y veinte confirmaciones.
+    """
+
+    project_ids: list[str] = Field(min_length=1, max_length=200)
+
+
+class ProjectsDeleteResponse(BaseModel):
+    removed: list[str] = Field(default_factory=list)
+    #: Los que no se pudieron borrar (ya no existían), para poder decirlo.
+    missing: list[str] = Field(default_factory=list)
+    removed_count: int = 0
+    disk_usage_mb: float = 0.0
+
+
 class CapabilitiesResponse(BaseModel):
     segmentation: dict[str, Any]
     ocr: dict[str, Any]

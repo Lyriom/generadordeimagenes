@@ -212,6 +212,10 @@ interface State {
   generationMode: "catalog" | "compose";
   /** Motor del fondo elegido. En el estado porque la lista de modelos lo sigue. */
   generationEngine: string;
+  /** KV marcados para quitar en bloque. */
+  kvPicks: Set<string>;
+  /** Último KV marcado, para el rango con shift. */
+  lastKvPick: string | null;
   /** Capas marcadas para borrar en bloque, por proyecto. */
   layerPicks: Record<string, Set<string>>;
   /** Última capa marcada, para el rango con shift. */
@@ -254,6 +258,8 @@ const state: State = {
   groups: [],
   generationMode: "catalog",
   generationEngine: "auto",
+  kvPicks: new Set(),
+  lastKvPick: null,
   layerPicks: {},
   lastLayerPick: null,
   selectedVariants: new Set(),
@@ -783,6 +789,116 @@ function bindSavedProjects(): void {
       idle();
     }
   });
+}
+
+/** Marcar KV y quitarlos en bloque.
+ *
+ *  Un PSD de agencia entra como veinte piezas —portadas, versiones, tamaños— y
+ *  casi nunca se quieren las veinte. Quitarlas con el aspa era una a una, con su
+ *  confirmación cada vez: veinte diálogos para empezar a trabajar. */
+function bindKvPicks(): void {
+  const repintar = () => void renderLayers();
+  // El rango se lee de la pantalla, que es el orden en que están las fichas.
+  const orden = queryAll<HTMLInputElement>(".kv-pick-box")
+    .map((box) => box.dataset.kvPick || "")
+    .filter(Boolean);
+
+  queryAll<HTMLInputElement>(".kv-pick-box").forEach((box) => {
+    box.addEventListener("click", (event) => {
+      const id = box.dataset.kvPick!;
+      if ((event as MouseEvent).shiftKey && state.lastKvPick) {
+        const desde = orden.indexOf(state.lastKvPick);
+        const hasta = orden.indexOf(id);
+        if (desde >= 0 && hasta >= 0) {
+          const [a, b] = desde < hasta ? [desde, hasta] : [hasta, desde];
+          for (const entre of orden.slice(a, b + 1)) {
+            if (box.checked) state.kvPicks.add(entre);
+            else state.kvPicks.delete(entre);
+          }
+        }
+      } else if (box.checked) {
+        state.kvPicks.add(id);
+      } else {
+        state.kvPicks.delete(id);
+      }
+      state.lastKvPick = id;
+      repintar();
+    });
+  });
+
+  query("#pick-all-kv")?.addEventListener("click", () => {
+    for (const item of state.campaign) state.kvPicks.add(item.project_id);
+    repintar();
+  });
+  query("#clear-kv-picks")?.addEventListener("click", () => {
+    state.kvPicks.clear();
+    state.lastKvPick = null;
+    repintar();
+  });
+  // Invertir es el gesto útil de verdad: de veinte piezas se quiere una, así
+  // que se marca esa y se invierte, en vez de marcar diecinueve.
+  query("#invert-kv-picks")?.addEventListener("click", () => {
+    for (const item of state.campaign) {
+      if (state.kvPicks.has(item.project_id)) state.kvPicks.delete(item.project_id);
+      else state.kvPicks.add(item.project_id);
+    }
+    state.lastKvPick = null;
+    repintar();
+  });
+  query("#drop-kv-picks")?.addEventListener("click", () => void dropKvPicks());
+}
+
+async function dropKvPicks(): Promise<void> {
+  const marcados = state.campaign.filter((item) => state.kvPicks.has(item.project_id));
+  if (!marcados.length) return;
+  const quedan = state.campaign.length - marcados.length;
+  const nombres = marcados.map((item) => item.name);
+  const confirmado = await confirmAction({
+    title: "¿Quitar " + String(marcados.length) + " KV de la campaña?",
+    lines: [
+      nombres.slice(0, 5).join(", ") +
+        (nombres.length > 5 ? " y " + String(nombres.length - 5) + " más." : "."),
+      quedan
+        ? "Quedan " + String(quedan) + " en la campaña."
+        : "No queda ninguno: vuelves a la pantalla de carga.",
+      "Se borran con sus archivos y no se puede deshacer.",
+    ],
+    confirm: "Sí, quitar los " + String(marcados.length),
+  });
+  if (!confirmado) return;
+
+  const ids = marcados.map((item) => item.project_id);
+  busy("Quitando KV", String(ids.length) + " piezas de la campaña", 30);
+  try {
+    // Una sola petición: veinte DELETE seguidos tardaban y dejaban la campaña a
+    // medias si una fallaba.
+    const resultado = await post<any>("/projects/delete", { project_ids: ids });
+    const fuera = new Set<string>([...(resultado.removed || []), ...(resultado.missing || [])]);
+    // El siguiente activo: el primero que sobreviva a partir de donde estabas.
+    const posicion = state.campaignIds.findIndex((id) => fuera.has(id));
+    state.campaignIds = state.campaignIds.filter((id) => !fuera.has(id));
+    state.campaign = state.campaign.filter((item) => !fuera.has(item.project_id));
+    for (const id of fuera) delete state.texts[id];
+    state.kvPicks.clear();
+    state.lastKvPick = null;
+    if (!state.activeId || fuera.has(state.activeId)) {
+      state.activeId =
+        state.campaignIds[Math.min(Math.max(0, posicion), state.campaignIds.length - 1)] || null;
+      state.selectedLayerId = null;
+    }
+    saveSession();
+    await refreshAll();
+    toast(String(resultado.removed_count || 0) + " KV quitados de la campaña.", "success");
+    if (!state.campaignIds.length) {
+      await navigate("campaign");
+      return;
+    }
+    await renderLayers();
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
 }
 
 async function dropKv(projectId: string): Promise<void> {
@@ -1380,8 +1496,12 @@ function kvSwitcher(active: Project): string {
     // El aspa va fuera del botón y no dentro: un <button> no puede contener
     // otro, y anidarlos hace que el clic de quitar abra el KV además de
     // borrarlo. Por eso la ficha es un envoltorio con dos botones hermanos.
+    const marcado = state.kvPicks.has(project.project_id);
     return [
-      '<div class="kv-chip-wrap">',
+      '<div class="kv-chip-wrap', marcado ? " is-picked" : "", '">',
+      '<label class="kv-pick" title="Marcar para quitar en bloque">',
+      '<input type="checkbox" class="kv-pick-box" data-kv-pick="', attr(project.project_id), '"',
+      checked(marcado), "></label>",
       '<button class="kv-chip', isCurrent ? " is-current" : "", done ? " is-done" : "",
       '" data-kv="', attr(project.project_id), '" title="', attr(project.name), '">',
       '<img src="', attr(thumbnailUrl(project.project_id, 120)), '" alt="" loading="lazy" decoding="async">',
@@ -1397,11 +1517,29 @@ function kvSwitcher(active: Project): string {
     ].join("");
   }).join("");
   const done = state.campaign.filter(layersConfirmed).length;
+  const marcados = state.campaign.filter((item) => state.kvPicks.has(item.project_id)).length;
   return [
     '<section class="card" style="margin-bottom:18px"><div class="card-head"><div><h2>KV que estás revisando</h2>',
-    '<p>Cada uno se confirma por separado. Al guardar se salta al siguiente que falte. Con la × quitas el que no vayas a usar.</p></div>',
+    '<p>Cada uno se confirma por separado. Al guardar se salta al siguiente que falte. ',
+    "Marca los que no vayas a usar y quítalos de una vez; con <strong>Mayús</strong> se marca todo el tramo.</p></div>",
     '<span class="badge', done === state.campaign.length ? " green" : "", '">', String(done), " DE ",
     String(state.campaign.length), "</span></div>",
+    marcados
+      ? [
+          '<div class="kv-pickbar">',
+          "<span><strong>", String(marcados), "</strong> de ", String(state.campaign.length),
+          " marcados</span>",
+          '<span class="pickbar-actions">',
+          '<button class="ghost-button small" id="invert-kv-picks">Invertir</button>',
+          '<button class="ghost-button small" id="clear-kv-picks">Ninguno</button>',
+          '<button class="danger-button small" id="drop-kv-picks">Quitar ', String(marcados),
+          "</button></span></div>",
+        ].join("")
+      : [
+          '<div class="kv-pickbar is-idle">',
+          '<button class="ghost-button small" id="pick-all-kv">Marcar todos</button>',
+          "</div>",
+        ].join(""),
     '<div class="kv-switch">', chips, "</div></section>",
   ].join("");
 }
@@ -2097,6 +2235,7 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
   queryAll<HTMLButtonElement>(".kv-drop").forEach((button) => {
     button.addEventListener("click", () => dropKv(button.dataset.drop!));
   });
+  bindKvPicks();
 
   query("#confirm-roles")?.addEventListener("click", async () => {
     const selections = readRoleSelections();

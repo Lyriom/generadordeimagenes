@@ -177,3 +177,47 @@ def test_purge_informa_del_disco_ocupado(client: TestClient, artwork_png: bytes)
     assert body["remaining"] == 1
     # El proyecto ocupa algo en disco, así que la medida no puede ser negativa.
     assert body["disk_usage_mb"] >= 0.0
+
+
+# ------------------------------------------------- quitar varios KV de una vez
+def test_varios_kv_se_quitan_en_una_peticion(client: TestClient, artwork_png: bytes):
+    """Un pliego entra como veinte piezas y casi nunca se quieren las veinte.
+
+    Con el aspa era una a una, con su confirmación cada vez. La interfaz manda
+    la lista entera y aquí se fija el contrato del que depende.
+    """
+    _wipe(client)
+    piezas = [_create(client, artwork_png, f"Pieza {i}") for i in range(5)]
+    fuera = [pieza["project_id"] for pieza in piezas[:3]]
+    dentro = [pieza["project_id"] for pieza in piezas[3:]]
+
+    response = client.post("/projects/delete", json={"project_ids": fuera})
+    assert response.status_code == 200, response.text
+    cuerpo = response.json()
+    assert cuerpo["removed_count"] == 3
+    assert sorted(cuerpo["removed"]) == sorted(fuera)
+    assert cuerpo["missing"] == []
+
+    quedan = {p["project_id"] for p in client.get("/projects").json()}
+    assert quedan == set(dentro)
+
+
+def test_un_kv_que_ya_no_existe_no_tumba_la_tanda(client: TestClient, artwork_png: bytes):
+    """La pestaña puede llevar abierta más que el KV: la retención lo borró ya."""
+    _wipe(client)
+    vivo = _create(client, artwork_png, "Vivo")["project_id"]
+    fantasma = "e0403a00-ad85-4227-8586-d0bfb598da83"
+
+    response = client.post("/projects/delete", json={"project_ids": [vivo, fantasma]})
+    assert response.status_code == 200, response.text
+    cuerpo = response.json()
+    assert cuerpo["removed"] == [vivo]
+    assert cuerpo["missing"] == [fantasma]
+
+
+def test_el_mismo_kv_repetido_se_cuenta_una_vez(client: TestClient, artwork_png: bytes):
+    _wipe(client)
+    uno = _create(client, artwork_png, "Uno")["project_id"]
+    response = client.post("/projects/delete", json={"project_ids": [uno, uno]})
+    assert response.status_code == 200, response.text
+    assert response.json()["removed_count"] == 1

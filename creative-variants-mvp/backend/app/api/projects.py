@@ -39,6 +39,8 @@ from ..models import (
     AutoResponse,
     Canvas,
     DeleteResponse,
+    ProjectsDeleteRequest,
+    ProjectsDeleteResponse,
     DetectProductRequest,
     DetectProductResponse,
     ExtractRequest,
@@ -786,6 +788,36 @@ def delete_current_session_projects():
         "removed_count": len(removed),
         "disk_usage_mb": storage.disk_usage_mb(),
     }
+
+
+@router.post(
+    "/delete",
+    response_model=ProjectsDeleteResponse,
+    summary="Quitar varios KV de la campaña de una vez",
+)
+def delete_projects(request: ProjectsDeleteRequest) -> ProjectsDeleteResponse:
+    """Borra los KV indicados.
+
+    Se declara **antes** de `/{project_id}`: si fuera después, FastAPI casaría
+    «delete» con el parámetro de ruta y esto sería la búsqueda de un proyecto
+    llamado «delete». Y es POST y no DELETE porque el cuerpo lleva la lista, que
+    en un DELETE no todos los proxys reenvían.
+    """
+    removed: list[str] = []
+    missing: list[str] = []
+    # Sin duplicados y conservando el orden: la interfaz manda lo que marcó el
+    # usuario, y repetir un id contaría dos veces en el recuento.
+    for project_id in dict.fromkeys(request.project_ids):
+        if storage.delete_project(project_id):
+            removed.append(project_id)
+        else:
+            missing.append(project_id)
+    return ProjectsDeleteResponse(
+        removed=removed,
+        missing=missing,
+        removed_count=len(removed),
+        disk_usage_mb=storage.disk_usage_mb(),
+    )
 
 
 @router.get("/{project_id}", response_model=Project, summary="Obtener un proyecto")

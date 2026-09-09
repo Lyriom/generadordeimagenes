@@ -331,7 +331,26 @@ del mismo aviso—, y sus capas no comparten identificador. La interfaz traduce
 cada texto a la capa equivalente de cada pieza por categoría y posición dentro de
 ella, que es lo que hace que una tabla sirva para toda la campaña.
 
-### Un PSD con varias artes: quitar las que no toca, de una vez
+### Quitar KV de la campaña en bloque
+
+Un PSD de agencia entra como veinte piezas —portadas, versiones, tamaños— y casi
+nunca se quieren las veinte. En **paso 2** cada ficha de la tira «KV que estás
+revisando» lleva una casilla:
+
+- Marcar varias y **«Quitar N»** las borra en **una sola petición**
+  (`POST /projects/delete`), con una única confirmación que nombra lo que se va.
+- **Mayús** marca todo el tramo entre la última ficha marcada y la que se pulsa.
+- **«Invertir»** es el gesto útil de verdad: de veinte piezas se quiere una, así
+  que se marca esa y se invierte, en vez de marcar diecinueve.
+
+El aspa de cada ficha sigue ahí para quitar una sola. Si se quitan todas se
+vuelve a la pantalla de carga; si no, el KV activo pasa al primero que sobreviva
+a partir de donde estabas, no al primero de la lista.
+
+Un id que ya no existe —la retención borra los KV sin tocar en 8 h— no tumba la
+tanda: sale en `missing` y las demás se quitan igual.
+
+### Un PSD con varias artes: quitar las capas que no toca, de una vez
 
 Un pliego de agencia mete varias piezas en el mismo archivo. Cuando trae
 **artboards** de Photoshop, el importador ya separa cada pieza en su propio KV y

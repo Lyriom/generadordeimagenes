@@ -40,6 +40,8 @@ from .schemas import (  # noqa: F401
     AutoStep,
     CapabilitiesResponse,
     DeleteResponse,
+    ProjectsDeleteRequest,
+    ProjectsDeleteResponse,
     DetectProductRequest,
     DetectProductResponse,
     ExtractRequest,
