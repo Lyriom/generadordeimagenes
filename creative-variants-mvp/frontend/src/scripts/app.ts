@@ -1208,7 +1208,27 @@ export async function mountApp(): Promise<void> {
 // Las demás vistas se definen abajo para mantener un único bundle sin imports
 // dinámicos. Así una pestaña abierta sigue funcionando durante un despliegue.
 
-/** Capas marcadas de este KV. Se guarda por proyecto: la selección de un KV no
+/** Los píxeles con los que **llegó** el KV, no los del producto que se le puso.
+ *
+ *  Al sustituir el producto, la capa se queda con el PNG del nuevo y su caja
+ *  recalculada. Eso es correcto para componer, pero en «Revisar capas» se está
+ *  mirando el KV: ahí salía el exprimidor que se había subido en el sitio del
+ *  televisor del arte, y parecía que el KV había cambiado. El original se
+ *  guarda al sustituir, así que aquí se enseña ese. */
+function originalSrc(layer: Layer): string | null {
+  const meta = (layer.meta || {}) as Record<string, unknown>;
+  const original = meta.original_src;
+  if (typeof original === "string" && original) return original;
+  return layer.src || null;
+}
+
+/** ¿A esta capa ya se le puso un producto encima? */
+function wasReplaced(layer: Layer): boolean {
+  const meta = (layer.meta || {}) as Record<string, unknown>;
+  return typeof meta.original_src === "string" && Boolean(meta.original_src);
+}
+
+/** Capas marcadas de este KV./** Capas marcadas de este KV. Se guarda por proyecto: la selección de un KV no
  *  tiene sentido en otro, y sus ids ni existen. */
 function layerPicks(projectId: string): Set<string> {
   if (!state.layerPicks[projectId]) state.layerPicks[projectId] = new Set();
@@ -1228,8 +1248,9 @@ function layerGroup(layer: Layer): string {
 }
 
 function layerItem(project: Project, layer: Layer): string {
-  const preview = layer.src
-    ? '<img class="layer-mini" src="' + attr(fileUrl(project.project_id, layer.src)) + '" alt="">'
+  const pixeles = originalSrc(layer);
+  const preview = pixeles
+    ? '<img class="layer-mini" src="' + attr(fileUrl(project.project_id, pixeles)) + '" alt="">'
     : '<span class="layer-mini"></span>';
   const marcada = layerPicks(project.project_id).has(layer.id);
   return [
@@ -1546,8 +1567,9 @@ function kvSwitcher(active: Project): string {
 
 /** Miniatura de la capa. Sin verla no se puede decidir su función. */
 function roleThumb(project: Project, layer: Layer): string {
-  if (layer.src) {
-    return '<img class="role-thumb" src="' + attr(fileUrl(project.project_id, layer.src)) +
+  const pixeles = originalSrc(layer);
+  if (pixeles) {
+    return '<img class="role-thumb" src="' + attr(fileUrl(project.project_id, pixeles)) +
       '" alt="' + attr(layer.name) + '" loading="lazy" decoding="async">';
   }
   // Las capas de texto del PSD no siempre traen PNG: se muestra su contenido.
@@ -1564,6 +1586,7 @@ function reviewRoles(project: Project, layers: Layer[]): string {
       '<div class="role-copy"><strong>', esc(layer.name), "</strong><small>",
       esc(CATEGORY_LABELS[layer.category] || layer.category), " · ",
       String(layer.width), "×", String(layer.height), layer.visible ? "" : " · oculta en el PSD",
+      wasReplaced(layer) ? " · ya sustituido en una tanda" : "",
       "</small></div>",
       '<select class="role-select" data-id="', attr(layer.id), '" aria-label="Función de ',
       attr(layer.name), '">', optionList(ROLE_LABELS, current), "</select></div>",
@@ -2113,14 +2136,12 @@ function bindLayerActions(project: Project, layer: Layer | null, layers: Layer[]
       if (nota) {
         nota.textContent = opciones
           ? "Modelos de " + engineLabel(engine) + "."
-          : engine === "opencv"
-            ? "El motor local no usa modelos de IA."
-            : "Lo elige el servidor según las claves que tenga.";
+          : "Lo elige el servidor según las claves que tenga.";
       }
     };
     content().insertAdjacentHTML("afterbegin", [
       '<section class="card elevated" id="background-panel" style="margin-bottom:18px"><div class="card-head"><div><h2>Reconstruir fondo</h2><p>Elige el motor sin modificar las capas</p></div><button class="icon-button" id="close-background">×</button></div>',
-      '<div class="form-grid"><label class="field"><span>Motor</span><select id="background-engine"><option value="auto">Automático</option><option value="opencv">Local · OpenCV</option>',
+      '<div class="form-grid"><label class="field"><span>Motor</span><select id="background-engine"><option value="auto">Automático</option>',
       engineTakesModel("magnific") ? '<option value="magnific">Magnific</option>' : "",
       engineTakesModel("openai") ? '<option value="openai">OpenAI</option>' : "",
       '</select></label>',
@@ -3361,10 +3382,9 @@ function generationOptionsHtml(mode: "catalog" | "compose"): string {
     '<section class="card elevated"><div class="card-head"><div><h2>Modelo y contexto</h2><p>Con qué motor se rehace el fondo y qué le pides</p></div></div>',
     '<label class="choice" style="margin-bottom:14px"><input id="regenerate-background" type="checkbox"> Rehacer el fondo con IA</label>',
     '<div class="form-grid"><label class="field"><span>Motor del fondo</span><select id="generation-provider">',
-    engineOption("opencv", "Local · gratis", engine),
     engineOption("magnific", "Magnific · eliges el modelo (con costo)", engine),
     engineOption("openai", "OpenAI · IA de imagen (con costo)", engine),
-    engineOption("auto", "Automático", engine),
+    engineOption("auto", "Automático · el que tenga clave", engine),
     '</select></label>',
     '<label class="field"><span>Modelo de IA</span><select id="generation-model"',
     models ? "" : " disabled",
@@ -3372,9 +3392,7 @@ function generationOptionsHtml(mode: "catalog" | "compose"): string {
     '</select><small>',
     models
       ? "Modelos de " + esc(engineLabel(engine)) + ". Cambia el motor para ver otros."
-      : engine === "opencv"
-        ? "El motor local no usa modelos de IA."
-        : "Lo elige el servidor según las claves que tenga.",
+      : "Lo elige el servidor según las claves que tenga.",
     "</small></label></div>",
     '<label class="field" style="margin-top:14px"><span>Contexto · qué quieres del arte</span>',
     '<textarea id="generation-instruction" placeholder="Producto grande, titular arriba, composición minimal"></textarea>',

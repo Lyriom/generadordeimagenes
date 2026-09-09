@@ -62,6 +62,46 @@ def test_replace_product_fits_box_without_deforming(client: TestClient, project:
     assert layer["meta"]["mask_edited"] is True
 
 
+def test_the_kv_original_product_stays_available_after_replacing(
+    client: TestClient, project: dict
+):
+    """El producto con el que llegó el KV se sigue pudiendo ver y servir.
+
+    En «Revisar capas» se está mirando el KV, no la tanda: ahí salía el producto
+    que se había subido en el sitio del original, y parecía que el arte había
+    cambiado. La interfaz enseña `original_src`, así que ese archivo tiene que
+    seguir en disco y servirse; guardar solo su nombre no basta.
+    """
+    project_id = project["project_id"]
+    layers = create_manual_layers(client, project_id)
+    original = layers["product"]
+
+    respuesta = client.post(
+        f"/projects/{project_id}/layers/replace",
+        data={"layer_id": original["id"]},
+        files={"image": ("subido.png", cutout(800, 400), "image/png")},
+    )
+    assert respuesta.status_code == 200, respuesta.text
+    capa = respuesta.json()["layer"]
+    guardado = capa["meta"]["original_src"]
+    assert guardado == original["src"]
+    assert capa["src"] != guardado
+
+    # Y se puede pedir: es la miniatura del paso 2.
+    servido = client.get(f"/projects/{project_id}/files/{guardado}")
+    assert servido.status_code == 200, servido.text
+    assert servido.content
+
+    # Sustituir otra vez no lo pisa: el original sigue siendo el del KV.
+    otra = client.post(
+        f"/projects/{project_id}/layers/replace",
+        data={"layer_id": original["id"]},
+        files={"image": ("otro.png", cutout(400, 400), "image/png")},
+    )
+    assert otra.status_code == 200, otra.text
+    assert otra.json()["layer"]["meta"]["original_src"] == original["src"]
+
+
 def test_replace_crops_empty_margin_so_product_is_not_tiny(
     client: TestClient, project: dict
 ):

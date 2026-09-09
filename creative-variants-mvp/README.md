@@ -331,6 +331,19 @@ del mismo aviso—, y sus capas no comparten identificador. La interfaz traduce
 cada texto a la capa equivalente de cada pieza por categoría y posición dentro de
 ella, que es lo que hace que una tabla sirva para toda la campaña.
 
+### En «Revisar capas» se ve el KV, no la tanda
+
+Al sustituir el producto, la capa se queda con el PNG del nuevo y su caja
+recalculada: es lo correcto para componer. Pero al volver al paso 2 esa
+miniatura salía en el sitio del producto del arte, y parecía que el KV había
+cambiado —un exprimidor donde estaba el televisor—.
+
+El original se guarda al sustituir (`meta.original_src`) y **es el que se
+enseña** en «Función de cada capa» y en el panel «Capas», con la nota «ya
+sustituido en una tanda» para que se sepa que la capa lleva otro PNG encima. El
+archivo original no se borra ni se pisa al sustituir otra vez, así que la
+miniatura sigue siendo la del KV pase lo que pase.
+
 ### Quitar KV de la campaña en bloque
 
 Un PSD de agencia entra como veinte piezas —portadas, versiones, tamaños— y casi
@@ -883,6 +896,12 @@ junto al de Magnific (cada entrada dice de qué `provider` es):
 Magnific —o al revés— devuelve un error que lo dice, en vez de descartar la
 elección en silencio como antes. La interfaz ya solo ofrece los del motor
 seleccionado, así que el caso no debería llegar.
+
+**El motor local ya no se ofrece en la interfaz.** OpenCV sigue existiendo como
+red de seguridad —`auto` baja la cascada hasta él, y la sustitución fiel no
+rehace el fondo— pero elegirlo a mano para rehacer un fondo daba un resultado
+borroso que nadie quiere en producción. Los selectores solo ofrecen los motores
+de IA y «Automático · el que tenga clave».
 
 **Un motor de pago pedido a mano no acaba en el local.** `INPAINTING_PROVIDER=auto`
 baja la cascada hasta OpenCV —eso es lo que significa «auto»—, pero elegir
