@@ -242,8 +242,52 @@ tilde de una Á de su letra. Lo que las distingue es la forma de la mancha: una
 tilde ocupa poco ancho, o lo reparte en marcas sueltas con aire en medio; un
 rótulo, por corto que sea, ocupa una parte seria del ancho del bloque y lo
 llena. Entre dos piezas de verdad basta con que cambie una de tres cosas —el
-color, el cuerpo o un hueco grande— para separarlas; dos líneas de un mismo
-párrafo no cambian ninguna y siguen juntas.
+color, el cuerpo o un hueco grande— para separarlas.
+
+**Y lo que sobrevive a las tres se mira una vez más.** Una ficha de producto
+—nombre, código, tres viñetas— va toda al mismo color, casi al mismo cuerpo y
+con la interlínea apretada, así que salía en una pieza sola y cambiar una
+viñeta obligaba a reescribir las cinco. Lo que la distingue de un párrafo es el
+largo: en prosa que da la vuelta, lo que corta cada línea es el ancho de la
+caja, así que todas menos la última llegan casi al mismo borde. En una lista, el
+largo lo pone el contenido y va y viene. Un párrafo sigue entero —un legal de
+dos renglones se reescribe de una vez, como siempre—; una ficha se separa
+**renglón por renglón**.
+
+**El filete que soldaba los renglones.** La barra de color de la marca, a la
+izquierda de un bloque, toca las filas de sus tres renglones a la vez. Para la
+proyección de tinta eso es **una** línea de 112 px, y de ahí salía todo mal: el
+bloque contaba como una pieza, reescribirlo reemplazaba los tres renglones por
+uno, y el corte de centavos —que solo mira dentro de una línea— disparaba
+contra la cola de la primera y arrancaba la «L» de «476L» a una pieza suya.
+
+El filete no se reconoce por su forma: una «1» de titular también es alta y
+estrecha. Se reconoce por lo que hace. Se aparta el candidato, se vuelve a
+proyectar su banda y solo cuenta como filete si la banda **se abre en dos
+renglones o más**. Hecho eso, el filete es una pieza suya y el texto queda
+libre.
+
+**El bloque de precio, que es una plancha con texto encima.** Llega del PSD como
+una mancha maciza: la caja crema, el sello morado, el marco cian y el texto, sin
+un solo píxel de papel entre medias. No había nada que separar, así que contaba
+como una pieza —y reescribirla borraba la caja entera y escribía el precio nuevo
+**del color de la caja**, invisible sobre el arte.
+
+Una plancha se distingue del texto por cómo se reparte su color: la plancha es
+**una** mancha grande y compacta; una línea de texto son muchas pequeñas. Con
+eso, el bloque se separa en su fondo —caja, sello y marco, en una pieza que no
+se puede reescribir porque no es texto— y sus renglones: «12 CUOTAS», los
+enteros, los centavos en volado y «MENSUALES». Cambiar «$43» por «$39» deja
+intacto todo lo demás, que es justo lo que se hace todos los días.
+
+Dos detalles que costaron su arreglo:
+
+- El fondo se recorta **sin su texto**, rellenando el hueco con el color que lo
+  rodea. Su recorte es un rectángulo del arte, así que se llevaba el precio
+  viejo dentro y este asomaba por debajo del nuevo.
+- El color de la tinta se mide contra la plancha, no contra el color más
+  repetido del recorte. En un recorte ajustado de un precio en negrita el color
+  más repetido **es el número**, así que la máscara salía del revés.
 
 Qué se mide sobre los píxeles del original antes de escribir, y por qué:
 

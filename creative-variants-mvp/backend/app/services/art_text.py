@@ -297,6 +297,10 @@ def _alignment(ink: np.ndarray, runs: list[tuple[int, int]], center_ratio: float
 
 def measure(project: Project, layer: Layer) -> TextStyle | None:
     """Estilo del texto original. `None` si el elemento no tiene tinta legible."""
+    # El fondo de un bloque separado es la caja, el sello y el marco sin su
+    # texto: un dibujo. Medirlo daba un renglón del alto del bloque entero.
+    if layer.meta.get("art_piece") == PIECE_PLATE:
+        return None
     path = _layer_png(project, layer)
     if path is None:
         return None
@@ -305,10 +309,16 @@ def measure(project: Project, layer: Layer) -> TextStyle | None:
         rgb = np.asarray(art.convert("RGB"), dtype=np.uint8)
         alpha = np.asarray(art.getchannel("A"), dtype=np.uint8)
 
-    ink = _ink_mask(rgb, alpha)
+    ink, _ = _ink_and_plates(rgb, alpha)
     if not ink.any():
         return None
 
+    # Sin el filete: una barra de color pegada al texto soldaba sus renglones
+    # y el alto de tinta salía el de todos juntos, así que el texto nuevo se
+    # escribía a ese cuerpo.
+    ink, _ = _split_ink(_denoise(ink))
+    if not ink.any():
+        return None
     runs = _line_runs(_ink_rows(ink))
     if not runs:
         return None
@@ -907,8 +917,9 @@ def _register_plate(project: Project) -> None:
 #: nada: para cambiar el precio hay que poder tocar el precio y nada más.
 #:
 #: Se separa por lo que separa un elemento de otro a ojo: un hueco claro, un
-#: cambio de cuerpo o un cambio de color. Dos líneas de un mismo párrafo no
-#: cumplen ninguna de las tres y siguen juntas.
+#: cambio de cuerpo o un cambio de color. Y lo que sobrevive a los tres se mira
+#: una vez más: solo sigue junto si es un párrafo —prosa que da la vuelta—, no
+#: una lista de datos con el mismo cuerpo.
 #: Un hueco no distingue una pieza de otra: en el arte real el rótulo, el
 #: precio y el precio anterior van a 4-14 px unos de otros, más pegados que la
 #: tilde de una Á. Lo que sí las distingue es la forma de la mancha de tinta.
@@ -922,8 +933,57 @@ BLOCK_COVERAGE = 0.45
 #: Y entre dos piezas de verdad, lo que las separa: color, cuerpo o un hueco
 #: grande. Basta con una de las tres.
 BLOCK_GAP = 0.9
-BLOCK_SIZE_RATIO = 1.7
+BLOCK_SIZE_RATIO = 1.3
 BLOCK_COLOR_DISTANCE = 70.0
+
+#: Un filete —la barra de color de la marca, un subrayado— es tinta que no es
+#: letra, y cruza las filas de varios renglones a la vez. La proyección de tinta
+#: los ve entonces como una sola línea: el nombre del producto, su código y su
+#: primera viñeta salían como **una** pieza de 112 px de alto, y reescribirla
+#: los reemplazaba por un renglón único. También hacía saltar el corte de
+#: centavos, que arrancaba la «L» de «476L».
+#:
+#: No se reconoce por su forma sola —una «1» grande también es alta y estrecha—
+#: sino por lo que hace: se aparta y se vuelve a proyectar. Si su banda se abre
+#: en dos renglones o más, era un filete; si no, era una letra.
+RULE_HEIGHT = 2.0
+RULE_ASPECT = 0.6
+COMPONENT_MIN_AREA = 4
+
+#: Dos renglones siguen juntos solo si son un párrafo de verdad: prosa que da la
+#: vuelta al llegar al borde. Ahí todas las líneas menos la última llegan casi al
+#: mismo sitio —lo que las corta es el ancho de la caja— y todas tienen el mismo
+#: cuerpo. En una lista de datos el largo lo pone el contenido y va y viene, así
+#: que cada renglón se edita por separado.
+PARAGRAPH_FILL = 0.85
+PARAGRAPH_HEIGHT = 1.15
+
+#: Un bloque de precio llega del PSD como una mancha maciza: la caja crema, el
+#: sello morado, el marco cian y el texto encima, todo junto. Ahí no hay papel
+#: entre las letras —el papel es parte del dibujo— así que el bloque entero
+#: contaba como una sola pieza, y reescribirlo borraba la caja y escribía el
+#: precio nuevo del color de la caja: invisible.
+#:
+#: Lo que separa una plancha de una línea de texto es cómo se reparte su color:
+#: la plancha es **una** mancha grande; el texto, muchas pequeñas. Solo se mira
+#: en capas macizas, donde la tinta llena casi toda su propia caja; un texto
+#: suelto sobre transparencia no pasa por aquí.
+SOLID_FILL = 0.75
+PLATE_SHARE = 0.05
+PLATE_WHOLENESS = 0.6
+PLATE_BUCKET = 32
+#: Una plancha vale como pieza si es de verdad una: el hueco de un «9» y el hilo
+#: de borde entre dos colores también son manchas suyas, y no son piezas.
+PLATE_PIECE_SHARE = 0.01
+#: Motas de uno o dos píxeles del borde suavizado. Cuentan como tinta y podían
+#: abrir una pieza para nada.
+INK_NOISE_AREA = 4
+#: Un filete de un píxel de ancho es el borde entre dos colores, no una pieza.
+RULE_MIN_SIDE = 3
+RULE_MIN_AREA_PX = 40
+
+#: Marca de las partes que son fondo —plancha o filete— y no texto.
+PIECE_PLATE = "fondo"
 
 #: Corte dentro de una misma línea. Un precio de retail lleva los centavos en
 #: volado —más pequeños y más arriba— y el corte por bandas no los separa nunca,
@@ -947,6 +1007,220 @@ CENTS_MIN_SHARE = 0.08
 CENTS_MAX_SHARE = 0.45
 
 
+def _components(ink: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Etiquetas de las manchas de tinta y sus rectángulos."""
+    _, labels, stats, _ = cv2.connectedComponentsWithStats(
+        ink.astype(np.uint8), connectivity=8
+    )
+    return labels, stats
+
+
+def _split_ink(ink: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Separa la tinta en letras y filetes.
+
+    Un filete que cruza tres renglones los suelda en un solo tramo de tinta, y
+    a partir de ahí todo sale mal: el bloque se mide como una línea del alto de
+    las tres, reescribirlo las reemplaza por un renglón único y el corte de
+    centavos dispara contra el final de la primera.
+
+    La prueba no es la forma del trazo sino su efecto: se aparta el candidato,
+    se vuelve a proyectar su banda y solo cuenta como filete si la banda se
+    abre en dos renglones o más. Así una «1» de titular, que también es alta y
+    estrecha, se queda donde está.
+    """
+    if not ink.any():
+        return ink, np.zeros_like(ink)
+
+    labels, stats = _components(ink)
+    total = len(stats)
+    if total <= 1:
+        return ink, np.zeros_like(ink)
+
+    cajas = {
+        indice: (
+            int(stats[indice, cv2.CC_STAT_LEFT]),
+            int(stats[indice, cv2.CC_STAT_TOP]),
+            int(stats[indice, cv2.CC_STAT_WIDTH]),
+            int(stats[indice, cv2.CC_STAT_HEIGHT]),
+        )
+        for indice in range(1, total)
+        if int(stats[indice, cv2.CC_STAT_AREA]) >= COMPONENT_MIN_AREA
+    }
+    if not cajas:
+        return ink, np.zeros_like(ink)
+
+    filetes = np.zeros(total, dtype=bool)
+    for top, bottom in _ink_runs(_ink_rows(ink)):
+        dentro = [
+            indice
+            for indice, (_, y, _, alto) in cajas.items()
+            if y <= bottom and y + alto - 1 >= top
+        ]
+        if len(dentro) < 2:
+            continue
+        referencia = float(np.median([cajas[indice][3] for indice in dentro]))
+        candidatos = [
+            indice
+            for indice in dentro
+            if cajas[indice][3] >= referencia * RULE_HEIGHT
+            and cajas[indice][2] <= cajas[indice][3] * RULE_ASPECT
+        ]
+        if not candidatos:
+            continue
+        # ¿Sueldan o no? Se quitan y se mira si la banda se abre en renglones.
+        limpio = ink[top : bottom + 1].copy()
+        for indice in candidatos:
+            limpio &= ~(labels[top : bottom + 1] == indice)
+        if len(_ink_runs(_ink_rows(limpio))) > 1:
+            filetes[candidatos] = True
+
+    if not filetes.any():
+        return ink, np.zeros_like(ink)
+
+    mancha = filetes[labels]
+    letras = ink & ~mancha
+    if not letras.any():
+        return ink, np.zeros_like(ink)
+    return letras, ink & mancha
+
+
+def _plate_mask(rgb: np.ndarray, ink: np.ndarray) -> np.ndarray:
+    """Las planchas de color de un bloque macizo. Vacío si la capa no lo es."""
+    if float(ink.mean()) < SOLID_FILL:
+        return np.zeros_like(ink)  # hay papel entre las letras: no es un bloque
+
+    cubos = (rgb.astype(np.int32) // PLATE_BUCKET)
+    llaves = cubos[:, :, 0] * 4096 + cubos[:, :, 1] * 64 + cubos[:, :, 2]
+    total = int(ink.sum())
+    colores: list[tuple[int, int, int]] = []
+    valores, cuentas = np.unique(llaves[ink], return_counts=True)
+    for valor, cuenta in zip(valores, cuentas):
+        if cuenta < total * PLATE_SHARE:
+            continue
+        clase = ink & (llaves == valor)
+        _, stats = _components(clase)
+        if len(stats) <= 1:
+            continue
+        # Una mancha sola y grande es plancha; muchas pequeñas son letras.
+        mayor = int(stats[1:, cv2.CC_STAT_AREA].max())
+        if mayor < cuenta * PLATE_WHOLENESS:
+            continue
+        colores.append(_dominant_rgb(rgb[clase].reshape(-1, 3).astype(np.float32)))
+
+    if not colores:
+        return np.zeros_like(ink)
+
+    # El color por sí solo no basta: el blanco de «12 CUOTAS» está a menos de
+    # 60 del crema de la caja, así que por color entraba en la plancha y el
+    # rótulo se quedaba pegado al fondo. De cada color se queda solo su mancha
+    # grande; sus letras sueltas, del color que sean, siguen siendo texto.
+    minimo = ink.size * PLATE_PIECE_SHARE
+    plancha = np.zeros_like(ink)
+    for color in colores:
+        distancia = np.linalg.norm(
+            rgb.astype(np.float32) - np.asarray(color, np.float32), axis=2
+        )
+        cerca = ink & (distancia <= INK_COLOR_DISTANCE)
+        labels, stats = _components(cerca)
+        grandes = stats[:, cv2.CC_STAT_AREA] >= minimo
+        grandes[0] = False  # la etiqueta 0 es el fondo, no una mancha
+        plancha |= cerca & grandes[labels]
+    return _absorb_edges(plancha, ink)
+
+
+def _absorb_edges(plancha: np.ndarray, ink: np.ndarray) -> np.ndarray:
+    """Devuelve la plancha con sus bordes suavizados dentro.
+
+    Entre el marco y la caja queda un hilo de un píxel que no es ninguno de los
+    dos colores. Suelto, abría una pieza de 329x1 en la lista de textos. Es
+    borde de plancha: va con ella.
+    """
+    if not plancha.any():
+        return plancha
+    resto = ink & ~plancha
+    if not resto.any():
+        return plancha
+    vecino = dilate_mask(plancha.astype(np.uint8) * 255, 1) > 0
+    labels, stats = _components(resto)
+    lados = np.minimum(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT])
+    finas = lados < RULE_MIN_SIDE
+    finas[0] = False
+    borde = np.zeros(len(stats), dtype=bool)
+    for indice in np.nonzero(finas)[0]:
+        borde[indice] = bool((vecino & (labels == indice)).any())
+    return plancha | (resto & borde[labels])
+
+
+def _ink_and_plates(rgb: np.ndarray, alpha: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(tinta, planchas) de un recorte.
+
+    En un parche macizo el fondo no es un color suelto: es la caja, su marco y
+    su sello. `_ink_mask` toma por fondo el color más repetido, y en un recorte
+    ajustado de un precio en negrita el color más repetido es **el número**: la
+    máscara salía al revés y el precio nuevo se escribía del color de la caja,
+    invisible. Aquí el fondo se reconoce por mancha —una grande y compacta— y
+    lo que queda encima es el texto.
+
+    Un recorte normal de PSD no pasa por aquí: su fondo es la transparencia.
+    """
+    solid = alpha >= INK_ALPHA
+    plancha = _plate_mask(rgb, solid)
+    if plancha.any():
+        tinta = solid & ~plancha
+        if tinta.any():
+            return tinta, plancha
+    return _ink_mask(rgb, alpha), np.zeros_like(solid)
+
+
+def _plate_boxes(plancha: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Un rectángulo por plancha. Van primeras: son el fondo de lo demás."""
+    minimo = plancha.size * PLATE_PIECE_SHARE
+    return [
+        (left, top, width, height)
+        for left, top, width, height in _blob_boxes(plancha)
+        if width * height >= minimo
+    ]
+
+
+def _denoise(ink: np.ndarray) -> np.ndarray:
+    """La tinta sin las motas del borde suavizado."""
+    if not ink.any():
+        return ink
+    labels, stats = _components(ink)
+    grandes = stats[:, cv2.CC_STAT_AREA] > INK_NOISE_AREA
+    grandes[0] = False  # la etiqueta 0 es el fondo, no una mancha
+    return ink & grandes[labels]
+
+
+def _blob_boxes(mancha: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Un rectángulo por mancha."""
+    if not mancha.any():
+        return []
+    _, stats = _components(mancha)
+    return [
+        (
+            int(stats[indice, cv2.CC_STAT_LEFT]),
+            int(stats[indice, cv2.CC_STAT_TOP]),
+            int(stats[indice, cv2.CC_STAT_WIDTH]),
+            int(stats[indice, cv2.CC_STAT_HEIGHT]),
+        )
+        for indice in range(1, len(stats))
+    ]
+
+
+def _rule_boxes(filetes: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Un rectángulo por filete: cada uno es una pieza suya, intacta.
+
+    Se descarta el hilo de un píxel que queda entre dos colores: es el borde
+    suavizado de la plancha, no un filete del diseño.
+    """
+    return [
+        (left, top, width, height)
+        for left, top, width, height in _blob_boxes(filetes)
+        if min(width, height) >= RULE_MIN_SIDE and width * height >= RULE_MIN_AREA_PX
+    ]
+
+
 @dataclass(frozen=True)
 class _Run:
     """Un tramo de tinta con lo que hace falta para saber qué es."""
@@ -968,7 +1242,14 @@ class _Run:
 
 
 def _profile(rgb: np.ndarray, ink: np.ndarray) -> list[_Run]:
-    """Cada tramo con su ancho, su relleno y su color."""
+    """Cada tramo con su ancho, su relleno y su color.
+
+    Los tramos van crudos a propósito. Unirlos aquí con `_line_runs` toma como
+    referencia el renglón más alto de toda la capa, y en una ficha de producto
+    —nombre grande, código pequeño, viñetas— eso hace pasar por tildes del
+    grande a los renglones pequeños y los funde todos en uno. Quien junta la
+    tilde con su letra es `_group_runs`, que mide el ancho y no el alto.
+    """
     profiled: list[_Run] = []
     for top, bottom in _ink_runs(_ink_rows(ink)):
         band = ink[top : bottom + 1]
@@ -1173,16 +1454,132 @@ def _tight(
     )
 
 
-def _block_boxes(rgb: np.ndarray, ink: np.ndarray) -> list[tuple[int, int, int, int]]:
-    """Rectángulos de tinta de cada pieza, en coordenadas del PNG de la capa."""
-    boxes: list[tuple[int, int, int, int]] = []
+def _is_paragraph(lines: list[_Run]) -> bool:
+    """¿Estos renglones son prosa que da la vuelta, o datos sueltos?
+
+    En un párrafo lo que corta cada línea es el ancho de la caja, así que todas
+    menos la última llegan casi al mismo borde y todas van al mismo cuerpo. En
+    una ficha —nombre, código, viñetas— el largo lo pone el contenido: una
+    línea corta en medio de dos largas delata que no es un párrafo.
+    """
+    if len(lines) < 2:
+        return True
+    altos = [run.height for run in lines]
+    if max(altos) > min(altos) * PARAGRAPH_HEIGHT:
+        return False
+    anchos = [run.span for run in lines]
+    ancho = max(anchos)
+    return all(span >= ancho * PARAGRAPH_FILL for span in anchos[:-1])
+
+
+def _as_lines(group: list[_Run], width: int) -> list[list[_Run]]:
+    """El grupo repartido en renglones; cada marca suelta con la que le toca.
+
+    Una tilde va encima de su letra y un punto de exclamación invertido debajo,
+    así que la marca no se queda siempre con el renglón anterior: se mide a cuál
+    de los dos está más pegada.
+    """
+    completos = [
+        indice for indice, run in enumerate(group) if not _is_fragment(run, width)
+    ]
+    if not completos:
+        return [group]
+    renglones: list[list[_Run]] = [[] for _ in completos]
+    for indice, run in enumerate(group):
+        if indice in completos:
+            renglones[completos.index(indice)].append(run)
+            continue
+        cercano = min(
+            range(len(completos)),
+            key=lambda cual: _distance(run, group[completos[cual]]),
+        )
+        renglones[cercano].append(run)
+    return [sorted(renglon, key=lambda run: run.top) for renglon in renglones]
+
+
+def _distance(run: _Run, other: _Run) -> int:
+    """Filas que separan dos tramos; 0 si se solapan."""
+    return max(0, other.top - run.bottom, run.top - other.bottom)
+
+
+def _pieces(rgb: np.ndarray, ink: np.ndarray) -> list[list[_Run]]:
+    """Las piezas editables: un párrafo entero, o un renglón cada una."""
+    width = ink.shape[1]
+    pieces: list[list[_Run]] = []
     for group in _group_runs(rgb, ink):
+        completos = [run for run in group if not _is_fragment(run, width)]
+        if _is_paragraph(completos):
+            pieces.append(group)
+        else:
+            pieces.extend(_as_lines(group, width))
+    return pieces
+
+
+def _inside(box: tuple[int, int, int, int], other: tuple[int, int, int, int]) -> bool:
+    """¿`box` cabe entera dentro de `other`?"""
+    left, top, width, height = box
+    o_left, o_top, o_width, o_height = other
+    return (
+        left >= o_left
+        and top >= o_top
+        and left + width <= o_left + o_width
+        and top + height <= o_top + o_height
+    )
+
+
+def _layer_pieces(
+    rgb: np.ndarray, alpha: np.ndarray
+) -> tuple[list[tuple[int, int, int, int]], list[tuple[int, int, int, int]], np.ndarray]:
+    """(fondos, textos, máscara de plancha) del PNG de una capa."""
+    tinta, plancha = _ink_and_plates(rgb, alpha)
+    letras, filetes = _split_ink(_denoise(tinta))
+    fondos = [*_plate_boxes(plancha), *_rule_boxes(filetes)]
+    boxes: list[tuple[int, int, int, int]] = []
+    for group in _pieces(rgb, letras):
         top = min(run.top for run in group)
         bottom = max(run.bottom for run in group)
         left = min(run.left for run in group)
         right = max(run.right for run in group)
-        boxes.extend(_split_raised(ink, (left, top, right - left + 1, bottom - top + 1)))
-    return sorted(boxes, key=lambda box: (box[1], box[0]))
+        boxes.extend(
+            _split_raised(letras, (left, top, right - left + 1, bottom - top + 1))
+        )
+    # Un fondo que cabe dentro de una pieza de texto no es una pieza: el recorte
+    # del texto es un rectángulo del arte y ya se lo lleva puesto. En un recorte
+    # ajustado de «$43» el crema queda partido en cuatro trozos por los dígitos,
+    # y sin esto el precio salía separado en cinco piezas que no existen.
+    fondos = [
+        caja for caja in fondos if not any(_inside(caja, texto) for texto in boxes)
+    ]
+    # Las planchas primero: las partes se dibujan en el orden de esta lista y el
+    # fondo tiene que quedar debajo de su propio texto.
+    return (
+        sorted(fondos, key=lambda box: (box[1], box[0])),
+        sorted(boxes, key=lambda box: (box[1], box[0])),
+        plancha,
+    )
+
+
+def _block_boxes(rgb: np.ndarray, alpha: np.ndarray) -> list[tuple[int, int, int, int]]:
+    """Rectángulos de cada pieza, en coordenadas del PNG de la capa."""
+    fondos, textos, _ = _layer_pieces(rgb, alpha)
+    return [*fondos, *textos]
+
+
+def _plate_only(art: Image.Image, rgb: np.ndarray, texto: np.ndarray) -> Image.Image:
+    """El bloque con su texto borrado, para que sirva de fondo de sus partes.
+
+    El recorte de una plancha es un rectángulo del arte, así que se lleva el
+    texto dentro. Sin borrarlo, al cambiar el precio el viejo seguía asomando
+    por debajo del nuevo. Se rellena con el color que lo rodea, que en una
+    plancha lisa es su propio color.
+    """
+    hueco = dilate_mask(texto.astype(np.uint8) * 255, 2)
+    plano = cv2.inpaint(
+        np.ascontiguousarray(rgb), (hueco > 0).astype(np.uint8), 3, cv2.INPAINT_TELEA
+    )
+    limpio = Image.fromarray(plano, mode="RGB").convert("RGBA")
+    limpio.putalpha(art.getchannel("A"))
+    return limpio
 
 
 def blocks(project: Project, layer: Layer) -> list[tuple[int, int, int, int]]:
@@ -1194,10 +1591,9 @@ def blocks(project: Project, layer: Layer) -> list[tuple[int, int, int, int]]:
         art = opened.convert("RGBA")
         rgb = np.asarray(art.convert("RGB"), dtype=np.uint8)
         alpha = np.asarray(art.getchannel("A"), dtype=np.uint8)
-    ink = _ink_mask(rgb, alpha)
-    if not ink.any():
+    if not (alpha >= INK_ALPHA).any():
         return []
-    return _block_boxes(rgb, ink)
+    return _block_boxes(rgb, alpha)
 
 
 def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
@@ -1226,16 +1622,33 @@ def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
 
     with Image.open(path) as opened:
         art = opened.convert("RGBA")
+        rgb = np.asarray(art.convert("RGB"), dtype=np.uint8)
+        alpha = np.asarray(art.getchannel("A"), dtype=np.uint8)
+        fondos, _, plancha = _layer_pieces(rgb, alpha)
+        # Un fondo se recorta del arte sin su texto; el texto ya viaja en su
+        # propia parte y quedaba repetido debajo al reescribirlo.
+        limpio = (
+            _plate_only(art, rgb, (alpha >= INK_ALPHA) & ~plancha)
+            if plancha.any()
+            else art
+        )
+        cuantos_fondos = len(fondos)
         parts: list[Layer] = []
         for index, (left, top, width, height) in enumerate(boxes):
-            crop = art.crop((left, top, left + width, top + height))
+            fondo = index < cuantos_fondos
+            fuente = limpio if fondo else art
+            crop = fuente.crop((left, top, left + width, top + height))
             relative = f"layers/{layer.id[:8]}_parte{index + 1}.png"
             buffer = io.BytesIO()
             crop.save(buffer, format="PNG", optimize=True)
             storage.write_bytes(project.project_id, relative, buffer.getvalue())
             parts.append(
                 Layer(
-                    name=f"{layer.name} · parte {index + 1}",
+                    name=(
+                        f"{layer.name} · fondo"
+                        if fondo
+                        else f"{layer.name} · parte {index + 1 - cuantos_fondos}"
+                    ),
                     type=LayerType.IMAGE,
                     category=layer.category,
                     src=relative,
@@ -1252,7 +1665,11 @@ def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
                     replaceable=layer.replaceable,
                     preserve_aspect_ratio=layer.preserve_aspect_ratio,
                     source=layer.source,
-                    meta={"split_from": layer.id, "split_index": index},
+                    meta={
+                        "split_from": layer.id,
+                        "split_index": index,
+                        **({"art_piece": PIECE_PLATE} if fondo else {}),
+                    },
                 )
             )
 

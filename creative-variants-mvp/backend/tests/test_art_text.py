@@ -14,7 +14,7 @@ import pathlib
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
-from PIL import Image, ImageDraw
+from PIL import Image, ImageChops, ImageDraw
 
 from app.services import art_text, storage
 
@@ -1323,10 +1323,9 @@ def _piezas_de(dibujar, size=(700, 260)) -> int:
     dibujar(ImageDraw.Draw(lienzo))
     rgb = np.asarray(lienzo.convert("RGB"), dtype=np.uint8)
     alpha = np.asarray(lienzo.getchannel("A"), dtype=np.uint8)
-    tinta = art_text._ink_mask(rgb, alpha)
-    if not tinta.any():
+    if not art_text._ink_mask(rgb, alpha).any():
         return 0
-    return len(art_text._block_boxes(rgb, tinta))
+    return len(art_text._block_boxes(rgb, alpha))
 
 
 def _linea(texto: str, cuerpo: int):
@@ -1483,7 +1482,9 @@ def test_the_cut_lands_in_the_gap_and_not_inside_the_last_digit(
         )
 
     antes = huecos()
-    partes = client.post(f"/projects/{project_id}/layers/{capa['id']}/split").json()["layers"]
+    separado = client.post(f"/projects/{project_id}/layers/{capa['id']}/split")
+    assert separado.status_code == 200, separado.text
+    partes = separado.json()["layers"]
     assert len(partes) == 2, "no se separó el volado"
     assert parecidos(huecos(), antes), "separar cambió el arte"
 
@@ -1510,3 +1511,242 @@ def test_the_cut_lands_in_the_gap_and_not_inside_the_last_digit(
         [h for h in despues if h[0] >= frontera],
         [h for h in antes if h[0] >= frontera],
     ), "quedó un resto del dígito viejo pegado a los centavos"
+
+
+# ------------------------------------------------- fichas, filetes y planchas
+# El arte real de Marcimex trae dos formas que el separador no sabía leer, y en
+# las dos el resultado era el mismo: una capa de varios renglones contaba como
+# una sola pieza, y reescribirla los reemplazaba por un renglón único.
+
+
+def _ficha_con_filete():
+    """Ficha de producto con la barra de color de la marca a la izquierda.
+
+    La barra toca las filas de los tres renglones a la vez, así que la
+    proyección de tinta los ve como uno solo de 112 px de alto.
+    """
+    azul = (12, 50, 75, 255)
+    lineas = [
+        (_ink("SIDE BY SIDE 476L", 40, azul), 0),
+        (_ink("SBE-422 | 31541", 26, azul), 14),
+        (_ink("Balcones transparentes", 26, azul), 26),
+    ]
+    ancho = max(pieza.width for pieza, _ in lineas) + 40
+    alto = sum(pieza.height for pieza, _ in lineas) + sum(h for _, h in lineas)
+    image = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+    y = 0
+    for pieza, hueco in lineas:
+        y += hueco
+        image.paste(pieza, (40, y), pieza)
+        y += pieza.height
+    # La barra, de lado a lado de las tres líneas.
+    ImageDraw.Draw(image).rectangle([0, 0, 13, alto - 1], fill=(146, 214, 46, 255))
+    return image
+
+
+def _ficha_project(client: TestClient, tmp_path, image) -> dict:
+    source = tmp_path / "ficha.psd"
+    write_psd(
+        source,
+        (900, 600),
+        [
+            {
+                "name": "Relleno de color 1",
+                "image": Image.new("RGBA", (900, 600), (245, 245, 248, 255)),
+                "position": (0, 0),
+            },
+            {"name": "ficha", "image": image, "position": (60, 120)},
+        ],
+    )
+    response = client.post(
+        "/projects",
+        data={"name": "Ficha"},
+        files={"artwork": ("ficha.psd", source.read_bytes(), "image/vnd.adobe.photoshop")},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_a_colour_bar_does_not_weld_three_lines_into_one(client: TestClient, tmp_path):
+    """La barra de marca cruza los tres renglones: no puede unirlos en uno.
+
+    Soldados, el bloque se medía como una línea del alto de los tres y
+    reescribirlo los reemplazaba por un renglón de 112 px.
+    """
+    created = _ficha_project(client, tmp_path, _ficha_con_filete())
+    capa = next(layer for layer in created["layers"] if layer["name"] == "ficha")
+    listed = client.get(f"/projects/{created['project_id']}/texts").json()
+    ficha = next(item for item in listed["layers"] if item["id"] == capa["id"])
+    # Tres renglones más la barra.
+    assert ficha["pieces"] == 4, "la barra sigue soldando los renglones"
+
+
+def test_the_last_letter_of_a_line_stays_with_its_line(client: TestClient, tmp_path):
+    """La «L» de «476L» no es un volado: no se corta del renglón.
+
+    Con los renglones soldados, la cola de la línea larga —columnas con tinta
+    solo arriba— tenía la firma exacta de unos centavos en volado, y el corte
+    se llevaba la última letra a una pieza suya.
+    """
+    created = _ficha_project(client, tmp_path, _ficha_con_filete())
+    project_id = created["project_id"]
+    capa = next(layer for layer in created["layers"] if layer["name"] == "ficha")
+    separado = client.post(f"/projects/{project_id}/layers/{capa['id']}/split")
+    assert separado.status_code == 200, separado.text
+    partes = separado.json()["layers"]
+
+    renglones = [parte for parte in partes if parte["width"] > 30]
+    arriba = min(renglones, key=lambda parte: parte["y"])
+    resto = [parte for parte in renglones if parte is not arriba]
+    # Ninguna otra pieza empieza a la derecha de donde acaba el primer renglón:
+    # eso era la «L» suelta.
+    for parte in resto:
+        assert parte["x"] < arriba["x"] + arriba["width"], (
+            "una pieza quedó colgando al final del primer renglón: es su última letra"
+        )
+
+
+def test_a_list_of_data_is_split_line_by_line(client: TestClient, tmp_path):
+    """Nombre, código y viñetas son datos distintos: uno por renglón.
+
+    Van al mismo color y casi al mismo cuerpo, así que por cercanía salían en
+    una pieza sola y cambiar una viñeta obligaba a reescribir las tres.
+    """
+    azul = (12, 50, 75, 255)
+    lineas = [
+        _ink("Balcones transparentes", 26, azul),
+        _ink("Twist ice maker", 26, azul),
+        _ink("Manija incorporada", 26, azul),
+    ]
+    # Interlínea apretada, como en el arte: el hueco es menor que el alto de
+    # línea, así que por cercanía las tres caen en una pieza sola. Lo que las
+    # separa es el largo, que va y viene en vez de llegar siempre al borde.
+    hueco = 8
+    ancho = max(pieza.width for pieza in lineas)
+    alto = sum(pieza.height for pieza in lineas) + hueco * (len(lineas) - 1)
+    image = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+    y = 0
+    for pieza in lineas:
+        image.paste(pieza, (0, y), pieza)
+        y += pieza.height + hueco
+
+    created = _ficha_project(client, tmp_path, image)
+    capa = next(layer for layer in created["layers"] if layer["name"] == "ficha")
+    listed = client.get(f"/projects/{created['project_id']}/texts").json()
+    ficha = next(item for item in listed["layers"] if item["id"] == capa["id"])
+    assert ficha["pieces"] == 3, "las viñetas siguen saliendo en una sola pieza"
+
+
+def _bloque_con_plancha():
+    """Bloque de precio de retail: caja, sello y marco, con el texto encima.
+
+    Llega del PSD como una mancha maciza. Sin leer sus planchas, la capa entera
+    contaba como una pieza: reescribirla borraba la caja y escribía el precio
+    nuevo del color de la caja, invisible sobre el arte.
+    """
+    crema = (245, 238, 218, 255)
+    cian = (0, 178, 225, 255)
+    morado = (107, 61, 190, 255)
+    tinta = (15, 52, 75, 255)
+
+    image = Image.new("RGBA", (380, 240), (0, 0, 0, 0))
+    trazo = ImageDraw.Draw(image)
+    trazo.rounded_rectangle([60, 0, 320, 70], radius=10, fill=morado)
+    trazo.rounded_rectangle([0, 55, 379, 239], radius=18, fill=cian)
+    trazo.rounded_rectangle([14, 72, 365, 222], radius=10, fill=crema)
+
+    rotulo = _ink("12 CUOTAS", 30, (255, 255, 255, 255))
+    image.paste(rotulo, ((380 - rotulo.width) // 2, 20), rotulo)
+    precio = _ink("$43", 110, tinta)
+    image.paste(precio, (34, 88), precio)
+    centavos = _ink(",99", 60, tinta)
+    image.paste(centavos, (34 + precio.width + 4, 88), centavos)
+    pie = _ink("MENSUALES", 32, tinta)
+    image.paste(pie, ((380 - pie.width) // 2, 185), pie)
+    return image
+
+
+@pytest.fixture()
+def plate_project(client: TestClient, tmp_path) -> dict:
+    source = tmp_path / "plancha.psd"
+    write_psd(
+        source,
+        (900, 900),
+        [
+            {
+                "name": "Relleno de color 1",
+                "image": Image.new("RGBA", (900, 900), (255, 255, 255, 255)),
+                "position": (0, 0),
+            },
+            {"name": "bloque", "image": _bloque_con_plancha(), "position": (200, 300)},
+        ],
+    )
+    response = client.post(
+        "/projects",
+        data={"name": "Bloque con plancha"},
+        files={"artwork": ("plancha.psd", source.read_bytes(), "image/vnd.adobe.photoshop")},
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_a_price_plate_is_read_as_background_plus_its_texts(
+    client: TestClient, plate_project
+):
+    """La caja no es texto: los renglones que lleva encima, sí."""
+    project_id = plate_project["project_id"]
+    capa = next(layer for layer in plate_project["layers"] if layer["name"] == "bloque")
+    separado = client.post(f"/projects/{project_id}/layers/{capa['id']}/split")
+    assert separado.status_code == 200, separado.text
+    partes = separado.json()["layers"]
+
+    fondos = [parte for parte in partes if parte["meta"].get("art_piece") == "fondo"]
+    assert len(fondos) == 1, "la caja, el sello y el marco son un fondo solo"
+    # Rótulo, enteros, centavos y pie.
+    assert len(partes) - len(fondos) == 4, [parte["name"] for parte in partes]
+
+    listado = client.get(f"/projects/{project_id}/texts").json()["layers"]
+    fondo = next(item for item in listado if item["id"] == fondos[0]["id"])
+    assert not fondo["editable"], "el fondo no es un texto y no se reescribe"
+
+
+def test_rewriting_the_price_keeps_its_plate_and_its_cents(
+    client: TestClient, plate_project
+):
+    """Cambiar los enteros no toca la caja, el sello, el pie ni los centavos.
+
+    Sin separar las planchas, reescribir este bloque lo dejaba en un renglón
+    suelto del color de la caja y el diseño se perdía entero.
+    """
+    project_id = plate_project["project_id"]
+    capa = next(layer for layer in plate_project["layers"] if layer["name"] == "bloque")
+    separado = client.post(f"/projects/{project_id}/layers/{capa['id']}/split")
+    assert separado.status_code == 200, separado.text
+    partes = separado.json()["layers"]
+
+    listado = client.get(f"/projects/{project_id}/texts").json()["layers"]
+    editables = [item for item in listado if item["editable"]]
+    enteros = max(editables, key=lambda item: item["style"]["ink_height"])
+    # El color medido es el de la tinta, no el de la caja que hay detrás.
+    assert enteros["style"]["color"].lower() != "#f5eeda"
+
+    antes = Image.open(io.BytesIO(client.get(f"/projects/{project_id}/preview/template").content))
+    response = client.post(
+        f"/projects/{project_id}/layers/{enteros['id']}/text", json={"content": "$39"}
+    )
+    assert response.status_code == 200, response.text
+    despues = Image.open(
+        io.BytesIO(client.get(f"/projects/{project_id}/preview/template").content)
+    )
+
+    caja = next(parte for parte in partes if parte["id"] == enteros["id"])
+    cambio = ImageChops.difference(antes.convert("RGB"), despues.convert("RGB")).getbbox()
+    assert cambio is not None, "no cambió nada"
+    izquierda, arriba, derecha, abajo = cambio
+    # Lo que cambia vive dentro de la caja de los enteros, con margen para el
+    # ancho del texto nuevo. Si la plancha se hubiera borrado, el cambio
+    # abarcaría el bloque entero.
+    assert arriba >= caja["y"] - 4 and abajo <= caja["y"] + caja["height"] + 4, (
+        f"el cambio se salió de la línea del precio: {cambio}"
+    )
+    assert izquierda >= caja["x"] - 4, f"el cambio se fue a la izquierda: {cambio}"
