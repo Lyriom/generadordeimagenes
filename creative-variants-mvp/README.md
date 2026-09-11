@@ -388,8 +388,8 @@ revisando» lleva una casilla:
 - Marcar varias y **«Quitar N»** las borra en **una sola petición**
   (`POST /projects/delete`), con una única confirmación que nombra lo que se va.
 - **Mayús** marca todo el tramo entre la última ficha marcada y la que se pulsa.
-- **«Invertir»** es el gesto útil de verdad: de veinte piezas se quiere una, así
-  que se marca esa y se invierte, en vez de marcar diecinueve.
+- **«Marcar todos»** y **«Ninguno»** son los dos únicos atajos de la barra: con
+  Mayús se cubre cualquier tramo, y una tercera acción solo cargaba la barra.
 
 El aspa de cada ficha sigue ahí para quitar una sola. Si se quitan todas se
 vuelve a la pantalla de carga; si no, el KV activo pasa al primero que sobreviva

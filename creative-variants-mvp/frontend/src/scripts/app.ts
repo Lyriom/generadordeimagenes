@@ -835,16 +835,6 @@ function bindKvPicks(): void {
     state.lastKvPick = null;
     repintar();
   });
-  // Invertir es el gesto útil de verdad: de veinte piezas se quiere una, así
-  // que se marca esa y se invierte, en vez de marcar diecinueve.
-  query("#invert-kv-picks")?.addEventListener("click", () => {
-    for (const item of state.campaign) {
-      if (state.kvPicks.has(item.project_id)) state.kvPicks.delete(item.project_id);
-      else state.kvPicks.add(item.project_id);
-    }
-    state.lastKvPick = null;
-    repintar();
-  });
   query("#drop-kv-picks")?.addEventListener("click", () => void dropKvPicks());
 }
 
@@ -1551,7 +1541,6 @@ function kvSwitcher(active: Project): string {
           "<span><strong>", String(marcados), "</strong> de ", String(state.campaign.length),
           " marcados</span>",
           '<span class="pickbar-actions">',
-          '<button class="ghost-button small" id="invert-kv-picks">Invertir</button>',
           '<button class="ghost-button small" id="clear-kv-picks">Ninguno</button>',
           '<button class="danger-button small" id="drop-kv-picks">Quitar ', String(marcados),
           "</button></span></div>",
