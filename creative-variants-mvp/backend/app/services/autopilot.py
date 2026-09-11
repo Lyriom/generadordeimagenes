@@ -184,7 +184,7 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
 
     # 4 · Componer.
     formats = (
-        (list(request.formats or []) or [native_format(project)])
+        ([native_format(project)] if replacement_only else (list(request.formats or []) or [native_format(project)]))
         if replacement_only
         else (list(request.formats or []) or auto_formats(project))
     )
