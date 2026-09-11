@@ -1819,7 +1819,9 @@ function copyRow(project: Project, item: ArtTextLayer): string {
   // que se ofrece separarlo en las piezas que el arte ya tiene dibujadas.
   const split = item.pieces > 1
     ? '<div class="copy-split">Esta capa trae <strong>' + String(item.pieces) +
-      " partes</strong> (rótulo, precio, sello…). Sepáralas para cambiar solo una." +
+      " partes</strong> (rótulo, precio, centavos en volado, sello…). " +
+      "Sepáralas para cambiar solo una: reescribirla entera la reemplaza por un " +
+      "solo renglón y se pierde el diseño." +
       '<button class="button small split-copy" data-layer="' + attr(item.id) +
       '">Separar en ' + String(item.pieces) + " partes</button></div>"
     : "";
@@ -1849,6 +1851,37 @@ function copyRow(project: Project, item: ArtTextLayer): string {
   ].join("");
 }
 
+/** El arte como va quedando, al lado de los textos.
+ *
+ *  Hasta ahora había que llegar al paso 4 y generar para ver el efecto de un
+ *  copy: minutos por cada cambio de una palabra. El motor ya sabía componerlo
+ *  —`/preview/template` existía desde el principio— pero nadie lo llamaba. */
+function copyPreviewHtml(project: Project): string {
+  return [
+    '<aside class="copy-preview"><div class="copy-preview-head">',
+    "<strong>Cómo va quedando</strong>",
+    '<button class="ghost-button small" id="refresh-copy-preview" title="Volver a componerlo">Actualizar</button>',
+    "</div>",
+    '<div class="copy-preview-art"><img id="copy-preview-img" src="',
+    attr(templatePreviewUrl(project.project_id)),
+    '" alt="Arte de ', attr(project.name), '" loading="lazy" decoding="async"></div>',
+    '<small class="muted tiny">El arte con tus textos, sin el producto: ese entra en el paso 3. ',
+    "Se actualiza solo al guardar un texto.</small></aside>",
+  ].join("");
+}
+
+/** La URL del preview con marca de tiempo: sin ella el navegador reusa la
+ *  imagen anterior y el texto recién guardado no aparece. */
+function templatePreviewUrl(projectId: string): string {
+  return "/api/projects/" + projectId + "/preview/template?v=" + String(Date.now());
+}
+
+/** Recompone el arte del panel sin repintar toda la pantalla. */
+function refreshCopyPreview(projectId: string): void {
+  const img = query<HTMLImageElement>("#copy-preview-img");
+  if (img) img.src = templatePreviewUrl(projectId);
+}
+
 function copyEditor(project: Project): string {
   const texts = state.texts[project.project_id] || EMPTY_TEXTS;
   const items = texts.layers;
@@ -1869,7 +1902,10 @@ function copyEditor(project: Project): string {
     "posición del original. Si necesitas un texto distinto por producto, no lo cambies aquí: ",
     "hazlo en el paso 3, donde cada producto lleva el suyo.</p>",
     brandFontHtml(texts),
-    '<div class="copy-list">', items.map((item) => copyRow(project, item)).join(""), "</div></section>",
+    '<div class="copy-workbench">',
+    '<div class="copy-list">', items.map((item) => copyRow(project, item)).join(""), "</div>",
+    copyPreviewHtml(project),
+    "</div></section>",
   ].join("");
 }
 
@@ -1921,6 +1957,9 @@ async function sendCopyEdit(project: Project, payload: Record<string, unknown>):
 }
 
 function bindCopyEditor(project: Project): void {
+  query("#refresh-copy-preview")?.addEventListener("click", () =>
+    refreshCopyPreview(project.project_id),
+  );
   query("#open-brand-font")?.addEventListener("click", () => {
     const form = query<HTMLElement>("#brand-font-form");
     if (form) form.hidden = !form.hidden;

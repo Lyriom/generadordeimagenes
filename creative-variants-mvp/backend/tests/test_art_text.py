@@ -7,6 +7,7 @@ tanda de un catálogo escriba su propio copy sin heredar el del producto anterio
 """
 from __future__ import annotations
 
+import io
 import itertools
 import pathlib
 
@@ -1301,3 +1302,211 @@ def test_with_the_brand_font_there_is_no_such_warning(client: TestClient, tmp_pa
     # Y la capa declara la familia del archivo subido, que es lo que el SVG
     # le pide a Illustrator al abrirlo.
     assert response.json()["layer"]["font_family"]
+
+
+# ------------------------------------------- centavos en volado dentro de una línea
+"""El separador cortaba solo por bandas horizontales.
+
+Un precio de retail lleva los centavos en volado —más pequeños y más arriba— en
+la **misma** fila que los enteros, así que nunca se separaban: reescribir el
+precio los rebajaba al cuerpo de los enteros y el arte perdía su forma. Ahora se
+corta también por cuerpo dentro de la línea.
+
+La firma que se busca es estrecha a propósito (remate más bajo y que acaba más
+arriba), porque un separador que se pasa de listo parte palabras normales y eso
+es peor que no cortar: son doce casos, y diez son de los que NO deben cortarse.
+"""
+
+
+def _piezas_de(dibujar, size=(700, 260)) -> int:
+    lienzo = Image.new("RGBA", size, (0, 0, 0, 0))
+    dibujar(ImageDraw.Draw(lienzo))
+    rgb = np.asarray(lienzo.convert("RGB"), dtype=np.uint8)
+    alpha = np.asarray(lienzo.getchannel("A"), dtype=np.uint8)
+    tinta = art_text._ink_mask(rgb, alpha)
+    if not tinta.any():
+        return 0
+    return len(art_text._block_boxes(rgb, tinta))
+
+
+def _linea(texto: str, cuerpo: int):
+    from app.services.renderer import load_font
+
+    return lambda draw: draw.text(
+        (20, 40), texto, font=load_font(_face("bold"), cuerpo), fill=(23, 62, 110, 255)
+    )
+
+
+def _precio(entero: str, centavos: str, cuerpo: int, cuerpo_centavos: int):
+    from app.services.renderer import load_font
+
+    def dibujar(draw):
+        cara = load_font(_face("bold"), cuerpo)
+        draw.text((20, 40), entero, font=cara, fill=(23, 62, 110, 255))
+        ancho = draw.textlength(entero, font=cara)
+        draw.text(
+            (20 + ancho + 6, 48),
+            centavos,
+            font=load_font(_face("bold"), cuerpo_centavos),
+            fill=(23, 62, 110, 255),
+        )
+
+    return dibujar
+
+
+@pytest.mark.parametrize(
+    "nombre, dibujar",
+    [
+        ("$43 con ,99 en volado", _precio("$43", ",99", 150, 80)),
+        ("$1.459 con ,00 en volado", _precio("$1.459", ",00", 140, 72)),
+    ],
+)
+def test_raised_cents_become_their_own_piece(nombre, dibujar):
+    assert _piezas_de(dibujar) == 2, f"no se separó el volado de {nombre}"
+
+
+@pytest.mark.parametrize(
+    "texto, cuerpo",
+    [
+        ("MENSUALES", 40),
+        ("12 CUOTAS", 44),
+        ("P. ANTES $889.37", 40),
+        # El asterisco es pequeño y va alto, como un volado: lo salva el mínimo
+        # de ancho, porque un remate de tres columnas no es una pieza.
+        ("SIN INTERESES*", 56),
+        # Rasgos descendentes: la p y la q bajan del renglón. Crecen hacia
+        # abajo, no hacia arriba, así que no disparan el corte.
+        ("Balcones transparentes", 34),
+        ("Compra y paga después", 34),
+        ("EXCLUSIVO ONLINE", 30),
+        ("SIDE BY SIDE 476L", 46),
+        ("$499", 150),
+        ("12 MESES", 80),
+    ],
+)
+def test_ordinary_lines_are_not_cut_in_two(texto, cuerpo):
+    assert _piezas_de(_linea(texto, cuerpo)) == 1, f"'{texto}' se partió sin motivo"
+
+
+def test_a_two_line_paragraph_is_never_cut_by_body_size():
+    """La trampa en la que cayó la primera versión del corte.
+
+    En un párrafo de dos renglones la primera línea suele ser más larga. Sus
+    columnas de la derecha llevan tinta solo arriba, así que miden poco y acaban
+    alto: exactamente la firma de un volado. El corte partía en dos cualquier
+    legal de dos líneas. Por eso solo se mira dentro de bandas de una línea.
+    """
+    from app.services.renderer import load_font
+
+    def dibujar(draw):
+        cara = load_font(_face("bold"), 34)
+        for indice, linea in enumerate(
+            ["Aplican condiciones. Válido para productos", "elegidos."]
+        ):
+            draw.text((10, 10 + indice * 48), linea, font=cara, fill=(23, 62, 110, 255))
+
+    assert _piezas_de(dibujar, size=(900, 200)) == 1
+
+
+def test_the_cut_lands_in_the_gap_and_not_inside_the_last_digit(
+    client: TestClient, tmp_path
+):
+    """El corte va al blanco entre los dos trazos, no donde cambia el perfil.
+
+    El último dígito remata en una cola corta —la curva de un 3— que ya parece
+    un volado. Cortar ahí le arrancaba una esquina, que se quedaba pegada a los
+    centavos y salía en el arte como un trazo suelto al lado del precio nuevo.
+    Se comprueba componiendo: los huecos de tinta del arte con el entero
+    reescrito tienen que coincidir con los del original de los centavos en
+    adelante.
+    """
+    from app.services.renderer import load_font
+
+    def bloque() -> Image.Image:
+        lienzo = Image.new("RGBA", (520, 220), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(lienzo)
+        cara = load_font(_face("bold"), 150)
+        draw.text((20, 20), "$43", font=cara, fill=(23, 62, 110, 255))
+        draw.text(
+            (20 + draw.textlength("$43", font=cara) + 6, 28),
+            ",99",
+            font=load_font(_face("bold"), 80),
+            fill=(23, 62, 110, 255),
+        )
+        return lienzo
+
+    source = tmp_path / "precio.psd"
+    write_psd(
+        source,
+        (1080, 1080),
+        [
+            {
+                "name": "Relleno de color 1",
+                "image": Image.new("RGBA", (1080, 1080), (245, 245, 248, 255)),
+                "position": (0, 0),
+            },
+            {"name": "precio", "image": bloque(), "position": (200, 400)},
+        ],
+    )
+    project = client.post(
+        "/projects",
+        data={"name": "precio"},
+        files={"artwork": ("precio.psd", source.read_bytes(), "image/vnd.adobe.photoshop")},
+    ).json()
+    project_id = project["project_id"]
+    capa = next(item for item in project["layers"] if "precio" in item["name"])
+
+    def huecos() -> list[tuple[int, int]]:
+        respuesta = client.get(f"/projects/{project_id}/preview/template")
+        assert respuesta.status_code == 200, respuesta.text
+        arte = np.asarray(
+            Image.open(io.BytesIO(respuesta.content)).convert("RGB"), dtype=int
+        )
+        tinta = np.abs(arte - np.array([245, 245, 248])).sum(axis=2) > 60
+        columnas = np.nonzero(tinta.any(axis=0))[0]
+        return [
+            (int(columnas[i - 1]), int(columnas[i]))
+            for i in range(1, columnas.size)
+            if columnas[i] - columnas[i - 1] > 3
+        ]
+
+    def parecidos(a, b, holgura: int = 1) -> bool:
+        """Mismos huecos, con un píxel de holgura.
+
+        La caja de una pieza se ajusta a su máscara de tinta, que descarta el
+        borde más suavizado del trazo. Al separar se pierde ese píxel: no se ve,
+        pero mueve el hueco uno. Lo que no puede cambiar es cuántos huecos hay.
+        """
+        return len(a) == len(b) and all(
+            abs(x1 - x2) <= holgura and abs(y1 - y2) <= holgura
+            for (x1, y1), (x2, y2) in zip(a, b)
+        )
+
+    antes = huecos()
+    partes = client.post(f"/projects/{project_id}/layers/{capa['id']}/split").json()["layers"]
+    assert len(partes) == 2, "no se separó el volado"
+    assert parecidos(huecos(), antes), "separar cambió el arte"
+
+    entero = max(partes, key=lambda item: item["width"] * item["height"])
+    centavos = min(partes, key=lambda item: item["width"] * item["height"])
+    # El invariante, y no vale de otra forma: entre las dos piezas queda blanco.
+    # Si el corte se hubiera ido dentro del último dígito, las cajas saldrían
+    # pegadas —una acaba justo donde empieza la otra— y la esquina del dígito
+    # viajaría con los centavos.
+    blanco = centavos["x"] - (entero["x"] + entero["width"])
+    assert blanco >= 2, (
+        f"el corte no cayó en el hueco: quedan {blanco}px entre las piezas, "
+        "así que una se llevó parte de la otra"
+    )
+
+    client.post(
+        f"/projects/{project_id}/layers/{entero['id']}/text", json={"content": "$39"}
+    )
+    despues = huecos()
+    # Desde donde arrancan los centavos, el arte tiene que ser el de siempre: si
+    # el corte se hubiera comido parte del dígito, aparecería un hueco de más.
+    frontera = centavos["x"]
+    assert parecidos(
+        [h for h in despues if h[0] >= frontera],
+        [h for h in antes if h[0] >= frontera],
+    ), "quedó un resto del dígito viejo pegado a los centavos"

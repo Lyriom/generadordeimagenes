@@ -815,6 +815,52 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 /* Copy del arte: miniatura, qué es, el texto y las acciones. Se edita mirando
    el recorte real; sin la miniatura no se sabe cuál de tres precios es cuál. */
 .copy-list { display: grid; gap: 10px; }
+/* El editor de textos, con el arte al lado. Ver el efecto de un copy exigía
+   llegar al paso 4 y generar: minutos por cada palabra cambiada. */
+.copy-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 18px;
+  align-items: start;
+}
+@media (max-width: 1180px) {
+  .copy-workbench { grid-template-columns: minmax(0, 1fr); }
+  .copy-preview { position: static; }
+}
+.copy-preview {
+  position: sticky;
+  top: 84px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+}
+.copy-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: var(--fs-sm);
+}
+.copy-preview-head .ghost-button { margin-left: auto; }
+.copy-preview-art {
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  /* Damero: el arte puede traer transparencia y sobre gris no se distingue. */
+  background:
+    conic-gradient(#22232f 25%, #1a1b24 0 50%, #22232f 0 75%, #1a1b24 0)
+    0 0 / 18px 18px;
+}
+.copy-preview-art img {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  object-fit: contain;
+}
+
 .copy-row {
   display: grid;
   /* Con áreas nombradas: las miniaturas y el rótulo se comparten con la

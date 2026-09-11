@@ -493,6 +493,19 @@ def apply(
 
     origin = layer.meta.get("art_text")
     if origin is None:
+        # Una capa con varias piezas apiladas no se puede reescribir de una vez.
+        # Medirla devuelve una sola línea del alto de las tres juntas, así que
+        # el rótulo, el precio y el pie salían reemplazados por un único renglón
+        # gigante: el bloque de 520x300 se convertía en uno de 880x264 a 288 px.
+        # Antes esto pasaba sin avisar y parecía que el arte se borraba.
+        piezas = blocks(project, layer)
+        if len(piezas) > 1:
+            raise ArtTextError(
+                f"'{layer.name}' trae {len(piezas)} piezas apiladas (rótulo, precio, "
+                "sello…). Reescribirlas de una vez las reemplaza por un solo renglón y "
+                "se pierde el diseño. Pulse «Separar en "
+                f"{len(piezas)} partes» y cambie solo la que necesita."
+            )
         # La máscara describe dónde estaba el copy viejo y es lo que hay que
         # borrar del fondo: se fija antes de mover la caja al texto nuevo.
         layer_extraction.ensure_mask(project, layer, persist=True)
@@ -912,6 +925,27 @@ BLOCK_GAP = 0.9
 BLOCK_SIZE_RATIO = 1.7
 BLOCK_COLOR_DISTANCE = 70.0
 
+#: Corte dentro de una misma línea. Un precio de retail lleva los centavos en
+#: volado —más pequeños y más arriba— y el corte por bandas no los separa nunca,
+#: porque van en la misma fila que los enteros. Reescribir el precio entero los
+#: rebajaba al mismo cuerpo y el arte perdía su forma.
+#:
+#: La firma que se busca es específica a propósito: la pieza de la derecha tiene
+#: que ser **más baja y acabar más arriba**. Una letra con rasgo descendente —la
+#: p de «Compra»— hace justo lo contrario, crece hacia abajo, así que no dispara
+#: el corte. Sin esa asimetría, cualquier palabra con p, q o g se partiría.
+#: Alto del volado respecto al de los enteros: por debajo de esto es otra pieza.
+CENTS_HEIGHT_RATIO = 0.80
+#: Cuánto más arriba tiene que acabar, en proporción al alto de los enteros.
+CENTS_RISE = 0.12
+#: Columnas seguidas con la firma nueva para creérselo. Un corte de una columna
+#: es ruido del antialias, no un cambio de cuerpo.
+CENTS_MIN_RUN = 3
+#: Ninguna de las dos partes puede quedar por debajo de esto (del ancho total).
+CENTS_MIN_SHARE = 0.08
+#: Ni el remate puede pasar de esto: más ancho que esto no es un volado.
+CENTS_MAX_SHARE = 0.45
+
 
 @dataclass(frozen=True)
 class _Run:
@@ -1018,6 +1052,127 @@ def _group_runs(rgb: np.ndarray, ink: np.ndarray) -> list[list[_Run]]:
     return groups
 
 
+def _raised_cut(ink: np.ndarray, box: tuple[int, int, int, int]) -> int | None:
+    """Columna donde una línea remata en un cuerpo más pequeño y más alto.
+
+    Devuelve la coordenada absoluta del corte, o ``None`` si la línea es
+    homogénea. Solo mira el perfil de tinta: no hace falta saber que son
+    centavos, basta con que el **remate** sea más bajo y acabe más arriba.
+
+    Se busca desde la derecha y contra la firma dominante de la línea, no
+    contra su primer tercio. Un «$» es más alto que sus dígitos, así que
+    tomarlo como referencia partía el precio delante del primer número.
+    """
+    left, top, width, height = box
+    if width < 24 or height < 16:
+        return None  # demasiado pequeña: cualquier medida aquí es ruido
+    banda = ink[top : top + height, left : left + width]
+    # Un volado es cosa de **una** línea. En un párrafo de dos, la primera suele
+    # ser más larga, y su cola —columnas con tinta solo arriba— es más baja y
+    # acaba más arriba que la mediana de las dos: clavada la firma del volado.
+    # Así se partía en dos un legal de dos renglones.
+    if len(_line_runs(_ink_rows(banda))) != 1:
+        return None
+
+    columnas = np.nonzero(banda.any(axis=0))[0]
+    if columnas.size < CENTS_MIN_RUN * 2:
+        return None
+
+    filas = [np.nonzero(banda[:, x])[0] for x in columnas]
+    bottoms = np.array([int(f[-1]) for f in filas], dtype=np.int32)
+    alturas = np.array([int(f[-1] - f[0] + 1) for f in filas], dtype=np.int32)
+
+    # La referencia es el trazo **alto** de la línea, no su mediana: en un
+    # precio los centavos ocupan casi tantas columnas como los enteros, así que
+    # la mediana cae entre los dos cuerpos y ninguno parece desviarse. El
+    # percentil alto se queda con los enteros midan lo que midan.
+    base_alto = float(np.percentile(alturas, 85))
+    if base_alto <= 0:
+        return None
+    grandes = alturas >= base_alto * 0.85
+    if not grandes.any():
+        return None
+    base_bottom = float(np.median(bottoms[grandes]))
+
+    def volado(indice: int) -> bool:
+        return (
+            base_bottom - bottoms[indice] >= base_alto * CENTS_RISE
+            and alturas[indice] <= base_alto * CENTS_HEIGHT_RATIO
+        )
+
+    # Cuántas columnas del final cumplen la firma del volado, sin interrupción.
+    cola = 0
+    for indice in range(columnas.size - 1, -1, -1):
+        if not volado(indice):
+            break
+        cola += 1
+    if cola < CENTS_MIN_RUN:
+        return None
+
+    minimo = max(CENTS_MIN_RUN, int(columnas.size * CENTS_MIN_SHARE))
+    # Ni un remate ínfimo ni medio renglón: un volado son los centavos, no la
+    # mitad del precio.
+    if cola < minimo or columnas.size - cola < minimo:
+        return None
+    if cola > columnas.size * CENTS_MAX_SHARE:
+        return None
+
+    # El corte no cae donde empieza a cumplirse la firma: el borde suavizado del
+    # último trazo grande ya la cumple —mide poco— y cortar ahí le arrancaba una
+    # esquina al dígito, que reaparecía pegada a los centavos. Se lleva al hueco
+    # en blanco que separa los dos trazos.
+    inicio = columnas.size - cola
+    ultimo_grande = 0
+    for indice in range(inicio - 1, -1, -1):
+        if alturas[indice] >= base_alto * 0.85:
+            ultimo_grande = indice
+            break
+
+    # El hueco de verdad está a la **derecha** de donde empieza a cumplirse la
+    # firma: el último trazo grande remata en una cola corta —la curva de un 3,
+    # el pie de un 4— que ya la cumple. Buscar el corte solo hasta ahí lo dejaba
+    # dentro del dígito y le arrancaba una esquina, que reaparecía pegada a los
+    # centavos. Se busca el primer blanco real pasado ese trazo.
+    minimo_hueco = max(2, int(base_alto * 0.04))
+    for indice in range(ultimo_grande + 1, columnas.size):
+        salto = int(columnas[indice]) - int(columnas[indice - 1])
+        if salto >= minimo_hueco:
+            return left + int(columnas[indice - 1]) + salto // 2 + 1
+    return left + int(columnas[inicio])
+
+
+def _split_raised(
+    ink: np.ndarray, box: tuple[int, int, int, int]
+) -> list[tuple[int, int, int, int]]:
+    """La caja, partida en el cambio de cuerpo si lo hay."""
+    corte = _raised_cut(ink, box)
+    if corte is None:
+        return [box]
+    left, top, width, height = box
+    izquierda = (left, top, corte - left, height)
+    derecha = (corte, top, left + width - corte, height)
+    # Cada mitad se recorta a su tinta: la caja de la banda es la de las dos.
+    return [caja for caja in (_tight(ink, izquierda), _tight(ink, derecha)) if caja]
+
+
+def _tight(
+    ink: np.ndarray, box: tuple[int, int, int, int]
+) -> tuple[int, int, int, int] | None:
+    """La caja ajustada a la tinta que contiene."""
+    left, top, width, height = box
+    recorte = ink[top : top + height, left : left + width]
+    filas = np.nonzero(recorte.any(axis=1))[0]
+    columnas = np.nonzero(recorte.any(axis=0))[0]
+    if not filas.size or not columnas.size:
+        return None
+    return (
+        left + int(columnas[0]),
+        top + int(filas[0]),
+        int(columnas[-1] - columnas[0] + 1),
+        int(filas[-1] - filas[0] + 1),
+    )
+
+
 def _block_boxes(rgb: np.ndarray, ink: np.ndarray) -> list[tuple[int, int, int, int]]:
     """Rectángulos de tinta de cada pieza, en coordenadas del PNG de la capa."""
     boxes: list[tuple[int, int, int, int]] = []
@@ -1026,7 +1181,7 @@ def _block_boxes(rgb: np.ndarray, ink: np.ndarray) -> list[tuple[int, int, int, 
         bottom = max(run.bottom for run in group)
         left = min(run.left for run in group)
         right = max(run.right for run in group)
-        boxes.append((left, top, right - left + 1, bottom - top + 1))
+        boxes.extend(_split_raised(ink, (left, top, right - left + 1, bottom - top + 1)))
     return sorted(boxes, key=lambda box: (box[1], box[0]))
 
 

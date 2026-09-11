@@ -211,6 +211,31 @@ sola capa, y guarda el recorte original para que «Volver al original» siga
 funcionando. Si no se tocó ninguna pieza, juntarlas es exactamente deshacer la
 separación y no se aplana nada.
 
+**Los centavos en volado.** Un precio de retail lleva los centavos más pequeños
+y más altos, en la **misma** fila que los enteros. El corte por bandas no los
+separaba nunca, así que reescribir el precio los rebajaba al cuerpo de los
+enteros: el «,99» salía igual de grande que el «39» y el arte perdía su forma.
+Ahora también se corta por cuerpo dentro de la línea.
+
+La firma que se busca es estrecha a propósito —el remate tiene que ser **más
+bajo y acabar más arriba**—, porque un separador que se pasa de listo parte
+palabras normales, y eso es peor que no cortar. Un rasgo descendente (la p de
+«Compra») hace lo contrario, crece hacia abajo, así que no dispara nada; un
+asterisco lo salva el mínimo de ancho; y dentro de un párrafo de dos renglones
+no se mira siquiera, porque la cola de la línea más larga tiene justo esa firma.
+De los doce casos de prueba, diez son de los que **no** deben cortarse.
+
+El corte cae en el blanco entre los dos trazos, no donde empieza a cumplirse la
+firma: el último dígito remata en una cola corta —la curva de un 3— que ya la
+cumple, y cortar ahí le arrancaba una esquina que reaparecía pegada a los
+centavos.
+
+**Reescribir una capa de varias piezas está prohibido.** Medirla entera devuelve
+una sola línea del alto de todas juntas: un bloque de 520x300 con rótulo, precio
+y pie se convertía en uno de 880x264 a 288 px, con los tres textos reemplazados
+por un renglón. Pasaba sin avisar y parecía que el arte se borraba solo. Ahora
+se rechaza con el número de piezas y el botón para separarlas.
+
 Lo difícil no es cortar, es saber dónde. Un hueco no vale: en el arte real esas
 cuatro piezas están a 4, 4 y 11 px unas de otras, más cerca de lo que separa la
 tilde de una Á de su letra. Lo que las distingue es la forma de la mancha: una
@@ -330,6 +355,16 @@ Los KV de una campaña suelen ser piezas del mismo PSD —el cuadrado y el verti
 del mismo aviso—, y sus capas no comparten identificador. La interfaz traduce
 cada texto a la capa equivalente de cada pieza por categoría y posición dentro de
 ella, que es lo que hace que una tabla sirva para toda la campaña.
+
+### Ver el arte mientras se escribe
+
+El editor de textos lleva el arte al lado, compuesto con el fondo real y todos
+los textos como van quedando (sin el producto: ese entra en el paso 3). Se
+rehace al guardar cada texto y tarda unos 40 ms.
+
+Sale de `GET /projects/{id}/preview/template`, que existía desde el principio y
+que la interfaz no llamaba: para ver el efecto de cambiar una palabra había que
+llegar al paso 4 y generar una tanda entera. Minutos por cada palabra.
 
 ### En «Revisar capas» se ve el KV, no la tanda
 
