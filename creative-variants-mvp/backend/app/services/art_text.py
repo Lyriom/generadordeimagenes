@@ -562,48 +562,19 @@ def apply(
     box_x, box_y, box_w, box_h = (int(value) for value in origin["box"])
     warnings: list[str] = []
 
-    # El texto nuevo puede crecer, pero no dentro de su vecino: un precio más
-    # largo se metía debajo del titular y el arte salía ilegible. Crece solo
-    # hacia donde su alineación se lo permite; el borde anclado no se mueve.
-    limit_left, limit_right = _free_span(project, layer, (box_x, box_y, box_w, box_h))
-    if align == "left":
-        room = limit_right - box_x
-    elif align == "right":
-        room = (box_x + box_w) - limit_left
-    else:
-        centre = box_x + box_w / 2
-        room = int(2 * min(centre - limit_left, limit_right - centre))
-    room = max(1, room)
-    if block_w > room and not font_size:
-        original_size = size
-        while block_w > room and size > 8:
-            size = max(8, int(size * 0.96))
-            font = renderer.load_font(font_path, size)
-            line_height = _line_height(font, style)
-            block_w, block_h, ink_top, ink_h = _block_metrics(font, text, line_height)
+    # Reservar la caja completa evita que el espacio sin tinta mueva el arte.
+    original_size = size
+    while (block_w > box_w or ink_h > box_h) and size > 1:
+        size -= 1
+        font = renderer.load_font(font_path, size)
+        line_height = _line_height(font, style)
+        block_w, block_h, ink_top, ink_h = _block_metrics(font, text, line_height)
+    if block_w > box_w or ink_h > box_h:
+        raise ArtTextError("El texto no cabe en el espacio original. Acorte el texto o quite saltos de línea.")
+    if size != original_size:
         warnings.append(
             f"'{text[:28]}' no cabía en el hueco de '{layer.name}': se redujo de "
-            f"{original_size} a {size} px para no pisar el elemento de al lado."
-        )
-
-    if align == "center":
-        new_x = box_x + (box_w - block_w) // 2
-    elif align == "right":
-        new_x = box_x + box_w - block_w
-    else:
-        new_x = box_x
-    # La tinta nueva empieza donde empezaba la vieja. La caja de la capa mide
-    # esa tinta —no el bloque tipográfico—: un bloque mide ascendente más
-    # descendente, bastante más alto que los trazos, y usarlo como caja hacía
-    # que un precio reescrito invadiera al rótulo de arriba y al sello de abajo
-    # sin dibujar nada sobre ellos. Cajas solapadas descuadran el reparto del
-    # diseño anclado y el control de calidad. El renderer sube el bloque por su
-    # `ink_top` para dejar los trazos en su sitio.
-
-    if new_x < 0 or new_x + block_w > project.canvas.width:
-        warnings.append(
-            f"El texto nuevo de '{layer.name}' es más ancho que el hueco del original: "
-            "se sale del arte. Acorte el texto o reduzca el cuerpo."
+            f"{original_size} a {size} px para conservar el espacio original."
         )
 
     layer.meta["art_text"] = {
@@ -640,10 +611,10 @@ def apply(
     # por producto resucitaba el logo que el usuario había retirado.
     if not layer.meta.get("removed_from_art"):
         layer.visible = True
-    layer.x = max(0, new_x)
-    layer.y = max(0, box_y)
-    layer.width = max(1, block_w)
-    layer.height = max(1, ink_h)
+    layer.x = box_x
+    layer.y = box_y
+    layer.width = box_w
+    layer.height = box_h
 
     # Sin la tipografía de marca el texto nuevo sale con la del sistema, y eso
     # no es publicable. El aviso va aquí, en el momento del cambio, y no solo en

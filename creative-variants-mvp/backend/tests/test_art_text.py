@@ -194,7 +194,7 @@ def test_a_second_edit_starts_from_the_original_not_from_the_previous_text(
     # píxeles más que unos dígitos sueltos. La diferencia es de un 4 %, invisible.
     assert abs(second["height"] - first["height"]) <= max(3, first["height"] * 0.06)
     assert abs(second["y"] - first["y"]) <= max(3, first["height"] * 0.06)
-    assert second["width"] < first["width"]
+    assert second["width"] == first["width"] == original["width"]
 
 
 def test_the_variant_shows_the_new_copy(client: TestClient, tmp_path):
@@ -1767,3 +1767,25 @@ def test_rewriting_the_price_keeps_its_plate_and_its_cents(
         f"el cambio se salió de la línea del precio: {cambio}"
     )
     assert izquierda >= caja["x"] - 4, f"el cambio se fue a la izquierda: {cambio}"
+
+
+@pytest.mark.parametrize("content", ["$1", "$12345678901234567890", "$12\n$34"])
+def test_replacement_reserves_original_box(client, tmp_path, content):
+    project = psd_project(client, tmp_path)
+    original = price_layer(project)
+    response = client.post(
+        f"/projects/{project['project_id']}/layers/{original['id']}/text",
+        json={"content": content},
+    )
+    assert response.status_code == 200, response.text
+    layer = response.json()["layer"]
+    assert tuple(layer[k] for k in ("x", "y", "width", "height")) == tuple(
+        original[k] for k in ("x", "y", "width", "height")
+    )
+    from app.services import renderer, art_text
+    from app.models import Project
+    model = Project.model_validate(project)
+    font = renderer.load_font(renderer.resolve_font_path(model, layer["font_weight"]), layer["font_size"])
+    width, _, _, height = art_text._block_metrics(font, content, layer["line_height"])
+    assert width <= original["width"]
+    assert height <= original["height"]
