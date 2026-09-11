@@ -1649,20 +1649,37 @@ def _bloque_con_plancha():
     morado = (107, 61, 190, 255)
     tinta = (15, 52, 75, 255)
 
-    image = Image.new("RGBA", (380, 240), (0, 0, 0, 0))
-    trazo = ImageDraw.Draw(image)
-    trazo.rounded_rectangle([60, 0, 320, 70], radius=10, fill=morado)
-    trazo.rounded_rectangle([0, 55, 379, 239], radius=18, fill=cian)
-    trazo.rounded_rectangle([14, 72, 365, 222], radius=10, fill=crema)
-
+    # Todo se coloca a partir de lo que mide cada texto: Docker no tiene las
+    # mismas caras que macOS, y con medidas fijas el pie acababa pisando al
+    # precio por un píxel. Pegados, son un solo tramo de tinta y la prueba
+    # medía otra cosa en cada máquina.
     rotulo = _ink("12 CUOTAS", 30, (255, 255, 255, 255))
-    image.paste(rotulo, ((380 - rotulo.width) // 2, 20), rotulo)
     precio = _ink("$43", 110, tinta)
-    image.paste(precio, (34, 88), precio)
     centavos = _ink(",99", 60, tinta)
-    image.paste(centavos, (34 + precio.width + 4, 88), centavos)
     pie = _ink("MENSUALES", 32, tinta)
-    image.paste(pie, ((380 - pie.width) // 2, 185), pie)
+
+    margen, aire = 34, 18
+    ancho = max(precio.width + 6 + centavos.width, pie.width, rotulo.width) + margen * 2
+    sello_alto = rotulo.height + 40
+    caja_arriba = sello_alto - 15
+    alto = caja_arriba + aire + precio.height + aire + pie.height + aire + 20
+
+    image = Image.new("RGBA", (ancho, alto), (0, 0, 0, 0))
+    trazo = ImageDraw.Draw(image)
+    trazo.rounded_rectangle(
+        [margen * 2, 0, ancho - margen * 2, sello_alto], radius=10, fill=morado
+    )
+    trazo.rounded_rectangle([0, caja_arriba, ancho - 1, alto - 1], radius=18, fill=cian)
+    trazo.rounded_rectangle(
+        [14, caja_arriba + 17, ancho - 15, alto - 18], radius=10, fill=crema
+    )
+
+    image.paste(rotulo, ((ancho - rotulo.width) // 2, 20), rotulo)
+    y = caja_arriba + aire
+    image.paste(precio, (margen, y), precio)
+    image.paste(centavos, (margen + precio.width + 6, y), centavos)
+    y += precio.height + aire
+    image.paste(pie, ((ancho - pie.width) // 2, y), pie)
     return image
 
 
