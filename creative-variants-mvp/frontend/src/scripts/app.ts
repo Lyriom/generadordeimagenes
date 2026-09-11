@@ -93,11 +93,9 @@ function stepState(): StepState {
     products: !hasCampaign
       ? "Primero carga al menos un KV."
       : null,
-    generate: !hasCampaign
-      ? "Primero carga al menos un KV."
-      : !hasProducts
-          ? "Elige al menos un producto o una combinación."
-          : null,
+    // Composing the existing KV does not require a replacement product.
+    // Catalog generation validates its selection when the user generates.
+    generate: hasCampaign ? null : "Primero carga al menos un KV.",
     results: null,
   };
   const next = STEP_ORDER.find((view) => !done[view]) || "generate";
@@ -1783,20 +1781,28 @@ function copyRow(project: Project, item: ArtTextLayer): string {
   const draft = state.copyDrafts[item.id];
   const pending = draft !== undefined && draft !== item.text;
   const shown = draft !== undefined ? draft : item.text;
-  const editor = item.editable
+  const editor = item.editable && item.pieces <= 1
     ? [
         '<textarea class="copy-text" rows="', String(lines), '" data-layer="', attr(item.id),
         '" spellcheck="false" placeholder="',
         item.text
           ? ""
           : "Lee la miniatura de la izquierda y escribe aquí el texto que la reemplaza",
-        '">', esc(shown), "</textarea>",
+        '" maxlength="400" aria-label="Texto del arte">', esc(shown), "</textarea>",
+        '<div class="copy-controls"><label>Color <input type="color" class="copy-color" value="',
+        attr((item.rewritten ? project.layers.find((layer) => layer.id === item.id)?.color : undefined) || item.style?.color || "#ffffff"),
+        '"></label><label>Alineación <select class="copy-align">',
+        optionList({left: "Izquierda", center: "Centro", right: "Derecha"},
+          (item.rewritten ? project.layers.find((layer) => layer.id === item.id)?.text_align : undefined) || item.style?.align || "center"),
+        '</select></label><small class="muted">El tamaño se ajusta al espacio disponible.</small></div>',
         pending
           ? '<small class="copy-pending">Sin guardar todavía: pulsa «Guardar texto».</small>'
           : "",
       ].join("")
-    : '<p class="muted tiny copy-locked">Sus píxeles no contienen texto que se pueda medir ' +
-      "(es una forma, un sello o una foto). Se puede quitar del arte, pero no reescribir.</p>";
+    : item.pieces > 1
+      ? '<p class="muted tiny copy-locked">Separa las partes para editar cada texto conservando su decoración.</p>'
+      : '<p class="muted tiny copy-locked">Sus píxeles no contienen texto que se pueda medir ' +
+      "(es una forma, un sello o una foto). Puedes sustituirlo por una imagen o quitarlo del arte.</p>";
   const notes = [
     CATEGORY_LABELS[item.category] || item.category,
     item.rewritten ? "reescrito" : "",
@@ -1823,7 +1829,11 @@ function copyRow(project: Project, item: ArtTextLayer): string {
         attr(fileUrl(project.project_id, item.src)) + '" alt="' + attr(item.name) + '"></div>'
       : "",
     '<div class="copy-actions">',
-    item.editable
+    '<label class="ghost-button small">Sustituir logo / imagen',
+    '<input class="replace-copy-image" type="file" accept="image/png,image/webp,image/jpeg" data-layer="',
+    attr(item.id), '" aria-label="Sustituir logo o imagen" style="display:none"></label>',
+
+    item.editable && item.pieces <= 1
       ? '<button class="button small save-copy" data-layer="' + attr(item.id) + '">Guardar texto</button>'
       : "",
     item.rewritten
@@ -1855,7 +1865,7 @@ function copyPreviewHtml(project: Project): string {
     attr(templatePreviewUrl(project.project_id)),
     '" alt="Arte de ', attr(project.name), '" loading="lazy" decoding="async"></div>',
     '<small class="muted tiny">El arte con tus textos, sin el producto: ese entra en el paso 3. ',
-    "Se actualiza solo al guardar un texto.</small></aside>",
+    "Se actualiza al guardar un texto o sustituir una imagen.</small></aside>",
   ].join("");
 }
 
@@ -1877,7 +1887,7 @@ function copyEditor(project: Project): string {
   if (!items.length) {
     return [
       '<section class="card" id="copy-editor"><div class="card-head"><div><h2>Textos y logos del arte</h2>',
-      "<p>Cambia el copy de la promoción o quita un elemento de la pieza</p></div></div>",
+      "<p>Cambia el texto, sustituye un logo por tu archivo o quita un elemento</p></div></div>",
       '<div class="notice">Este KV no tiene copy ni logos separados: todo llegó dentro del fondo. ',
       "Crea la capa que quieras editar en <em>Ajustes finos</em> y volverá a aparecer aquí.</div></section>",
     ].join("");
@@ -1885,7 +1895,7 @@ function copyEditor(project: Project): string {
   const editable = items.filter((item) => item.editable).length;
   return [
     '<section class="card elevated" id="copy-editor"><div class="card-head"><div><h2>Textos y logos del arte</h2>',
-    "<p>Cambia el copy de la promoción o quita un elemento de la pieza</p></div>",
+    "<p>Cambia el texto, sustituye un logo por tu archivo o quita un elemento</p></div>",
     '<span class="badge', editable ? " green" : "", '">', String(editable), " EDITABLES</span></div>",
     '<p class="muted tiny" style="margin-bottom:14px">El texto nuevo se escribe con el color, el cuerpo y la ',
     "posición del original. Si necesitas un texto distinto por producto, no lo cambies aquí: ",
@@ -1934,6 +1944,7 @@ async function sendCopyEdit(project: Project, payload: Record<string, unknown>):
       payload,
     );
     (response.warnings || []).forEach((warning: string) => toast(warning, "info"));
+    delete state.copyDrafts[layerId];
     await refreshProject(project.project_id);
     await loadTexts(project.project_id, true);
     await renderLayers();
@@ -1976,6 +1987,31 @@ function bindCopyEditor(project: Project): void {
       state.copyDrafts[field.dataset.layer!] = field.value;
     });
   });
+  queryAll<HTMLInputElement>(".replace-copy-image").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const file = input.files?.[0];
+      if (!file) return;
+      busy("Sustituyendo imagen", "Ajustando el logo al espacio original…", 30);
+      try {
+        const data = new FormData();
+        data.append("image", file);
+        const result = await post<any>(
+          "/projects/" + project.project_id + "/layers/" + input.dataset.layer + "/image", data,
+        );
+        (result.warnings || []).forEach((warning: string) => toast(warning, "info"));
+        delete state.copyDrafts[input.dataset.layer!];
+        await refreshProject(project.project_id);
+        await loadTexts(project.project_id, true);
+        await renderLayers();
+        toast("Imagen sustituida. Ya aparece en la vista previa y se usará en el arte final.", "success");
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        input.value = "";
+        idle();
+      }
+    });
+  });
   queryAll<HTMLButtonElement>(".save-copy").forEach((button) => {
     button.addEventListener("click", () => {
       const id = button.dataset.layer!;
@@ -1985,8 +2021,10 @@ function bindCopyEditor(project: Project): void {
         toast("Escribe el texto nuevo, o usa “Quitar del arte” si sobra.", "error");
         return;
       }
-      delete state.copyDrafts[id];
-      void sendCopyEdit(project, { layer_id: id, content });
+      const row = button.closest(".copy-row")!;
+      const color = row.querySelector<HTMLInputElement>(".copy-color")?.value;
+      const align = row.querySelector<HTMLSelectElement>(".copy-align")?.value;
+      void sendCopyEdit(project, { layer_id: id, content, color, align });
     });
   });
   queryAll<HTMLButtonElement>(".restore-copy").forEach((button) => {
@@ -2877,7 +2915,7 @@ function formatSelectorHtml(allowAuto: boolean): string {
   return [
     '<section class="card"><div class="card-head"><div><h2>Formatos de salida</h2><p>Ubicaciones reales con sus áreas seguras</p></div><span class="badge">',
     String(state.selectedFormats.size), " ELEGIDOS</span></div>",
-    allowAuto ? '<label class="choice" style="margin-bottom:14px"><input id="auto-formats" type="checkbox"' + checked(state.autoFormats) + '> Automático · original + formatos sociales</label>' : "",
+    allowAuto ? '<label class="choice" style="margin-bottom:14px"><input id="auto-formats" type="checkbox"' + checked(state.autoFormats) + '> Usar el tamaño original del KV</label>' : "",
     '<div id="manual-formats"', allowAuto && state.autoFormats ? " hidden" : "", '><div class="format-platforms">', filters, '</div><div class="format-grid">',
     visible.map(formatCard).join(""), "</div></div>",
     '<p class="muted tiny" style="margin:14px 0 0">Las líneas blancas marcan dónde deben quedar logo, producto, copy y legales.</p>',
@@ -3313,53 +3351,18 @@ function bindProductStep(): void {
    Cómo se genera: formatos, modelo, contexto y el botón final. */
 async function renderGenerate(): Promise<void> {
   const active = activeProject()!;
-  const modeTabs = [
-    '<div class="tabs"><button class="tab generation-mode', state.generationMode === "catalog" ? " is-active" : "", '" data-mode="catalog">Sustituir producto · fiel</button>',
-    '<button class="tab generation-mode', state.generationMode === "compose" ? " is-active" : "", '" data-mode="compose">Ajustes finos del KV activo</button></div>',
-  ].join("");
-
-  let body = "";
-  if (state.generationMode === "catalog") {
-    const total = (selectedProductFiles().length + validGroups().length) * state.campaign.length;
-    body = [
-      '<div class="notice success" style="margin-bottom:16px"><strong>Sustitución fiel.</strong> Se crearán ', String(total),
-      " arte(s), uno por producto y KV. Se mantiene el tamaño original, el fondo, los textos, logos, personas y todas sus posiciones.</div>",
-      '<section class="card elevated"><div class="card-head"><div><h2>Solo cambiar el producto</h2><p>Sin IA, sin nuevos layouts y sin reinterpretar el diseño</p></div></div>',
-      '<div class="notice">El producto nuevo ocupará el espacio del producto original. El resto del arte no se mueve ni se vuelve a dibujar.</div>',
-      '<button class="button large full" id="run-generation" style="margin-top:20px">Sustituir productos y generar archivos</button></section>',
-    ].join("");
-  } else {
-    // Subir un producto y generar aquí es tirar la tanda: este modo recompone
-    // el KV y no mira el catálogo. Antes no lo avisaba nadie.
-    const cargados = selectedProductFiles().length + validGroups().length;
-    body = [
-      cargados
-        ? [
-            '<div class="notice error" style="margin-bottom:16px">',
-            "<strong>Tienes ", String(cargados), " producto(s) cargado(s) y este modo no los usa.</strong> ",
-            "«Ajustes finos» recompone las capas del KV en varias medidas; el producto del arte ",
-            "se queda como está. Para sustituirlo por el que subiste, usa la otra pestaña.",
-            '<div class="button-row" style="margin-top:10px">',
-            '<button class="button" id="go-catalog-mode">Ir a «Sustituir producto · fiel»</button>',
-            "</div></div>",
-          ].join("")
-        : "",
-      '<div class="notice" style="margin-bottom:16px">Ajustes finos sobre <strong>', esc(active.name), '</strong>: recompone las capas actuales sin usar el catálogo de productos.</div>',
-      '<div class="grid two">', formatSelectorHtml(false), generationOptionsHtml("compose"), "</div>",
-      '<div class="spacer"></div>', permissionsHtml(active),
-    ].join("");
-  }
+  state.generationMode = "catalog";
   content().innerHTML = [
     stepBar("generate"),
-    pageHead(
-      "Paso 4 de 4",
-      state.generationMode === "catalog" ? "Reemplazo fiel del producto" : "Modelo, contexto y formatos",
-      state.generationMode === "catalog"
-        ? "Conserva el arte original y sustituye únicamente el producto."
-        : "Elige las medidas de salida, el contexto y genera variantes del KV.",
-    ),
-    modeTabs, body,
+    pageHead("Paso 4 de 4", "Generar artes", "Productos → formatos → indicaciones → modelo → generar"),
+    '<section class="card"><div class="card-head"><div><h2>1. Productos</h2><p>',
+    String(selectedProductFiles().length + validGroups().length),
+    ' seleccionados · ', String(state.campaign.length), ' KV de referencia</p></div>',
+    '<button class="ghost-button" id="edit-generation-products">Cambiar productos</button></div></section>',
+    '<div class="spacer"></div>', formatSelectorHtml(true),
+    '<div class="spacer"></div>', generationOptionsHtml("catalog"),
   ].join("");
+  query("#edit-generation-products")?.addEventListener("click", () => navigate("products"));
   bindStepBar();
   bindGenerate(active);
 }
@@ -3398,18 +3401,19 @@ function engineTakesModel(engine: string): boolean {
 function generationOptionsHtml(mode: "catalog" | "compose"): string {
   const engine = state.generationEngine;
   const models = modelOptionsFor(engine);
-  const countMin = mode === "catalog" ? 2 : 4;
+  const countMin = 1;
   const countMax = mode === "catalog" ? 6 : 30;
-  const countValue = mode === "catalog" ? 3 : 12;
+  const countValue = 1;
   const layouts = (state.capabilities?.layouts || []).map((layout) =>
     '<label class="choice"><input class="layout-check" type="checkbox" value="' + attr(layout.key) + '"> ' + esc(layout.label) + "</label>"
   ).join("");
   return [
     // El modelo y el contexto ya no viven dentro de un acordeón cerrado: eran
     // justo las dos decisiones que el usuario no encontraba.
-    '<section class="card elevated"><div class="card-head"><div><h2>Modelo y contexto</h2><p>Con qué motor se rehace el fondo y qué le pides</p></div></div>',
+    '<section class="card elevated"><div class="card-head"><div><h2>3. Indicaciones y modelo</h2><p>Conserva la composición revisada o describe los cambios que quieres.</p></div></div>',
     '<label class="choice" style="margin-bottom:14px"><input id="regenerate-background" type="checkbox"> Rehacer el fondo con IA</label>',
     '<div class="form-grid"><label class="field"><span>Motor del fondo</span><select id="generation-provider">',
+    engineOption("opencv", "Conservar el fondo · sin IA", engine),
     engineOption("magnific", "Magnific · eliges el modelo (con costo)", engine),
     engineOption("openai", "OpenAI · IA de imagen (con costo)", engine),
     engineOption("auto", "Automático · el que tenga clave", engine),
@@ -3468,7 +3472,9 @@ function bindFormatSelector(): void {
   queryAll<HTMLButtonElement>(".platform-filter").forEach((button) => {
     button.addEventListener("click", async () => {
       state.formatPlatform = button.dataset.platform || "Todos";
-      await renderGenerate();
+      const section = button.closest("section");
+      if (section) section.outerHTML = formatSelectorHtml(true);
+      bindFormatSelector();
     });
   });
   queryAll<HTMLInputElement>(".format-check").forEach((checkBox) => {
@@ -3497,7 +3503,9 @@ function bindGenerate(project: Project): void {
   // La lista de modelos sigue al motor: hay que repintar al cambiarlo.
   query<HTMLSelectElement>("#generation-provider")?.addEventListener("change", async (event) => {
     state.generationEngine = (event.currentTarget as HTMLSelectElement).value;
-    await renderGenerate();
+    const select = query<HTMLSelectElement>("#generation-model")!;
+    select.innerHTML = '<option value="">Predeterminado</option>' + modelOptionsFor(state.generationEngine);
+    select.disabled = !engineTakesModel(state.generationEngine);
   });
   bindFormatSelector();
   query("#run-generation")?.addEventListener("click", () => {
@@ -3507,21 +3515,6 @@ function bindGenerate(project: Project): void {
 }
 
 function generationSettings(): Record<string, any> {
-  if (state.generationMode === "catalog") {
-    return {
-      count: 1,
-      formats: null,
-      intensity: "conservative",
-      instruction: null,
-      product_position_instruction: null,
-      seed: 42,
-      product_arrangement: "auto",
-      background_provider: "opencv",
-      background_model: null,
-      background_prompt: null,
-      regenerate_background: false,
-    };
-  }
   const generalInstruction = query<HTMLTextAreaElement>("#generation-instruction")!.value.trim();
   return {
     count: Number(query<HTMLInputElement>("#generation-count")!.value),
@@ -3625,7 +3618,7 @@ async function runCatalogGeneration(): Promise<void> {
           replace_existing: firstBatch,
           product_label: productName(file),
           product_arrangement: "auto",
-          template_mode: true,
+          template_mode: !settings.regenerate_background && !settings.instruction,
           regenerate_background: settings.regenerate_background && firstBatch,
           text_overrides: textOverrides(project, productKey(file)),
         });
@@ -3657,7 +3650,7 @@ async function runCatalogGeneration(): Promise<void> {
           replace_existing: firstBatch,
           product_label: label,
           product_arrangement: group.arrangement,
-          template_mode: true,
+          template_mode: !settings.regenerate_background && !settings.instruction,
           regenerate_background: settings.regenerate_background && firstBatch,
           text_overrides: textOverrides(project, COMBO_PREFIX + group.id),
         });

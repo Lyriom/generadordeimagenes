@@ -509,7 +509,7 @@ def apply(
         # gigante: el bloque de 520x300 se convertía en uno de 880x264 a 288 px.
         # Antes esto pasaba sin avisar y parecía que el arte se borraba.
         piezas = blocks(project, layer)
-        if len(piezas) > 1:
+        if len(piezas) > 1 and not layer.meta.get("split_from"):
             raise ArtTextError(
                 f"'{layer.name}' trae {len(piezas)} piezas apiladas (rótulo, precio, "
                 "sello…). Reescribirlas de una vez las reemplaza por un solo renglón y "
@@ -630,8 +630,51 @@ def apply(
     return warnings
 
 
+def replace_image(project: Project, layer: Layer, source: Path) -> list[str]:
+    """Replace artwork pixels without product cutout processing or distortion."""
+    import hashlib
+    from .imaging import fit_contain, load_rgba
+
+    incoming = load_rgba(source)
+    bounds = incoming.getchannel("A").getbbox()
+    if bounds is None:
+        raise ArtTextError("La imagen está completamente transparente.")
+    incoming = incoming.crop(bounds)
+    layer_extraction.ensure_mask(project, layer, persist=True)
+    erase = bool(layer.meta.get("erased_from_plate")) or pixels_in_plate(project, layer)
+    layer.meta.setdefault("art_image_original", layer.model_dump(mode="json"))
+    original = layer.meta["art_image_original"]
+    x, y, width, height = (original[key] for key in ("x", "y", "width", "height"))
+    w, h = fit_contain(incoming.width, incoming.height, width, height)
+    digest = hashlib.sha256(str(incoming.size).encode() + incoming.tobytes()).hexdigest()[:16]
+    rel = f"layers/{layer.id}_logo_{digest}.png"
+    target = storage.abs_path(project.project_id, rel)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    incoming.save(target, format="PNG")
+    layer.meta.pop("art_text", None)
+    layer.meta.pop("removed_from_art", None)
+    layer.meta.pop("editable_content", None)
+    layer.meta["mask_edited"] = True
+    layer.type = LayerType.IMAGE
+    layer.src = rel
+    layer.content = None
+    layer.export_as_text = False
+    layer.x, layer.y = x + (width - w) // 2, y + (height - h) // 2
+    layer.width, layer.height = w, h
+    layer.visible = True
+    layer.extracted = True
+    layer.preserve_aspect_ratio = True
+    return _sync_plate(project, layer, erase=erase)
+
+
 def restore(project: Project, layer: Layer, *, rebuild: bool = True) -> list[str]:
     """Devuelve el elemento a sus píxeles originales."""
+    image_original = layer.meta.get("art_image_original")
+    if image_original:
+        restored = Layer.model_validate(image_original)
+        for key in type(layer).model_fields:
+            setattr(layer, key, getattr(restored, key))
+        return rebuild_plate(project) if rebuild else []
     origin = layer.meta.pop("art_text", None)
     if origin is None:
         return []
@@ -805,7 +848,7 @@ def _sync_plate(
 ) -> list[str]:
     """Marca o desmarca el elemento como borrado del fondo y rehace la plancha."""
     hidden = bool(layer.meta.get("removed_from_art")) or not layer.visible
-    rewritten = bool(layer.meta.get("art_text"))
+    rewritten = bool(layer.meta.get("art_text") or layer.meta.get("art_image_original"))
     if not (hidden or rewritten):
         if layer.meta.pop("erased_from_plate", None) and rebuild:
             return rebuild_plate(project)
@@ -1609,6 +1652,14 @@ def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
             fondo = index < cuantos_fondos
             fuente = limpio if fondo else art
             crop = fuente.crop((left, top, left + width, top + height))
+            if not fondo and plancha.any():
+                # The decoration has its own layer. Keep only foreground pixels
+                # so a tightly cropped white label cannot be read as purple ink.
+                text_alpha = alpha.copy()
+                text_alpha[plancha] = 0
+                crop.putalpha(Image.fromarray(text_alpha).crop(
+                    (left, top, left + width, top + height)
+                ))
             relative = f"layers/{layer.id[:8]}_parte{index + 1}.png"
             buffer = io.BytesIO()
             crop.save(buffer, format="PNG", optimize=True)

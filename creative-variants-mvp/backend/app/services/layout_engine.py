@@ -1377,12 +1377,13 @@ def build_placements(
                 placement.z_index = z_value
             notes.append("Orden visual de capas reorganizado.")
 
-    if source_canvas is not None and removed:
+    if source_canvas is not None and removed and not layout.get("keep_all_relative"):
         notes.extend(
             _redistribute_gaps(placements, list(removed), source_canvas, canvas_w, canvas_h)
         )
 
-    notes.extend(_resolve_overlaps(placements, canvas_w, canvas_h, margin))
+    if not layout.get("keep_all_relative"):
+        notes.extend(_resolve_overlaps(placements, canvas_w, canvas_h, margin))
     # Decoraciones pueden ir a sangre. Producto, marca y textos deben permanecer
     # dentro del área que cada plataforma deja libre de controles y overlays.
     if not layout.get("keep_all_relative"):

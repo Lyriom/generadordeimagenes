@@ -184,7 +184,7 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
 
     # 4 · Componer.
     formats = (
-        [native_format(project)]
+        (list(request.formats or []) or [native_format(project)])
         if replacement_only
         else (list(request.formats or []) or auto_formats(project))
     )
@@ -194,7 +194,7 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
         # Debe existir al menos un candidato por formato. Antes, seleccionar más
         # formatos que el valor del slider dejaba algunos sin producir.
         count=(
-            1
+            len(formats)
             if replacement_only
             else min(30, max(requested_count * 3, len(formats) * 2, requested_count))
         ),

@@ -1336,7 +1336,7 @@ def art_texts(project_id: str) -> ArtTextListResponse:
                     else art_text.current_text(layer)
                 ),
                 editable=style is not None,
-                rewritten=bool(origin),
+                rewritten=bool(origin or layer.meta.get("art_image_original")),
                 removed=bool(layer.meta.get("removed_from_art")) or not layer.visible,
                 in_plate=in_plate.get(layer.id, False),
                 # De una capa reescrita la miniatura enseña el recorte original:
@@ -1354,7 +1354,7 @@ def art_texts(project_id: str) -> ArtTextListResponse:
                 # una capa reescrita ya es un texto, y una parte ya está suelta.
                 pieces=(
                     1
-                    if origin.get("applied") or layer.meta.get("split_from")
+                    if origin.get("applied") or layer.meta.get("split_from") or layer.meta.get("art_image_original")
                     else max(1, len(art_text.blocks(project, layer)))
                 ),
                 part_of=layer.meta.get("split_from"),
@@ -1414,6 +1414,26 @@ def unsplit_art_text(project_id: str, layer_id: str) -> ArtTextSplitResponse:
     return ArtTextSplitResponse(
         project_id=project.project_id, layers=project.layers, warnings=warnings
     )
+
+
+@router.post("/{project_id}/layers/{layer_id}/image", response_model=ReplaceProductResponse)
+async def replace_art_image(
+    project_id: str, layer_id: str, image: UploadFile = File(...)
+) -> ReplaceProductResponse:
+    project = load_project_or_404(project_id)
+    layer = project.layer_by_id(layer_id)
+    if layer is None or layer.category in art_text.EXCLUDED_CATEGORIES:
+        raise bad_request("Seleccione una capa de texto, logo o decoración.")
+    temp_path = await _stream_upload(project.project_id, image, settings.max_upload_bytes)
+    try:
+        validate_image_path(temp_path, image.filename or "", allow_psd=False, min_side=1)
+        warnings = art_text.replace_image(project, layer, temp_path)
+        storage.save_project(project)
+    except Exception as exc:
+        raise as_http_error(exc) from exc
+    finally:
+        temp_path.unlink(missing_ok=True)
+    return ReplaceProductResponse(project_id=project_id, layer=layer, warnings=warnings)
 
 
 @router.post(

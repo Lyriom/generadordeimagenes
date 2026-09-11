@@ -866,8 +866,8 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
   /* Con áreas nombradas: las miniaturas y el rótulo se comparten con la
      revisión de roles, que ya declara su `grid-area`. Sin nombrarlas aquí, el
      navegador las colocaba en filas implícitas y la fila salía descuadrada. */
-  grid-template-columns: 116px minmax(0, 1fr) minmax(0, 1.6fr) minmax(200px, auto);
-  grid-template-areas: "thumb meta edit actions" "zoom zoom zoom zoom" "split split split split";
+  grid-template-columns: 116px minmax(0, 1fr);
+  grid-template-areas: "thumb meta" "edit edit" "actions actions" "zoom zoom" "split split";
   gap: 6px 12px;
   align-items: center;
   padding: 10px;
@@ -879,7 +879,8 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 .copy-edit { grid-area: edit; min-width: 0; }
 .copy-edit textarea {
   width: 100%;
-  min-height: 42px;
+  min-height: 80px;
+  field-sizing: content;
   resize: vertical;
   font-family: inherit;
 }
@@ -959,7 +960,7 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 @media (max-width: 980px) {
   .copy-row {
     grid-template-columns: 116px minmax(0, 1fr);
-    grid-template-areas: "thumb meta" "edit edit" "actions actions" "zoom zoom";
+    grid-template-areas: "thumb meta" "edit edit" "actions actions" "zoom zoom" "split split";
   }
 }
 
@@ -2391,3 +2392,9 @@ details .inventory { margin-top: 14px; }
   gap: 14px;
   padding-top: 12px;
 }
+
+.copy-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 10px; }
+.copy-controls label { display: flex; gap: 8px; align-items: center; font-size: var(--fs-2xs); }
+.copy-controls input[type="color"] { width: 42px; height: 34px; padding: 3px; }
+.copy-controls select { width: auto; min-height: 34px; }
+@media (max-width: 1180px) { .copy-preview { position: static; } }

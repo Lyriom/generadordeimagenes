@@ -1769,6 +1769,44 @@ def test_rewriting_the_price_keeps_its_plate_and_its_cents(
     assert izquierda >= caja["x"] - 4, f"el cambio se fue a la izquierda: {cambio}"
 
 
+def test_replace_logo_image_and_restore(client, tmp_path):
+    project = psd_project(client, tmp_path)
+    logo = logo_layer(project)
+    project_id = project['project_id']
+    asset = io.BytesIO()
+    Image.new('RGBA', (60, 120), (255, 0, 150, 255)).save(asset, format='PNG')
+    endpoint = f"/projects/{project_id}/layers/{logo['id']}"
+    response = client.post(endpoint + '/image', files={'image': ('brand.png', asset.getvalue(), 'image/png')})
+    assert response.status_code == 200, response.text
+    changed = response.json()['layer']
+    assert changed['category'] == logo['category']
+    assert changed['width'] / changed['height'] == pytest.approx(0.5, abs=0.02)
+    assert changed['width'] <= logo['width'] and changed['height'] <= logo['height']
+    saved = storage.load_project(project_id)
+    art_text.apply_batch(saved, {})
+    assert saved.layer_by_id(logo['id']).src == changed['src']
+    preview = client.get(f'/projects/{project_id}/preview/template')
+    assert preview.status_code == 200
+    pixels = np.asarray(Image.open(io.BytesIO(preview.content)).convert('RGB'))
+    assert ((pixels[:, :, 0] > 240) & (pixels[:, :, 1] < 20) & (pixels[:, :, 2] > 130)).any()
+    response = client.post(endpoint + '/text', json={'restore': True})
+    assert response.status_code == 200, response.text
+    restored = storage.load_project(project_id).layer_by_id(logo['id'])
+    assert restored.src == logo['src']
+    assert (restored.x, restored.y, restored.width, restored.height) == tuple(logo[k] for k in ('x', 'y', 'width', 'height'))
+
+
+def test_replace_logo_rejects_transparent_image(client, tmp_path):
+    project = psd_project(client, tmp_path)
+    asset = io.BytesIO()
+    Image.new('RGBA', (20, 20)).save(asset, format='PNG')
+    response = client.post(
+        f"/projects/{project['project_id']}/layers/{logo_layer(project)['id']}/image",
+        files={'image': ('empty.png', asset.getvalue(), 'image/png')},
+    )
+    assert response.status_code == 400
+
+
 @pytest.mark.parametrize("content", ["$1", "$12345678901234567890", "$12\n$34"])
 def test_replacement_reserves_original_box(client, tmp_path, content):
     project = psd_project(client, tmp_path)
@@ -1789,3 +1827,35 @@ def test_replacement_reserves_original_box(client, tmp_path, content):
     width, _, _, height = art_text._block_metrics(font, content, layer["line_height"])
     assert width <= original["width"]
     assert height <= original["height"]
+
+
+def test_white_installments_stay_visible_after_edit(client, plate_project):
+    project_id = plate_project['project_id']
+    parent = next(layer for layer in plate_project['layers'] if layer['name'] == 'bloque')
+    response = client.post(f"/projects/{project_id}/layers/{parent['id']}/split")
+    assert response.status_code == 200
+    parts = response.json()['layers']
+    label = next(part for part in parts if part['meta'].get('art_piece') != 'fondo')
+    project = storage.load_project(project_id)
+    style = art_text.measure(project, project.layer_by_id(label['id']))
+    assert min(int(style.color[i:i+2], 16) for i in (1, 3, 5)) >= 250
+    before = np.asarray(Image.open(io.BytesIO(client.get(f'/projects/{project_id}/preview/template').content)).convert('RGB')).copy()
+    response = client.post(f"/projects/{project_id}/layers/{label['id']}/text", json={'content': '24 CUOTAS'})
+    assert response.status_code == 200, response.text
+    after = np.asarray(Image.open(io.BytesIO(client.get(f'/projects/{project_id}/preview/template').content)).convert('RGB')).copy()
+    x, y, w, h = (label[k] for k in ('x', 'y', 'width', 'height'))
+    assert (after[y:y+h, x:x+w].min(axis=2) > 230).any()
+    before[y:y+h, x:x+w] = 0
+    after[y:y+h, x:x+w] = 0
+    assert np.array_equal(before, after), 'Editing the label changed the decoration'
+
+
+def test_already_split_text_does_not_require_splitting_again(client, plate_project, monkeypatch):
+    project_id = plate_project['project_id']
+    parent = next(layer for layer in plate_project['layers'] if layer['name'] == 'bloque')
+    response = client.post(f"/projects/{project_id}/layers/{parent['id']}/split")
+    assert response.status_code == 200
+    label = next(part for part in response.json()['layers'] if part['meta'].get('art_piece') != 'fondo')
+    monkeypatch.setattr(art_text, 'blocks', lambda *args: [(0, 0, 10, 10), (10, 0, 10, 10)])
+    response = client.post(f"/projects/{project_id}/layers/{label['id']}/text", json={'content': '24 CUOTAS'})
+    assert response.status_code == 200, response.text
