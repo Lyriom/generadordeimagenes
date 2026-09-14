@@ -2398,3 +2398,66 @@ details .inventory { margin-top: 14px; }
 .copy-controls input[type="color"] { width: 42px; height: 34px; padding: 3px; }
 .copy-controls select { width: auto; min-height: 34px; }
 @media (max-width: 1180px) { .copy-preview { position: static; } }
+
+/* ------------------------------------------------- dónde va el producto
+   El recuadro se dibuja arrastrando sobre el arte, así que el escenario tiene
+   que medir exactamente lo que mide la imagen: cualquier hueco entre los dos
+   desplaza el rectángulo respecto a lo que el usuario ve. De ahí el wrapper
+   sin padding y la imagen en bloque al 100%. */
+.zone-workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(220px, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+.zone-stage {
+  position: relative;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--surface-2);
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+}
+.zone-stage img { display: block; width: 100%; height: auto; pointer-events: none; }
+.zone-box {
+  position: absolute;
+  border-radius: 4px;
+  pointer-events: none;
+}
+.zone-box.is-auto {
+  border: 2px dashed var(--fg-muted);
+  background: rgba(20, 21, 31, .06);
+}
+.zone-box.is-manual {
+  border: 2px solid var(--accent);
+  background: var(--accent-ring);
+  box-shadow: 0 0 0 9999px rgba(20, 21, 31, .18);
+}
+.zone-box.is-live {
+  border: 2px solid var(--accent);
+  background: rgba(90, 91, 240, .18);
+}
+.zone-side { display: grid; gap: 12px; }
+.zone-kvs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
+.zone-kv {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--fg-soft);
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: var(--fs-2xs);
+  cursor: pointer;
+}
+.zone-kv.is-current { border-color: var(--accent); color: var(--accent-soft-fg); background: var(--accent-soft); }
+.zone-kv.is-set { font-weight: 650; }
+
+/* Resultado de comprobar una separación, en la ficha de cada parte. */
+.copy-check { margin: 6px 0 0; font-size: var(--fs-2xs); line-height: 1.35; }
+.copy-check.is-ok { color: var(--success); }
+.copy-check.is-bad { color: var(--danger); font-weight: 650; }
+
+@media (max-width: 980px) {
+  .zone-workbench { grid-template-columns: minmax(0, 1fr); }
+}

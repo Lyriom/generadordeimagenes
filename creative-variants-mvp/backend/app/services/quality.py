@@ -10,7 +10,7 @@ from PIL import Image
 
 from ..models import LayerCategory, LayerType, Project, QualityReport
 from . import product_scale
-from .imaging import contrast_ratio, hex_to_rgb
+from .imaging import contrast_ratio, hex_to_rgb, rotated_bounds
 from .layout_engine import SAFE_MARGIN, Placement, VariantPlan, overlap_ratio
 
 MIN_LOGO_WIDTH_RATIO = 0.055
@@ -343,7 +343,16 @@ def evaluate_variant(
             continue
         if layer.height <= 0 or placement.height <= 0:
             continue
-        original = layer.width / layer.height
+        # Una capa girada ocupa una caja más ancha y más alta que ella misma, y
+        # es esa caja la que el renderer devuelve. Medirla contra la proporción
+        # sin girar marcaba como deformada —defecto que invalida la pieza— una
+        # franja que el propio diseño mandó inclinar.
+        esperado_w, esperado_h = (
+            rotated_bounds(layer.width, layer.height, layer.rotation)
+            if layer.rotation and not layer.pixel_critical
+            else (layer.width, layer.height)
+        )
+        original = esperado_w / esperado_h
         rendered = placement.width / placement.height
         # Con dimensiones enteras, una franja de 14 px de alto no puede expresar su
         # proporción con más precisión: la tolerancia crece cuando el lado es pequeño.

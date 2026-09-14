@@ -66,6 +66,17 @@ export interface Variant {
   meta: Record<string, any>;
 }
 
+/** Dónde va el producto, en fracciones del lienzo (0..1).
+ *
+ *  Se guarda en fracciones y no en píxeles porque la misma decisión tiene que
+ *  valer en los cinco formatos de la tanda, que no miden lo mismo. */
+export interface ProductZone {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 export interface Project {
   project_id: string;
   name: string;
@@ -87,6 +98,8 @@ export interface Project {
   };
   layers: Layer[];
   variants: Variant[];
+  /** Zona elegida a mano para el producto. `null` = la decide el motor. */
+  product_zone?: ProductZone | null;
   warnings: string[];
   analysis: Record<string, any>;
   background: { path?: string | null; provider?: string | null; warnings?: string[] };
@@ -153,6 +166,11 @@ export interface ArtTextLayer {
   pieces: number;
   /** Id de la capa de la que salió esta parte, si es una parte. */
   part_of?: string | null;
+  /** Si la separación cubre el elemento entero sin pisarse. `null` = no viene
+   *  de separar nada. */
+  split_ok?: boolean | null;
+  /** Qué se comprobó al separarla, en una línea. */
+  split_check?: string | null;
   style?: {
     color: string;
     align: "left" | "center" | "right";

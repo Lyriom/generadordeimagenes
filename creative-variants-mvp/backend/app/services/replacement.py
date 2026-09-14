@@ -260,8 +260,10 @@ def replace_layer_image(
     for other in doomed:
         other.visible = False
     if doomed:
+        # `layer` no entra en la cuenta: es la que recibe el producto nuevo y se
+        # queda visible. Sumarla decía que se ocultó un elemento de más.
         warnings.append(
-            f"Se ocultaron {len(doomed) + 1} elementos de producto del KV original; "
+            f"Se ocultaron {len(doomed)} elemento(s) de producto del KV original; "
             "la plantilla queda limpia antes de colocar el nuevo."
         )
 

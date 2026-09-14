@@ -11,6 +11,7 @@ from .project import (
     Layer,
     LayerCategory,
     LayerType,
+    ProductZone,
     Project,
     QualityReport,
     Variant,
@@ -253,6 +254,22 @@ class ReconstructBackgroundResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ProductZoneRequest(BaseModel):
+    """Dónde debe caer el producto en este KV.
+
+    `zone: null` borra la elección y devuelve la decisión al motor, que es lo
+    que hace el botón «volver a la zona detectada».
+    """
+
+    zone: ProductZone | None = None
+
+
+class ProductZoneResponse(BaseModel):
+    project_id: str
+    zone: ProductZone | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
 class GenerateRequest(BaseModel):
     count: int = Field(default=12, ge=1, le=30)
     seed: int = Field(default=42, ge=0, le=2**31 - 1)
@@ -266,6 +283,14 @@ class GenerateRequest(BaseModel):
     instruction: str | None = Field(default=None, max_length=400)
     product_position_instruction: str | None = Field(default=None, max_length=400)
     layouts: list[str] | None = None
+    anchored_layouts: bool = Field(
+        default=False,
+        description=(
+            "Conservar el diseño del arte: cada formato recibe la composición "
+            "fiel si su proporción lo permite y, si no, la retícula del propio "
+            "arte recompuesta. Nunca una familia genérica."
+        ),
+    )
     replace_existing: bool = True
     product_label: str | None = Field(default=None, max_length=180)
     product_arrangement: Literal["auto", "horizontal", "vertical", "overlap"] = "auto"
@@ -390,6 +415,17 @@ class ArtTextLayer(BaseModel):
     )
     part_of: str | None = Field(
         default=None, description="Id de la capa de la que salió esta parte."
+    )
+    split_ok: bool | None = Field(
+        default=None,
+        description=(
+            "Resultado de comprobar la separación: True si las partes cubren el "
+            "elemento original sin perder tinta ni pisarse, False si hay que "
+            "revisarla, None si esta capa no viene de una separación."
+        ),
+    )
+    split_check: str | None = Field(
+        default=None, description="Qué se comprobó al separar, en una línea."
     )
 
 

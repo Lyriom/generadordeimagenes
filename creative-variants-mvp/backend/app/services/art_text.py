@@ -53,10 +53,6 @@ OPAQUE_PATCH_RATIO = 0.92
 #: fondo del propio parche.
 INK_COLOR_DISTANCE = 60.0
 
-#: Margen lateral mínimo entre un texto que crece y su vecino, en fracción del
-#: ancho del lienzo. Sin él, un precio más largo se mete debajo del titular.
-NEIGHBOUR_GAP = 0.012
-
 #: Un tramo de tinta más bajo que esta fracción de una línea completa no es una
 #: línea: es una tilde, un punto o una cedilla suelta de la línea de al lado.
 FRAGMENT_HEIGHT = 0.5
@@ -455,33 +451,6 @@ def _line_height(font, style: TextStyle) -> float:
     # de retail va a 0.8 o menos y salía un 7 % más suelto que el original. Con
     # la medida de líneas ya fiable, el paso medido merece más crédito.
     return max(0.62, min(2.4, style.line_pitch / max(1, ascent + descent)))
-
-
-def _free_span(
-    project: Project, layer: Layer, box: tuple[int, int, int, int]
-) -> tuple[int, int]:
-    """Bordes entre los que el texto puede crecer sin invadir a su vecino.
-
-    Devuelve los dos bordes y no solo el ancho: un precio alineado a la derecha
-    crece hacia la izquierda, así que saber cuánto cabe no basta para colocarlo.
-    El hueco que ya ocupaba el original siempre entra: nunca se le quita sitio.
-    """
-    box_x, box_y, box_w, box_h = box
-    gap = max(4, int(project.canvas.width * NEIGHBOUR_GAP))
-    left = 0
-    right = project.canvas.width
-    for other in project.layers:
-        if other.id == layer.id or not other.visible:
-            continue
-        if other.category == LayerCategory.BACKGROUND:
-            continue
-        if other.y >= box_y + box_h or other.y + other.height <= box_y:
-            continue  # no comparte banda vertical: no estorba
-        if other.x + other.width <= box_x:
-            left = max(left, other.x + other.width + gap)
-        elif other.x >= box_x + box_w:
-            right = min(right, other.x - gap)
-    return min(left, box_x), max(right, box_x + box_w)
 
 
 def apply(
@@ -1610,6 +1579,73 @@ def blocks(project: Project, layer: Layer) -> list[tuple[int, int, int, int]]:
     return _block_boxes(rgb, alpha)
 
 
+#: Cuánta tinta del elemento puede quedarse fuera de las partes —o repetirse en
+#: dos— sin que la separación esté mal. Un borde suavizado suelto no es una pieza
+#: perdida; un sello entero, sí.
+SPLIT_INK_TOLERANCE = 0.02
+
+
+def verify_split(
+    alpha: np.ndarray,
+    boxes: list[tuple[int, int, int, int]],
+    plate_count: int = 0,
+) -> tuple[bool, str]:
+    """¿Las partes son el elemento entero, sin perder nada ni repetir nada?
+
+    Separar se hace midiendo manchas de tinta, y eso puede salir mal de dos
+    maneras que el usuario no ve hasta que ya ha generado la tanda: dejarse una
+    pieza fuera —al reescribir el resto, el precio viejo reaparece debajo— o
+    recortar dos veces el mismo trozo, que entonces se dibuja dos veces y se
+    empasta. Las dos cosas están en los píxeles, así que se comprueban aquí en
+    vez de dar la separación por buena.
+
+    `plate_count` son las primeras cajas, que son planchas. Un rótulo sobre su
+    plancha se recorta dos veces **a propósito** —la plancha sale con el texto
+    borrado y el texto sin la plancha—, así que cruzar una familia con la otra
+    marcaría como defecto justo lo que permite reescribir el precio sin perder
+    el diseño. El solape se mide dentro de cada familia.
+
+    Devuelve (si está bien, qué se comprobó) para poder enseñarlo en la ficha.
+    """
+    ink = alpha >= INK_ALPHA
+    total = int(ink.sum())
+    if not total:
+        return False, "El elemento no tiene píxeles visibles que separar."
+
+    cubierto = np.zeros(ink.shape, dtype=bool)
+    for left, top, width, height in boxes:
+        cubierto[top : top + height, left : left + width] = True
+    fuera = int((ink & ~cubierto).sum())
+
+    repetido = 0
+    for familia in (boxes[:plate_count], boxes[plate_count:]):
+        visto = np.zeros(ink.shape, dtype=bool)
+        for left, top, width, height in familia:
+            ventana = visto[top : top + height, left : left + width]
+            repetido += int(
+                (ventana & ink[top : top + height, left : left + width]).sum()
+            )
+            ventana |= True
+
+    perdida = fuera / total
+    solape = repetido / total
+    if perdida > SPLIT_INK_TOLERANCE:
+        return False, (
+            f"Las partes dejan fuera el {perdida:.0%} de la tinta del elemento: "
+            "hay una pieza que no se recortó y seguirá dibujándose por debajo. "
+            "Vuelva a unirlas y edite el elemento entero."
+        )
+    if solape > SPLIT_INK_TOLERANCE:
+        return False, (
+            f"Dos partes se reparten el mismo {solape:.0%} de la tinta: ese trozo "
+            "se dibujará dos veces. Vuelva a unirlas y edite el elemento entero."
+        )
+    return True, (
+        f"Comprobado: las {len(boxes)} partes cubren toda la tinta del elemento "
+        "sin pisarse."
+    )
+
+
 def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
     """Convierte una capa con varias piezas en una capa por pieza.
 
@@ -1704,13 +1740,21 @@ def split(project: Project, layer: Layer) -> tuple[list[Layer], list[str]]:
 
     position = project.layers.index(layer)
     project.layers[position : position + 1] = parts
+    # La comprobación viaja con las partes: se enseña en la ficha del elemento,
+    # no solo en la tostada del momento en que se separó.
+    valida, detalle = verify_split(alpha, boxes, cuantos_fondos)
     for part in parts:
         part.meta["split_into"] = [item.id for item in parts]
+        part.meta["split_check"] = {"ok": valida, "detail": detalle}
 
-    return parts, [
+    avisos = [
         f"'{layer.name}' se separó en {len(parts)} partes: ahora cada una se "
         "reescribe o se quita por su cuenta."
     ]
+    if not valida:
+        avisos.append(f"Revise la separación de '{layer.name}'. {detalle}")
+        logger.warning("separación dudosa en %s: %s", layer.id, detalle)
+    return parts, avisos
 
 
 def _part_touched(part: Layer) -> bool:

@@ -202,6 +202,16 @@ cambiar el precio y nada más. Cuando una capa trae varias piezas, la lista lo
 avisa y ofrece separarlas; cada una pasa a ser un elemento normal: se reescribe,
 se quita y se exporta por su cuenta.
 
+**La separación se comprueba, no se da por buena.** Separar es medir manchas de
+tinta, y eso puede salir mal de dos maneras que no se ven hasta que la tanda está
+hecha: dejarse una pieza fuera —al reescribir el resto, el precio viejo asoma por
+debajo del nuevo— o recortar dos veces el mismo trozo, que entonces se dibuja dos
+veces y se empasta. Las dos están en los píxeles, así que al separar se comprueba
+que las partes cubren toda la tinta del elemento sin pisarse (tolerancia del 2 %,
+que es el borde suavizado). El resultado viaja con cada parte: se ve en su ficha
+(«✓ Comprobado: las 4 partes cubren toda la tinta…») y, si no pasó, se repite
+antes de componer, cuando todavía se puede volver a unir.
+
 No hace falta volver a unirlas para terminar. Las piezas que no se tocan salen
 con sus píxeles originales, así que separar en cuatro y cambiar solo el precio
 da el arte de siempre con el precio nuevo. **«Volver a unir»** está para cuando
@@ -565,10 +575,18 @@ La interfaz tiene **cuatro secciones**: *Campaña*, *Capas y KV*, *Generar* y
    Logo, copy, fondo y decoraciones se conservan, mientras cada producto nuevo participa
    en una recomposición completa del arte. Se pueden producir separados o juntos, con
    disposición automática, en fila, apilada o superpuesta; una vista previa confirma cada
-   combinación antes de generar.
+   combinación antes de generar. **Dónde va el producto** deja marcar el sitio
+   arrastrando un recuadro sobre el arte: sin recuadro manda el hueco que el producto
+   ocupaba en el PSD, con recuadro manda el recuadro, en todas las medidas de la tanda
+   y también con el diseño del KV conservado.
 4. **Elige formatos y genera.** El modo automático conserva el flujo anterior. La selección
    por plataforma ofrece presets de Meta, Google Ads y YouTube con proporción y guía de
-   área segura. Un botón recorre los productos y conserva juntas todas las
+   área segura. La cantidad se pide **por formato** y la línea de cuentas dice, antes de
+   pulsar, cuántas piezas van a salir (formatos × propuestas × productos × KV).
+   *Conservar el diseño del KV* es una casilla, ya no una deducción: marcada entrega una
+   propuesta por formato con el arte intacto —ahí no se aplican ni las indicaciones ni el
+   fondo nuevo, y se avisa—; desmarcada, varias propuestas distintas por formato. Un botón
+   recorre los productos y conserva juntas todas las
    tandas. El backend hace cada tanda en una llamada
    (`POST /projects/{id}/auto`): detectar → recortar → preparar el fondo → componer.
    Se garantiza al menos una propuesta por preset elegido. Debajo aparece la galería con
@@ -753,6 +771,7 @@ PUT    /projects/{project_id}/layers               Actualizar / reordenar / elim
 POST   /projects/{project_id}/layers               Crear capa manual (rectángulo o texto)
 POST   /projects/{project_id}/layers/mask          Corregir máscara (pincel add/subtract)
 GET    /projects/{project_id}/layers/replaceable   Elementos que pueden recibir otro producto
+PUT    /projects/{project_id}/product-zone         Zona donde debe ir el producto (fracciones 0..1, null = automática)
 POST   /projects/{project_id}/layers/replace       Cambiar el producto (multipart: image, layer_id?, hide_others?)
 POST   /projects/{project_id}/extract              Extraer capas como PNG RGBA
 POST   /projects/{project_id}/reconstruct-background   Inpainting del fondo (provider, model)
@@ -787,6 +806,24 @@ curl -s "http://localhost:8000/projects/$PID/export" -o variantes.zip
 
 `formats` vacío o ausente = el tamaño nativo del arte (el formato soportado con la
 proporción más cercana) más `1080x1080` y `1080x1350`.
+
+`count` son **propuestas por formato**, no por tanda: `{"count": 2, "formats":
+["meta_feed_4_5", "meta_stories"]}` entrega cuatro piezas, dos de cada medida.
+Repartir una cifra única entre las medidas elegidas dejaba formatos con una sola
+pieza. El tope sigue siendo 30 composiciones por tanda; si lo pedido no cabe, se
+entrega lo que cabe y se dice en `warnings`.
+
+Con `template_mode: true` (sustitución fiel) se conserva el diseño del KV, y ahí
+solo hay **una** composición posible por medida: se entrega una por formato. Lo
+que no se conserva es el lienzo —los formatos elegidos se respetan igual—: cada
+medida recibe la copia fiel si su proporción lo permite y, si no, la retícula del
+propio arte recompuesta. Nunca una familia genérica.
+
+`PUT /projects/{id}/product-zone` con `{"zone": {"x": .6, "y": .62, "width": .34,
+"height": .3}}` fija a mano dónde va el producto. Manda sobre el hueco que el
+motor aprende del PSD y sobre el anclaje del modo fiel, y al guardarse en
+fracciones del lienzo vale igual para todas las medidas de la tanda. `{"zone":
+null}` devuelve la decisión al motor.
 
 Camino largo, paso por paso (control total):
 

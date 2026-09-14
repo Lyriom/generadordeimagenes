@@ -1016,12 +1016,19 @@ def build_placements(
     safe_area: dict[str, float] | None = None,
     product_arrangement: str = "auto",
     removed: Iterable[Layer] | None = None,
+    product_zone: tuple[float, float, float, float] | None = None,
 ) -> tuple[list[Placement], list[str]]:
     """Coloca cada capa en la zona del layout con variación determinista.
 
     `removed` son las capas que el usuario quitó del arte. No se dibujan, pero
     el hueco que dejan hay que repartirlo: si no, el diseño anclado queda con un
     claro en medio donde antes había un elemento.
+
+    `product_zone` es el recuadro que una persona dibujó sobre el arte. Cuando
+    existe manda sobre todo lo demás para la categoría producto: sobre la zona
+    del layout, sobre la que se aprendió del PSD y sobre el anclaje del modo
+    fiel. Es una decisión tomada a mano; el motor no tiene nada mejor que
+    ofrecer.
     """
     layout = LAYOUTS.get(layout_key, LAYOUTS["product_left"])
     zones = zones_for_format(layout_key, canvas_w, canvas_h)
@@ -1103,7 +1110,20 @@ def build_placements(
         # tocar ninguna otra capa del arte.
         if category == LayerCategory.PRODUCT and len(group) > 1:
             relative = None
+        # La zona dibujada a mano gana a las dos formas de anclaje. Sin esto el
+        # producto volvía a su sitio del PSD y el recuadro no servía de nada.
+        manual_zone = (
+            tuple(float(value) for value in product_zone)
+            if product_zone is not None and category == LayerCategory.PRODUCT
+            else None
+        )
+        if manual_zone is not None:
+            learned_zone = None
+            relative = None
         zone = _zone_for(zones, category)
+        if manual_zone is not None:
+            zone = manual_zone  # type: ignore[assignment]
+            notes.append("Producto colocado en la zona elegida a mano.")
         if learned_zone is not None:
             source_w, source_h = learned_zone
             bx, by, bw, bh = (int(value) for value in group[0].meta["replacement_box"])
@@ -1148,7 +1168,7 @@ def build_placements(
                 bw, bh = new_w, new_h
             zone = (bx / source_w, by / source_h, bw / source_w, bh / source_h)
             notes.append("Productos restringidos a la zona aprendida del PSD.")
-        if category == LayerCategory.PRODUCT and (
+        if manual_zone is None and category == LayerCategory.PRODUCT and (
             bias.get("product_horizontal") or bias.get("product_vertical")
         ):
             zx, zy, zw, zh = zone
@@ -1173,7 +1193,9 @@ def build_placements(
             learned_zone = None
             notes.append("Posición del producto aplicada desde la indicación escrita.")
         has_explicit_product_position = category == LayerCategory.PRODUCT and (
-            bias.get("product_horizontal") or bias.get("product_vertical")
+            manual_zone is not None
+            or bias.get("product_horizontal")
+            or bias.get("product_vertical")
         )
         if (
             mirror
@@ -1191,7 +1213,11 @@ def build_placements(
                 layer.width / max(1, layer.height) for layer in group if not layer.is_text
             ]
             por_capa = [derived_zones.get(layer.id) for layer in group]
-            if derived and all(slot is not None for slot in por_capa):
+            # El reflujo deduce una banda por capa del arte original, y para el
+            # producto esa banda deja de valer en cuanto alguien dibuja su sitio:
+            # el recuadro es una decisión posterior y más explícita que la
+            # retícula de la que se partió.
+            if derived and manual_zone is None and all(slot is not None for slot in por_capa):
                 # El reflujo ya le dio a cada capa su banda, en el orden que
                 # tenían en el arte. Repartir aquí una zona común las volvería a
                 # mezclar.
@@ -1256,14 +1282,10 @@ def build_placements(
 
             can_resize = layer.resizable and (resizable is None or layer.id in resizable)
             can_move = layer.movable and (movable is None or layer.id in movable)
-            if learned_zone is not None:
+            if learned_zone is not None or manual_zone is not None:
                 can_resize = False
                 can_move = False
             if has_explicit_product_position:
-                can_move = False
-            if relative is not None:
-                # Se respeta el diseño original: sin escalado extra ni saltos.
-                can_resize = False
                 can_move = False
 
             scale = 1.0
@@ -1327,7 +1349,11 @@ def build_placements(
 
             # Un elemento anclado reproduce el diseño original, que puede ir a sangre:
             # aplicarle el margen de seguridad lo encoge y desplaza toda la pieza.
-            box_margin = 0 if (relative is not None or learned_zone is not None) else margin
+            box_margin = (
+                0
+                if (relative is not None or learned_zone is not None or manual_zone is not None)
+                else margin
+            )
             x, y, width, height = _clamp_box(
                 x, y, width, height, canvas_w, canvas_h, box_margin
             )
@@ -1447,7 +1473,7 @@ def _redistribute_gaps(
     if len(column) < 2:
         return notes
 
-    for hole in holes:
+    for capa_quitada, hole in zip(removed, holes):
         # Solo la columna del hueco: un precio quitado a la derecha no debe
         # mover el logo de la izquierda.
         stack = [p for p in column if _horizontal_overlap(hole, p.box) >= COLUMN_OVERLAP]
@@ -1483,7 +1509,7 @@ def _redistribute_gaps(
             if index < len(weights):
                 cursor += free * weights[index] / total
         notes.append(
-            f"Se repartió el espacio de '{removed[holes.index(hole)].name}' entre los "
+            f"Se repartió el espacio de '{capa_quitada.name}' entre los "
             f"{len(stack)} elementos de su columna."
         )
     return notes
@@ -1591,6 +1617,8 @@ class _Planning:
     reorderable: set[str] | None
     source_canvas: tuple[int, int]
     product_arrangement: str
+    #: Recuadro elegido a mano para el producto, en fracciones del lienzo.
+    product_zone: tuple[float, float, float, float] | None
     formats: list[str]
     count: int
     seed: int
@@ -1651,6 +1679,27 @@ def _planning(project: Project, request) -> tuple[_Planning | None, list[str]]:
         )
         return None, warnings
 
+    # Una separación que se dejó una pieza fuera no se nota hasta que la tanda
+    # está hecha: el precio viejo asoma por debajo del nuevo en las cuarenta
+    # piezas. Se comprobó al separar; aquí se recuerda antes de componer.
+    dudosas: dict[str, str] = {}
+    stash = project.meta.get("split_layers") or {}
+    for layer in working_layers:
+        check = layer.meta.get("split_check") or {}
+        padre = layer.meta.get("split_from")
+        if check.get("ok") is False and padre:
+            dudosas[padre] = str((stash.get(padre) or {}).get("name") or layer.name)
+    if dudosas:
+        nombres = ", ".join(f"«{nombre}»" for nombre in list(dudosas.values())[:4])
+        if len(dudosas) > 4:
+            nombres += f" y {len(dudosas) - 4} más"
+        warnings.append(
+            f"La separación de {nombres} no pasó la comprobación: las partes no "
+            "cubren el elemento original. Vuelva a unirlas en Revisar capas y "
+            "edite el elemento entero, o las piezas saldrán con restos del arte "
+            "viejo."
+        )
+
     return (
         _Planning(
             layers=working_layers,
@@ -1663,6 +1712,9 @@ def _planning(project: Project, request) -> tuple[_Planning | None, list[str]]:
             reorderable=set(reorderable) if reorderable is not None else None,
             source_canvas=(project.canvas.width, project.canvas.height),
             product_arrangement=getattr(request, "product_arrangement", "auto"),
+            product_zone=(
+                project.product_zone.as_tuple() if project.product_zone else None
+            ),
             formats=list(getattr(request, "formats", ["1080x1080"])),
             count=int(getattr(request, "count", 12)),
             seed=int(getattr(request, "seed", 42)),
@@ -1700,6 +1752,7 @@ def _build_plan(
         safe_area=format_safe_area(fmt),
         product_arrangement=ctx.product_arrangement,
         removed=ctx.removed,
+        product_zone=ctx.product_zone,
     )
     return VariantPlan(
         index=index,
@@ -1818,10 +1871,17 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
         return [], warnings
 
     layout_rng = random.Random(ctx.seed)
+    allowed_layouts = getattr(request, "layouts", None)
+    # Conservar el diseño del arte en TODOS los formatos pedidos, no solo en el
+    # nativo. Cada medida recibe la composición que de verdad lo conserva: la
+    # copia fiel donde la proporción lo permite, la retícula del propio arte
+    # donde no. Antes esto obligaba a forzar `layouts=["faithful"]`, que apagaba
+    # el reparto por formato y volcaba el arte en un lienzo que no era el suyo.
+    anchored = bool(getattr(request, "anchored_layouts", False))
     layout_keys = choose_layouts(
         ctx.count,
         layout_rng,
-        allowed=getattr(request, "layouts", None),
+        allowed=allowed_layouts,
         preferred=ctx.bias.get("preferred_layouts"),
     )
 
@@ -1858,7 +1918,7 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
     #: solo si cabe; si no cabe se vuelve a las familias, porque tres piezas
     #: idénticas son peores que tres con defectos distintos.
     apretados: set[str] = set()
-    if getattr(request, "layouts", None) is None:
+    if allowed_layouts is None or anchored:
         necesitan = set(formats_needing_recompose(project, list(dict.fromkeys(ctx.formats))))
         for fmt in dict.fromkeys(ctx.formats):
             ancho, alto = SUPPORTED_FORMATS[fmt]
@@ -1897,6 +1957,12 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
             layout_key = FAITHFUL_LAYOUT
         elif SOURCE_FLOW_LAYOUT in elegibles:
             layout_key = SOURCE_FLOW_LAYOUT
+        elif anchored:
+            # Se pidió conservar el diseño. Si este formato no admite ni la copia
+            # fiel ni la retícula del arte, se entrega la copia fiel a escala
+            # antes que una familia genérica: reinventar la pieza es justo lo
+            # contrario de lo que se pidió.
+            layout_key = FAITHFUL_LAYOUT
         else:
             layout_key = layout_keys[index]
         plans.append(_build_plan(ctx, index, fmt, layout_key, ctx.seed * 1000 + index))

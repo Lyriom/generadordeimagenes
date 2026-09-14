@@ -1015,6 +1015,76 @@ def test_a_paragraph_is_not_cut_into_pieces(client: TestClient, tmp_path):
     assert legal["pieces"] == 1
 
 
+def _alpha_con_dos_manchas() -> np.ndarray:
+    """Dos bloques de tinta separados, como un rótulo y su precio."""
+    alpha = np.zeros((100, 200), dtype=np.uint8)
+    alpha[10:40, 10:90] = 255
+    alpha[60:90, 10:90] = 255
+    return alpha
+
+
+def test_la_separacion_se_comprueba_contra_la_tinta_del_elemento():
+    """Las dos piezas recortadas cubren toda la tinta: separación válida."""
+    alpha = _alpha_con_dos_manchas()
+    valida, detalle = art_text.verify_split(alpha, [(10, 10, 80, 30), (10, 60, 80, 30)])
+    assert valida
+    assert "2 partes" in detalle
+
+
+def test_una_separacion_que_se_deja_una_pieza_fuera_no_pasa():
+    """Es el fallo que no se ve hasta generar: el precio viejo asoma debajo."""
+    alpha = _alpha_con_dos_manchas()
+    valida, detalle = art_text.verify_split(alpha, [(10, 10, 80, 30)])
+    assert not valida
+    assert "dejan fuera" in detalle
+
+
+def test_un_rotulo_sobre_su_plancha_no_es_tinta_repetida():
+    """Se recorta dos veces a propósito: la plancha sin texto y el texto sin plancha.
+
+    Cruzar las dos familias marcaba como defecto justo el caso que hace falta
+    para reescribir un precio conservando su sello de color.
+    """
+    alpha = np.zeros((100, 200), dtype=np.uint8)
+    alpha[10:60, 10:120] = 255  # la plancha entera
+    plancha = (10, 10, 110, 50)
+    rotulo = (20, 20, 60, 20)  # el texto, dentro de ella
+    valida, _ = art_text.verify_split(alpha, [plancha, rotulo], plate_count=1)
+    assert valida
+    # Y sin decir cuál es la plancha, el mismo recorte sí parece repetido.
+    assert not art_text.verify_split(alpha, [plancha, rotulo])[0]
+
+
+def test_dos_partes_no_pueden_repartirse_la_misma_tinta():
+    """Ese trozo se dibujaría dos veces y el texto sale empastado."""
+    alpha = _alpha_con_dos_manchas()
+    valida, detalle = art_text.verify_split(
+        alpha, [(10, 10, 80, 30), (10, 10, 80, 80), (10, 60, 80, 30)]
+    )
+    assert not valida
+    assert "dos veces" in detalle
+
+
+def test_el_inventario_dice_que_la_separacion_quedo_comprobada(
+    client: TestClient, block_project
+):
+    """La comprobación viaja con las partes, no solo en el aviso del momento."""
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    separado = client.post(f"/projects/{project_id}/layers/{block['id']}/split")
+    assert separado.status_code == 200, separado.text
+
+    listed = client.get(f"/projects/{project_id}/texts").json()
+    partes = [item for item in listed["layers"] if item["part_of"] == block["id"]]
+    assert partes
+    for parte in partes:
+        assert parte["split_ok"] is True
+        assert "cubren toda la tinta" in parte["split_check"]
+    # Y un elemento que no viene de separar nada no inventa un resultado.
+    otros = [item for item in listed["layers"] if item["part_of"] is None]
+    assert all(item["split_ok"] is None for item in otros)
+
+
 def test_splitting_turns_each_piece_into_its_own_element(
     client: TestClient, block_project
 ):
@@ -1859,3 +1929,37 @@ def test_already_split_text_does_not_require_splitting_again(client, plate_proje
     monkeypatch.setattr(art_text, 'blocks', lambda *args: [(0, 0, 10, 10), (10, 0, 10, 10)])
     response = client.post(f"/projects/{project_id}/layers/{label['id']}/text", json={'content': '24 CUOTAS'})
     assert response.status_code == 200, response.text
+
+
+def test_una_separacion_dudosa_se_avisa_antes_de_componer(client: TestClient, block_project):
+    """El fallo se ve en la tanda terminada; el aviso tiene que llegar antes."""
+    from app.services import layout_engine, storage
+
+    project_id = block_project["project_id"]
+    block = _block_layer(block_project)
+    partes = client.post(f"/projects/{project_id}/layers/{block['id']}/split").json()["layers"]
+    assert partes
+
+    # Se fuerza el resultado de la comprobación: lo que se prueba aquí es que el
+    # motor lo mira antes de plantear nada, no cómo se calculó.
+    project = storage.load_project(project_id)
+    for layer in project.layers:
+        if layer.meta.get("split_from") == block["id"]:
+            layer.meta["split_check"] = {"ok": False, "detail": "prueba"}
+    storage.save_project(project)
+
+    class _Peticion:
+        formats = ["1080x1080"]
+        count = 1
+        seed = 1
+        intensity = "conservative"
+        layouts = None
+        anchored_layouts = False
+        product_arrangement = "auto"
+        instruction = None
+        product_position_instruction = None
+        hidden_layers: list = []
+        locked_layers: list = []
+
+    _, avisos = layout_engine.plan_variants(storage.load_project(project_id), _Peticion())
+    assert any("no pasó la comprobación" in aviso for aviso in avisos)

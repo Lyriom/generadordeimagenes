@@ -87,6 +87,43 @@ class Canvas(BaseModel):
         return self
 
 
+#: Lado mínimo de la zona del producto, en fracción del lienzo. Por debajo de
+#: esto el recuadro es un resbalón del ratón, no una decisión: el producto
+#: saldría del tamaño de un sello y la pieza no serviría.
+MIN_PRODUCT_ZONE = 0.05
+
+
+class ProductZone(BaseModel):
+    """Dónde va el producto, en fracciones del lienzo (0..1).
+
+    La dibuja una persona sobre el arte y manda sobre todo lo demás: sobre la
+    zona que el motor aprende del PSD y sobre el anclaje del modo fiel. Se
+    guarda en fracciones y no en píxeles porque la misma decisión tiene que
+    valer para los cinco formatos de la tanda, que no miden lo mismo.
+    """
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    width: float = Field(gt=0.0, le=1.0)
+    height: float = Field(gt=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _inside_canvas(self) -> "ProductZone":
+        # Un rectángulo que se sale un píxel por el borde es la intención
+        # correcta dibujada con el pulso de un ratón: se recorta, no se rechaza.
+        self.width = min(self.width, 1.0 - self.x)
+        self.height = min(self.height, 1.0 - self.y)
+        if self.width < MIN_PRODUCT_ZONE or self.height < MIN_PRODUCT_ZONE:
+            raise ValueError(
+                "La zona del producto es demasiado pequeña: debe medir al menos "
+                f"el {int(MIN_PRODUCT_ZONE * 100)}% del lienzo por cada lado."
+            )
+        return self
+
+    def as_tuple(self) -> tuple[float, float, float, float]:
+        return (self.x, self.y, self.width, self.height)
+
+
 class Layer(BaseModel):
     """Una capa del lienzo. Coordenadas en píxeles del lienzo del proyecto."""
 
@@ -269,6 +306,8 @@ class Project(BaseModel):
     analysis: AnalysisInfo = Field(default_factory=AnalysisInfo)
     background: BackgroundInfo = Field(default_factory=BackgroundInfo)
     variants: list[Variant] = Field(default_factory=list)
+    #: Zona elegida a mano para el producto. `None` = la decide el motor.
+    product_zone: ProductZone | None = None
     warnings: list[str] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
 

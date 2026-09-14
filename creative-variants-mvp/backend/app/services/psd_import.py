@@ -226,12 +226,20 @@ def _clip_to_canvas(bbox, canvas_w: int, canvas_h: int) -> tuple[int, int, int, 
     return cx0, cy0, cx1 - cx0, cy1 - cy0
 
 
-def _reading_order(boxes: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
-    """Ordena arriba→abajo, izquierda→derecha, tolerando filas desalineadas."""
-    if not boxes:
+def _reading_order(items: list, box_of=lambda item: item) -> list:
+    """Ordena arriba→abajo, izquierda→derecha, tolerando filas desalineadas.
+
+    `box_of` saca la caja de cada elemento, para poder ordenar también piezas
+    que llevan su nombre pegado sin tener que separarlas de él y volver a
+    emparejarlas después por la caja —dos artboards pueden tener la misma—.
+    """
+    if not items:
         return []
-    tolerance = max(24, min(box[3] for box in boxes) // 2)
-    return sorted(boxes, key=lambda box: (box[1] // max(1, tolerance), box[0]))
+    tolerance = max(24, min(box_of(item)[3] for item in items) // 2)
+    return sorted(
+        items,
+        key=lambda item: (box_of(item)[1] // max(1, tolerance), box_of(item)[0]),
+    )
 
 
 def _content_mask(flat: Image.Image) -> np.ndarray:
@@ -354,17 +362,19 @@ def detect_pieces(psd_path: Path, *, analyse_pixels: bool = True) -> tuple[list[
         if box is not None:
             artboards.append((box, str(node.name or "")))
     if artboards:
-        by_box = {box: name for box, name in artboards}
-        ordered = _reading_order(list(by_box))
+        # En orden de lectura y sin pasar por un diccionario de cajas: dos
+        # artboards del mismo pliego pueden ocupar el mismo rectángulo —un
+        # duplicado sin mover— y uno de los dos desaparecía de la lista.
+        ordered = _reading_order(artboards, box_of=lambda par: par[0])
         pieces = [
             PsdPiece(
                 index=index,
-                name=(by_box[box] or f"Pieza {index + 1}")[:80],
+                name=(name or f"Pieza {index + 1}")[:80],
                 x=box[0], y=box[1], width=box[2], height=box[3],
                 origin="artboard",
-                artboard_path=by_box[box] or None,
+                artboard_path=name or None,
             )
-            for index, box in enumerate(ordered)
+            for index, (box, name) in enumerate(ordered)
         ]
         if len(pieces) > 1:
             warnings.append(
@@ -590,14 +600,21 @@ def import_psd_layers(
     root = psd
     if piece is not None and piece.artboard_path:
         # El artboard es un grupo real: sus capas son exactamente las de la pieza.
+        # Se busca por nombre **y rectángulo**: Photoshop no obliga a que los
+        # nombres sean únicos, y quedarse con el primero que coincidiera de
+        # nombre importaba las capas de otra pieza recortadas al viewport de
+        # esta, es decir, un proyecto vacío.
+        con_ese_nombre = [
+            (node, _clip_to_canvas(node.bbox, psd.width, psd.height))
+            for node in _artboard_nodes(psd)
+            if str(node.name or "") == piece.artboard_path
+        ]
+        esperada = (piece.x, piece.y, piece.width, piece.height)
         match = next(
-            (
-                node
-                for node in _artboard_nodes(psd)
-                if str(node.name or "") == piece.artboard_path
-            ),
-            None,
+            (node for node, box in con_ese_nombre if box == esperada), None
         )
+        if match is None and len(con_ese_nombre) == 1:
+            match = con_ese_nombre[0][0]
         if match is not None:
             root = match
         else:

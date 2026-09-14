@@ -76,7 +76,14 @@ def test_auto_generates_from_scratch(client: TestClient, project: dict):
         "Preparar el fondo",
         "Componer variantes",
     ]
-    assert len(payload["variants"]) == 4
+    # `count` son propuestas POR FORMATO. El modo automático elige las medidas
+    # (la nativa más las de redes que el arte pueda llenar) y cada una recibe
+    # las cuatro: pedir cuatro y recibir cuatro repartidas entre tres tamaños
+    # era lo que dejaba formatos con una sola pieza.
+    por_formato: dict[str, int] = {}
+    for variant in payload["variants"]:
+        por_formato[variant["format"]] = por_formato.get(variant["format"], 0) + 1
+    assert por_formato and set(por_formato.values()) == {4}
     # El fondo quedó reconstruido y las variantes tienen imagen en disco.
     stored = client.get(f"/projects/{project['project_id']}").json()
     assert stored["background"]["path"]
@@ -101,12 +108,13 @@ def test_auto_respects_explicit_formats_and_reuses_layers(
     assert "ya estaban listos" in detect["detail"]
     assert {variant["format"] for variant in payload["variants"]} == {"1080x1350"}
     assert all(variant["width"] == 1080 for variant in payload["variants"])
+    assert len(payload["variants"]) == 6
 
 
-def test_auto_returns_every_selected_format_even_when_count_is_lower(
+def test_auto_returns_every_selected_format_with_its_own_proposals(
     client: TestClient, project: dict
 ):
-    """Cada medida elegida debe producir al menos una salida visible."""
+    """Cada medida elegida recibe las propuestas pedidas, no una parte de ellas."""
     create_manual_layers(client, project["project_id"])
     requested = [
         "meta_feed_4_5",
@@ -119,21 +127,31 @@ def test_auto_returns_every_selected_format_even_when_count_is_lower(
     )
     payload = await_task(client, project["project_id"], response)
 
-    returned = {variant["format"] for variant in payload["variants"]}
-    assert returned == set(requested)
-    assert len(payload["variants"]) >= len(requested)
+    por_formato: dict[str, int] = {}
+    for variant in payload["variants"]:
+        por_formato[variant["format"]] = por_formato.get(variant["format"], 0) + 1
+    assert set(por_formato) == set(requested)
+    assert set(por_formato.values()) == {2}
+    assert len(payload["variants"]) == 2 * len(requested)
 
 
-def test_template_mode_only_replaces_at_native_size_without_new_layouts(
+def test_template_mode_keeps_the_design_but_honours_the_chosen_formats(
     client: TestClient, project: dict
 ):
-    """El flujo de catálogo entrega un arte fiel, no propuestas recompuestas."""
+    """Conservar el diseño no es conservar el lienzo.
+
+    El flujo de catálogo entrega un arte fiel, no propuestas recompuestas: una
+    sola composición por medida, sin instrucciones ni fondo nuevo. Pero las
+    medidas las elige el usuario, y forzar ahí el tamaño nativo era devolver una
+    pieza de 1080x1080 a quien había pedido tres formatos distintos.
+    """
     create_manual_layers(client, project["project_id"])
+    pedidos = ["1080x1350", "1080x1080", "1920x1080"]
     response = client.post(
         f"/projects/{project['project_id']}/auto",
         json={
             "count": 6,
-            "formats": ["1080x1350"],
+            "formats": pedidos,
             "intensity": "creative",
             "instruction": "mover todo y cambiar el fondo",
             "template_mode": True,
@@ -142,11 +160,31 @@ def test_template_mode_only_replaces_at_native_size_without_new_layouts(
     )
     payload = await_task(client, project["project_id"], response)
 
+    # Una por formato, las tres pedidas, ninguna de más.
+    assert [variant["format"] for variant in payload["variants"]] == pedidos
+    for variant in payload["variants"]:
+        # El diseño del arte manda: o se reproduce tal cual, o se recompone con
+        # la retícula del propio arte. Nunca una familia genérica.
+        assert variant["layout"] in {"faithful", "source_flow"}
+        assert variant["intensity"] == "conservative"
+    # Y se dice por qué se entregó una sola por medida en vez de las seis.
+    assert any("una por formato" in aviso for aviso in payload["warnings"])
+
+
+def test_template_mode_without_formats_stays_at_the_native_size(
+    client: TestClient, project: dict
+):
+    """Sin medidas elegidas, la sustitución fiel se queda en el tamaño del KV."""
+    create_manual_layers(client, project["project_id"])
+    response = client.post(
+        f"/projects/{project['project_id']}/auto",
+        json={"count": 1, "template_mode": True},
+    )
+    payload = await_task(client, project["project_id"], response)
+
     assert len(payload["variants"]) == 1
-    variant = payload["variants"][0]
-    assert variant["layout"] == "faithful"
-    assert variant["format"] == "1080x1080"
-    assert variant["intensity"] == "conservative"
+    assert payload["variants"][0]["format"] == "1080x1080"
+    assert payload["variants"][0]["layout"] == "faithful"
 
 
 def test_auto_rejects_unknown_format(client: TestClient, project: dict):

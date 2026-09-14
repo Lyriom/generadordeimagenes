@@ -7,6 +7,7 @@ espacio vacío. Aquí se cubren ambos caminos y el recorte de las capas.
 from __future__ import annotations
 
 import io
+import pathlib
 
 import pytest
 from fastapi.testclient import TestClient
@@ -316,3 +317,70 @@ def test_brand_assets_are_copied_to_every_piece(client: TestClient, sheet_psd):
     assert len(projects) == 4
     for project in projects:
         assert project["references"]["logo"] is not None
+
+
+# ------------------------------------------------------- artboards repetidos
+class _ArtboardFalso:
+    """Lo justo que `detect_pieces` le pide a un artboard de psd-tools."""
+
+    kind = "artboard"
+
+    def __init__(self, name: str, bbox: tuple[int, int, int, int]):
+        self.name = name
+        self.bbox = bbox
+
+    def is_group(self) -> bool:
+        return True
+
+    def __iter__(self):
+        return iter(())
+
+
+def test_dos_artboards_con_el_mismo_nombre_siguen_siendo_dos_piezas(monkeypatch):
+    """Photoshop no obliga a que los nombres de artboard sean únicos.
+
+    Las piezas se guardaban en un diccionario indexado por su rectángulo y se
+    identificaban después por el nombre. Con dos artboards iguales de nombre, la
+    segunda pieza resolvía al grupo de la primera: sus capas llegaban recortadas
+    a un viewport que no era el suyo y el proyecto salía vacío.
+    """
+    from app.services import psd_import
+
+    tableros = [
+        _ArtboardFalso("1080x1080", (0, 0, 1080, 1080)),
+        _ArtboardFalso("1080x1080", (1180, 0, 2260, 1080)),
+    ]
+    monkeypatch.setattr(psd_import, "_artboard_nodes", lambda node, depth=0: tableros)
+
+    class _PsdFalso:
+        width, height = 2260, 1080
+
+    monkeypatch.setattr(
+        "psd_tools.PSDImage.open", staticmethod(lambda path: _PsdFalso())
+    )
+
+    piezas, _ = psd_import.detect_pieces(pathlib.Path("da-igual.psd"))
+    assert len(piezas) == 2
+    # Y cada una conserva su propio rectángulo, en orden de lectura.
+    assert [(p.x, p.width) for p in piezas] == [(0, 1080), (1180, 1080)]
+
+
+def test_dos_artboards_en_el_mismo_sitio_no_se_pisan(monkeypatch):
+    """Un duplicado sin mover: dos artboards con el mismo rectángulo."""
+    from app.services import psd_import
+
+    tableros = [
+        _ArtboardFalso("Original", (0, 0, 1080, 1080)),
+        _ArtboardFalso("Copia", (0, 0, 1080, 1080)),
+    ]
+    monkeypatch.setattr(psd_import, "_artboard_nodes", lambda node, depth=0: tableros)
+
+    class _PsdFalso:
+        width, height = 1080, 1080
+
+    monkeypatch.setattr(
+        "psd_tools.PSDImage.open", staticmethod(lambda path: _PsdFalso())
+    )
+
+    piezas, _ = psd_import.detect_pieces(pathlib.Path("da-igual.psd"))
+    assert [p.name for p in piezas] == ["Original", "Copia"]

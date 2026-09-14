@@ -25,12 +25,15 @@ from . import (
     storage,
     variants as variants_service,
 )
-from .layout_engine import FAITHFUL_LAYOUT
 
 logger = logging.getLogger(__name__)
 
 # Formatos que se añaden siempre porque son los de mayor uso en redes.
 SOCIAL_DEFAULTS = ("1080x1080", "1080x1350")
+
+#: Tope de composiciones por tanda, el mismo que acepta `GenerateRequest`.
+MAX_COMPOSITIONS = 30
+
 
 def usable_layers(project: Project) -> list:
     """Capas que el motor de composición puede usar tal como están."""
@@ -183,21 +186,81 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
         )
 
     # 4 · Componer.
-    formats = (
-        ([native_format(project)] if replacement_only else (list(request.formats or []) or [native_format(project)]))
-        if replacement_only
-        else (list(request.formats or []) or auto_formats(project))
+    # Los formatos elegidos se respetan SIEMPRE, también en sustitución fiel. Que
+    # ahí se forzara el tamaño nativo es lo que hacía que pedir cinco medidas
+    # devolviera una sola pieza, en un tamaño que nadie había pedido. Conservar
+    # el diseño no es conservar el lienzo: el motor sabe llevar la misma
+    # composición a otra proporción, y para eso están los layouts anclados.
+    formats = list(dict.fromkeys(request.formats or [])) or (
+        [native_format(project)] if replacement_only else auto_formats(project)
     )
-    requested_count = 1 if replacement_only else request.count
-    # Se exploran varias composiciones y se entregan pocas: calidad sobre volumen.
+    # `count` son propuestas POR FORMATO. Repartir una cifra única entre las
+    # medidas elegidas era la otra mitad del problema: pedir tres propuestas y
+    # cuatro formatos devolvía tres piezas, no doce. En sustitución fiel solo
+    # existe una composición por medida —el diseño del KV es el que es—, así que
+    # ahí se entrega una y se explica por qué.
+    per_format = 1 if replacement_only else max(1, request.count)
+    if replacement_only and request.count > 1:
+        warnings.append(
+            f"Se pidieron {request.count} propuestas por formato con el diseño del "
+            "KV conservado, y ahí solo hay una composición posible por medida: se "
+            f"entrega una por formato ({len(formats)} en total). Para varias "
+            "propuestas distintas, desmarque «conservar el diseño del KV»."
+        )
+
+    # Conservar el diseño apaga las indicaciones y el fondo nuevo. Antes era
+    # imposible pedir las dos cosas a la vez —el modo se deducía de que no
+    # hubiera ninguna—; ahora es una casilla, y lo que se descarta se dice.
+    if replacement_only:
+        ignorado = []
+        if request.instruction:
+            ignorado.append("las indicaciones de composición")
+        if request.regenerate_background:
+            ignorado.append("el fondo nuevo con IA")
+        if ignorado:
+            warnings.append(
+                "Con el diseño del KV conservado no se aplican "
+                + " ni ".join(ignorado)
+                + ": el arte sale tal cual, solo con el producto cambiado. "
+                "Desmarque «conservar el diseño del KV» para tenerlos en cuenta."
+            )
+
+    if len(formats) > MAX_COMPOSITIONS:
+        # Una tanda no pasa de `MAX_COMPOSITIONS` composiciones, así que con más
+        # formatos que ese tope los últimos se quedaban sin ninguna pieza y sin
+        # que nadie lo dijera. Se recortan aquí, y se dice cuáles.
+        sobran = formats[MAX_COMPOSITIONS:]
+        formats = formats[:MAX_COMPOSITIONS]
+        warnings.append(
+            f"Se pidieron {len(formats) + len(sobran)} formatos y una tanda no pasa "
+            f"de {MAX_COMPOSITIONS} composiciones: se generaron los primeros "
+            f"{len(formats)}. Quedaron fuera {', '.join(sobran)}; pídalos en otra "
+            "tanda."
+        )
+
+    # Cuántas piezas por formato caben de verdad en la tanda. Entregar menos de
+    # lo pedido se puede; entregarlo en silencio, no.
+    por_formato_entregadas = max(1, min(per_format, MAX_COMPOSITIONS // len(formats)))
+    if por_formato_entregadas < per_format:
+        warnings.append(
+            f"Se pidieron {per_format} propuestas en {len(formats)} formatos "
+            f"({per_format * len(formats)} piezas) y una tanda no pasa de "
+            f"{MAX_COMPOSITIONS}: se entregan {por_formato_entregadas} por formato "
+            f"({por_formato_entregadas * len(formats)} piezas). Pida el resto en "
+            "otra tanda o elija menos formatos."
+        )
+    target_total = por_formato_entregadas * len(formats)
+    # Se exploran más composiciones de las que se entregan y se queda la mejor de
+    # cada formato: calidad sobre volumen. En sustitución fiel no hay nada que
+    # explorar —el diseño es el del KV—, así que se compone justo lo que se
+    # entrega y la tanda tarda la mitad.
+    total = (
+        target_total
+        if replacement_only
+        else min(MAX_COMPOSITIONS, max(target_total * 2, len(formats) * 2))
+    )
     generate = GenerateRequest(
-        # Debe existir al menos un candidato por formato. Antes, seleccionar más
-        # formatos que el valor del slider dejaba algunos sin producir.
-        count=(
-            len(formats)
-            if replacement_only
-            else min(30, max(requested_count * 3, len(formats) * 2, requested_count))
-        ),
+        count=total,
         seed=request.seed,
         formats=formats,
         intensity="conservative" if replacement_only else request.intensity,
@@ -208,56 +271,36 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
         replace_existing=request.replace_existing,
         product_label=request.product_label,
         product_arrangement=request.product_arrangement,
-        layouts=[FAITHFUL_LAYOUT] if replacement_only else None,
+        anchored_layouts=replacement_only,
     )
     variants, generate_warnings = variants_service.generate_variants(project, generate)
     warnings.extend(generate_warnings)
     if variants:
-        quality_first = False
-        minimum_score = 80 if quality_first else 0
-        ranked_by_format: dict[str, list[Variant]] = {}
-        eligible = [
-            variant
-            for variant in variants
-            if variant.quality.score >= minimum_score
-            and (
-                not quality_first
-                or variant.quality.metrics.get("severe_overlaps", 0) == 0
-            )
-        ]
-        for variant in sorted(eligible, key=lambda item: item.quality.score, reverse=True):
-            ranked_by_format.setdefault(variant.format, []).append(variant)
-        selected: list[Variant] = []
-        formats_in_order = list(dict.fromkeys(formats))
-        # Primero una salida por cada preset solicitado. Si ninguna supera el
-        # umbral se conserva la mejor de ese formato con una advertencia: pedir
-        # una medida y no recibirla es peor que verla marcada para revisión.
-        all_by_format: dict[str, list[Variant]] = {}
+        # Se componen de más y se entrega lo mejor de cada formato. No hay nota
+        # mínima: descartar por puntaje dejaba sin ninguna pieza un formato que
+        # el usuario había pedido, y eso es peor que entregarla marcada para
+        # revisión —el aviso de qué le falta ya viaja en la propia variante—.
+        # Lo que no se entrega se borra del disco.
+        por_formato: dict[str, list[Variant]] = {}
         for variant in sorted(variants, key=lambda item: item.quality.score, reverse=True):
-            all_by_format.setdefault(variant.format, []).append(variant)
-        for fmt in formats_in_order:
-            bucket = ranked_by_format.get(fmt) or []
-            fallback = all_by_format.get(fmt) or []
-            if bucket:
-                selected.append(bucket.pop(0))
-            elif fallback:
-                selected.append(fallback[0])
-                warnings.append(
-                    f"La mejor propuesta de {fmt} no superó el control de "
-                    f"{minimum_score}/100; se incluye para no omitir el formato."
-                )
+            por_formato.setdefault(variant.format, []).append(variant)
 
-        target_total = max(requested_count, len(formats_in_order))
+        formats_in_order = list(dict.fromkeys(formats))
+        # Primero una salida por cada preset solicitado; pedir una medida y no
+        # recibirla es el peor resultado posible.
+        selected: list[Variant] = [
+            por_formato[fmt].pop(0) for fmt in formats_in_order if por_formato.get(fmt)
+        ]
+
+        # Y con el cupo que quede, la siguiente mejor de cada formato por turnos.
         while len(selected) < target_total:
             added = False
             for fmt in formats_in_order:
-                bucket = ranked_by_format.get(fmt) or []
-                while bucket and bucket[0] in selected:
-                    bucket.pop(0)
-                if bucket and len(selected) < target_total:
-                    candidate = bucket.pop(0)
-                    if candidate not in selected:
-                        selected.append(candidate)
+                if len(selected) >= target_total:
+                    break
+                bucket = por_formato.get(fmt) or []
+                if bucket:
+                    selected.append(bucket.pop(0))
                     added = True
             if not added:
                 break
@@ -277,15 +320,17 @@ def run(project: Project, request) -> tuple[list[dict], list[Variant], list[str]
         ]
         variants = selected
         if selected:
+            peor = min(variant.quality.score for variant in selected)
+            # Las medidas se cuentan sobre lo entregado, no sobre lo pedido: si
+            # alguna se descartó por no poder sacarse del arte, ya lo dijo su
+            # propio aviso y repetirla aquí sería contarla dos veces.
+            medidas = len({variant.format for variant in selected})
             warnings.append(
-                f"Se evaluaron {len(selected) + len(rejected)} composiciones y se "
-                f"entregaron {len(selected)} que superaron {minimum_score}/100 sin "
-                "solapamientos graves."
-            )
-        else:
-            warnings.append(
-                f"Ninguna composición superó el control mínimo de {minimum_score}/100 "
-                "sin solapamientos graves. No se entregaron artes defectuosos."
+                f"Se compusieron {len(selected) + len(rejected)} propuestas y se "
+                f"entregaron las {len(selected)} de mejor puntaje, "
+                f"{por_formato_entregadas} por formato en {medidas} medida(s) "
+                f"(la más baja, {peor}/100). Revise los avisos de cada pieza "
+                "antes de publicarla."
             )
     if variants:
         average = sum(variant.quality.score for variant in variants) / len(variants)

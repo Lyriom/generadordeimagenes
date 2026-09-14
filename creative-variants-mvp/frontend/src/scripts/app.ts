@@ -20,6 +20,7 @@ import type {
   FormatPreset,
   Layer,
   ProductGroup,
+  ProductZone,
   Project,
   ProjectSummary,
   Variant,
@@ -231,6 +232,12 @@ interface State {
   copyFields: Set<string>;
   /** Texto de cada producto para cada uno de esos elementos. */
   productTexts: Record<string, Record<string, string>>;
+  /** KV cuyo recuadro de producto se está dibujando en el paso 3. */
+  zoneProject: string | null;
+  /** Conservar el diseño del KV: una propuesta por formato, sin recomponer. */
+  keepTemplate: boolean;
+  /** Propuestas por cada formato elegido. */
+  proposalsPerFormat: number;
   /** Lo escrito y todavía sin guardar en cada casilla de copy, por capa.
    *
    * La lista se vuelve a pintar entera cada vez que algo cambia en el KV
@@ -265,6 +272,9 @@ const state: State = {
   resultOrder: "score",
   resultFilter: "all",
   texts: {},
+  zoneProject: null,
+  keepTemplate: true,
+  proposalsPerFormat: 1,
   copyDrafts: {},
   copySource: null,
   copyFields: new Set(),
@@ -1809,6 +1819,13 @@ function copyRow(project: Project, item: ArtTextLayer): string {
     item.in_plate ? "aplanado en el fondo" : "",
     item.part_of ? "parte separada" : "",
   ].filter(Boolean).join(" · ");
+  // Qué se comprobó al separar la capa. Una separación que se dejó una pieza
+  // fuera solo se descubría al generar la tanda, con el precio viejo asomando
+  // por debajo del nuevo.
+  const check = item.part_of && item.split_check
+    ? '<p class="copy-check ' + (item.split_ok ? "is-ok" : "is-bad") + '">' +
+      (item.split_ok ? "✓ " : "⚠ ") + esc(item.split_check) + "</p>"
+    : "";
   // El PSD trae el rótulo, el precio, el precio anterior y el sello en la misma
   // capa. Reescribir eso de una vez no sirve para cambiar solo el precio, así
   // que se ofrece separarlo en las piezas que el arte ya tiene dibujadas.
@@ -1822,7 +1839,7 @@ function copyRow(project: Project, item: ArtTextLayer): string {
     : "";
   return [
     '<div class="copy-row', item.removed ? " is-removed" : "", '">', copyThumb(project, item),
-    '<div class="copy-meta"><strong>', esc(item.name), "</strong><small>", esc(notes), "</small></div>",
+    '<div class="copy-meta"><strong>', esc(item.name), "</strong><small>", esc(notes), "</small>", check, "</div>",
     '<div class="copy-edit">', editor, "</div>",
     item.src
       ? '<div class="copy-zoom" data-layer="' + attr(item.id) + '" hidden><img src="' +
@@ -2958,6 +2975,193 @@ function productTarget(project: Project): Layer | null {
   return products.find((layer) => layer.replaceable) || products.sort((a, b) => b.width * b.height - a.width * a.height)[0] || null;
 }
 
+
+/* ------------------------------------------------- dónde va el producto
+   El motor deduce la zona del producto del hueco que ocupaba en el PSD, y casi
+   siempre acierta. Casi: cuando el KV traía tres prendas y entra una sola, o
+   cuando el arte se lleva a otra proporción, ese hueco deja el producto donde
+   ya no debe ir. Quien lo ve es quien está mirando la pieza, así que aquí puede
+   dibujar el recuadro encima del arte. Se guarda en fracciones del lienzo: la
+   misma decisión vale para los cinco formatos de la tanda. */
+
+/** Lado mínimo del recuadro. El mismo que valida el backend: por debajo de esto
+ *  es un resbalón del ratón, no una decisión. */
+const MIN_ZONE = 0.05;
+
+/** KV cuyo recuadro se está dibujando. Puede no ser el activo del paso 2. */
+function zoneProject(): Project | null {
+  return (
+    state.campaign.find((project) => project.project_id === state.zoneProject) ||
+    activeProject()
+  );
+}
+
+/** La zona que el motor usaría si nadie dibuja nada: el hueco del producto. */
+function detectedZone(project: Project): ProductZone | null {
+  const target = productTarget(project);
+  if (!target) return null;
+  const box = target.meta?.replacement_box as number[] | undefined;
+  const [x, y, width, height] = box?.length === 4
+    ? box
+    : [target.x, target.y, target.width, target.height];
+  return {
+    x: x / Math.max(1, project.canvas.width),
+    y: y / Math.max(1, project.canvas.height),
+    width: width / Math.max(1, project.canvas.width),
+    height: height / Math.max(1, project.canvas.height),
+  };
+}
+
+function zoneStyle(zone: ProductZone): string {
+  return [
+    "left:" + (zone.x * 100).toFixed(2) + "%",
+    "top:" + (zone.y * 100).toFixed(2) + "%",
+    "width:" + (zone.width * 100).toFixed(2) + "%",
+    "height:" + (zone.height * 100).toFixed(2) + "%",
+  ].join(";");
+}
+
+function productZoneHtml(project: Project): string {
+  const manual = project.product_zone || null;
+  const detected = detectedZone(project);
+  const shown = manual || detected;
+  const others = state.campaign.length - 1;
+  const tabs = state.campaign.length > 1
+    ? '<div class="zone-kvs">' + state.campaign.map((item) =>
+        '<button type="button" class="zone-kv' +
+        (item.project_id === project.project_id ? " is-current" : "") +
+        (item.product_zone ? " is-set" : "") + '" data-kv="' + attr(item.project_id) + '">' +
+        esc(item.name) + (item.product_zone ? " ·&nbsp;✓" : "") + "</button>"
+      ).join("") + "</div>"
+    : "";
+  return [
+    '<section class="card" id="product-zone"><div class="card-head"><div><h2>Dónde va el producto</h2>',
+    "<p>Arrastra sobre el arte para marcar la zona. Sin recuadro, la decide el motor</p></div>",
+    '<span class="badge', manual ? " green" : "", '">', manual ? "ELEGIDA" : "AUTOMÁTICA", "</span></div>",
+    tabs,
+    '<div class="zone-workbench">',
+    '<div class="zone-stage" id="zone-stage" data-project="', attr(project.project_id), '">',
+    '<img src="', attr(thumbnailUrl(project.project_id, 720)), '" alt="Arte de ', attr(project.name),
+    '" draggable="false" loading="lazy" decoding="async">',
+    shown
+      ? '<span class="zone-box' + (manual ? " is-manual" : " is-auto") + '" style="' + attr(zoneStyle(shown)) + '"></span>'
+      : "",
+    '<span class="zone-box is-live" id="zone-live" hidden></span>',
+    "</div>",
+    '<div class="zone-side">',
+    manual
+      ? '<p class="notice success">El producto entrará en el recuadro azul, en todos los formatos de la tanda.</p>'
+      : detected
+        ? '<p class="notice">Ahora mismo el producto entra en el hueco que ocupaba en el KV (recuadro punteado). Arrastra encima del arte si quieres otro sitio.</p>'
+        : '<p class="notice error">Este KV todavía no tiene capa de producto, así que no hay hueco que heredar. Puedes marcar la zona igual: se aplicará en cuanto lo tenga.</p>',
+    '<div class="button-row">',
+    manual ? '<button class="ghost-button small" id="zone-reset">Volver a la zona detectada</button>' : "",
+    manual && others > 0
+      ? '<button class="ghost-button small" id="zone-copy-all">Aplicar a los otros ' + String(others) + " KV</button>"
+      : "",
+    "</div>",
+    '<small class="muted tiny">El recuadro manda sobre el hueco del PSD y sobre el diseño ',
+    "conservado. Lo que quede debajo se aparta al recomponer, o queda detrás si el KV se conserva.</small>",
+    "</div></div></section>",
+  ].join("");
+}
+
+async function saveProductZone(projectId: string, zone: ProductZone | null): Promise<void> {
+  try {
+    const response = await put<any>("/projects/" + projectId + "/product-zone", { zone });
+    (response.warnings || []).forEach((warning: string) => toast(warning, "info"));
+    await refreshProject(projectId);
+    await renderProducts();
+    toast(zone ? "Zona del producto guardada." : "El motor vuelve a decidir la zona.", "success");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  }
+}
+
+function bindProductZone(): void {
+  queryAll<HTMLButtonElement>(".zone-kv").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.zoneProject = button.dataset.kv || null;
+      await renderProducts();
+    });
+  });
+
+  const stage = query<HTMLElement>("#zone-stage");
+  if (!stage) return;
+  const projectId = stage.dataset.project!;
+  const live = query<HTMLElement>("#zone-live", stage)!;
+  let start: { x: number; y: number } | null = null;
+
+  /** Punto del puntero en fracciones del arte, recortado a sus bordes. */
+  const point = (event: PointerEvent) => {
+    const rect = stage.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / Math.max(1, rect.width))),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / Math.max(1, rect.height))),
+    };
+  };
+  const rectFrom = (a: { x: number; y: number }, b: { x: number; y: number }): ProductZone => ({
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    width: Math.abs(b.x - a.x),
+    height: Math.abs(b.y - a.y),
+  });
+
+  stage.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    start = point(event);
+    stage.setPointerCapture(event.pointerId);
+    live.hidden = false;
+    live.setAttribute("style", zoneStyle(rectFrom(start, start)));
+  });
+  stage.addEventListener("pointermove", (event) => {
+    if (!start) return;
+    live.setAttribute("style", zoneStyle(rectFrom(start, point(event))));
+  });
+  stage.addEventListener("pointerup", async (event) => {
+    if (!start) return;
+    const zone = rectFrom(start, point(event));
+    start = null;
+    if (zone.width < MIN_ZONE || zone.height < MIN_ZONE) {
+      live.hidden = true;
+      toast(
+        "El recuadro es demasiado pequeño: arrastra una zona de al menos el 5% del arte.",
+        "error",
+      );
+      return;
+    }
+    await saveProductZone(projectId, zone);
+  });
+  stage.addEventListener("pointercancel", () => {
+    start = null;
+    live.hidden = true;
+  });
+
+  query("#zone-reset")?.addEventListener("click", () => saveProductZone(projectId, null));
+  query("#zone-copy-all")?.addEventListener("click", async () => {
+    const zone = state.campaign.find((item) => item.project_id === projectId)?.product_zone;
+    if (!zone) return;
+    const otros = state.campaign.filter((item) => item.project_id !== projectId);
+    busy("Aplicando la zona", "Copiándola al resto de KV…", 10);
+    try {
+      for (let index = 0; index < otros.length; index += 1) {
+        busyProgress(
+          10 + Math.round((index / Math.max(1, otros.length)) * 85),
+          otros[index].name,
+        );
+        await put("/projects/" + otros[index].project_id + "/product-zone", { zone });
+        await refreshProject(otros[index].project_id);
+      }
+      toast("La zona se aplicó a " + String(otros.length) + " KV más.", "success");
+      await renderProducts();
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      idle();
+    }
+  });
+}
+
 /* ------------------------------------------- copy que cambia por producto
    La fila de artes de una promoción es el mismo KV ocho veces con otro producto
    y, sobre todo, con otro nombre y otro precio. Aquí se elige qué elementos del
@@ -3158,6 +3362,7 @@ function textOverrides(project: Project, targetKey: string): Array<Record<string
    El paso 4 solo decide el cómo (modelo, contexto, formatos). */
 async function renderProducts(): Promise<void> {
   const reference = copyReference();
+  const zoneKv = zoneProject();
   if (reference) await loadTexts(reference.project_id);
   const missingTargets = state.campaign.filter((project) => !productTarget(project));
   const pendingReviews = state.campaign.filter((project) => !layersConfirmed(project));
@@ -3214,6 +3419,9 @@ async function renderProducts(): Promise<void> {
     "</section>",
 
     '<div class="spacer"></div>',
+    zoneKv ? productZoneHtml(zoneKv) : "",
+
+    '<div class="spacer"></div>',
     '<section class="card"><div class="card-head"><div><h2>Combos opcionales</h2><p>Solo si varios productos deben aparecer juntos en un mismo arte</p></div></div>',
     '<div class="notice" style="margin-bottom:14px"><strong>Resumen:</strong> ',
     String(individuals), " producto(s) con arte individual y ", String(validGroups().length), " combo(s).</div>",
@@ -3236,6 +3444,7 @@ async function renderProducts(): Promise<void> {
   bindStepBar();
   bindStepFooter("products");
   bindProductStep();
+  bindProductZone();
   bindProductCopy();
 }
 
@@ -3403,7 +3612,7 @@ function generationOptionsHtml(mode: "catalog" | "compose"): string {
   const models = modelOptionsFor(engine);
   const countMin = 1;
   const countMax = mode === "catalog" ? 6 : 30;
-  const countValue = 1;
+  const countValue = state.proposalsPerFormat;
   const layouts = (state.capabilities?.layouts || []).map((layout) =>
     '<label class="choice"><input class="layout-check" type="checkbox" value="' + attr(layout.key) + '"> ' + esc(layout.label) + "</label>"
   ).join("");
@@ -3434,17 +3643,96 @@ function generationOptionsHtml(mode: "catalog" | "compose"): string {
     "<small>Solo se usa si se rehace el fondo.</small></label></section>",
 
     '<div class="spacer"></div>',
-    '<section class="card"><div class="card-head"><div><h2>Variación</h2><p>Cuántas propuestas y cuánto pueden alejarse</p></div></div>',
-    '<div class="form-grid"><label class="field"><span>Cantidad de propuestas</span><input id="generation-count" type="number" min="', String(countMin), '" max="', String(countMax), '" value="', String(countValue), '"></label>',
+    '<section class="card"><div class="card-head"><div><h2>Variación</h2><p>Cuántas propuestas por formato y cuánto pueden alejarse</p></div></div>',
+    // Conservar el diseño era una deducción silenciosa —«no pidió fondo nuevo ni
+    // escribió nada, luego quiere el KV intacto»— y decidía sola cuántas piezas
+    // salían. Ahora es una casilla: el usuario ve qué contrato está eligiendo.
+    mode === "catalog"
+      ? '<label class="choice" style="margin-bottom:14px"><input id="keep-template" type="checkbox"' +
+        checked(state.keepTemplate) + "> Conservar el diseño del KV · solo cambia el producto" +
+        '<small class="muted tiny" style="display:block">Una propuesta por formato: el diseño aprobado ' +
+        "solo tiene una composición por medida, y no se aplican ni las indicaciones ni el fondo nuevo. " +
+        "Desmárcalo para recibir varias propuestas distintas.</small></label>"
+      : "",
+    '<div class="form-grid"><label class="field"><span>Propuestas por formato</span><input id="generation-count" type="number" min="', String(countMin), '" max="', String(countMax), '" value="', String(countValue), '"', mode === "catalog" && state.keepTemplate ? " disabled" : "", "></label>",
     '<label class="field"><span>Cuánto se pueden alejar del original</span><select id="generation-intensity">',
     '<option value="conservative">Parecidas al original</option><option value="moderate" selected>Equilibradas</option>',
     '<option value="creative">Muy distintas entre sí</option></select></label></div>',
+    '<p class="notice" id="generation-total" style="margin-top:14px">', generationTotalsText(mode), "</p>",
     '<label class="field" style="margin-top:14px"><span>Semilla</span><input id="generation-seed" type="number" min="0" max="2147483647" value="42"><small>La misma semilla repite el mismo resultado.</small></label>',
     mode === "compose" && layouts ? '<div style="margin-top:14px"><span class="label">Familias de layout · vacío = todas</span><div class="choice-row" style="margin-top:8px">' + layouts + "</div></div>" : "",
     "</section>",
     '<button class="button large full" id="run-generation" style="margin-top:20px">✦ ',
     mode === "catalog" ? "Generar artes por producto" : "Generar variantes", "</button>",
   ].join("");
+}
+
+/** Tope de piezas de una tanda. El mismo que aplica el backend: decirlo antes
+ *  de generar evita la sorpresa de pedir cuarenta y recibir treinta. */
+const MAX_PIECES = 30;
+
+/** Qué va a producir el botón, en piezas, con los ajustes que hay en pantalla.
+ *
+ *  Pedir cinco formatos y recibir uno era el fallo; no poder saberlo antes de
+ *  pulsar era la razón de que nadie lo detectara hasta el final de la tanda. */
+function generationPlan(mode: "catalog" | "compose" = state.generationMode): {
+  formatos: number;
+  porFormato: number;
+  piezas: number;
+  salidas: number;
+  recortado: boolean;
+} {
+  // Al pintar la tarjeta todavía no hay casilla que consultar, así que el
+  // estado es la fuente; una vez en pantalla manda lo que el usuario tocó.
+  // Conservar el diseño solo existe en el modo catálogo.
+  const fiel = mode === "catalog"
+    && Boolean(query<HTMLInputElement>("#keep-template")?.checked ?? state.keepTemplate);
+  const campo = Number(
+    query<HTMLInputElement>("#generation-count")?.value || state.proposalsPerFormat,
+  );
+  // Sin formatos elegidos manda el KV: su tamaño nativo más los de redes que el
+  // arte aguante. Son dos o tres; se cuenta uno para no prometer de más.
+  const formatos = state.autoFormats ? 1 : Math.max(0, state.selectedFormats.size);
+  const pedido = fiel ? 1 : Math.max(1, campo);
+  const porFormato = formatos
+    ? Math.max(1, Math.min(pedido, Math.floor(MAX_PIECES / formatos)))
+    : pedido;
+  const salidas = Math.max(1, selectedProductFiles().length + validGroups().length);
+  return {
+    formatos,
+    porFormato,
+    piezas: formatos * porFormato,
+    salidas,
+    recortado: porFormato < pedido,
+  };
+}
+
+function generationTotalsText(mode: "catalog" | "compose" = state.generationMode): string {
+  const plan = generationPlan(mode);
+  if (!plan.formatos) {
+    return "<strong>Ningún formato elegido.</strong> Marca al menos uno arriba.";
+  }
+  const kv = state.campaign.length;
+  const partes = [
+    state.autoFormats
+      ? "<strong>Tamaños del KV</strong> (el original y los de redes que aguante)"
+      : "<strong>" + String(plan.formatos) + " formato" + (plan.formatos === 1 ? "" : "s") + "</strong>",
+    "× " + String(plan.porFormato) + " propuesta" + (plan.porFormato === 1 ? "" : "s"),
+    "× " + String(plan.salidas) + " producto" + (plan.salidas === 1 ? "" : "s"),
+    kv > 1 ? "× " + String(kv) + " KV" : "",
+  ].filter(Boolean).join(" ");
+  const total = plan.piezas * plan.salidas * Math.max(1, kv);
+  const recorte = plan.recortado
+    ? " Una tanda no pasa de " + String(MAX_PIECES) + " piezas por producto: se entregarán " +
+      String(plan.porFormato) + " por formato."
+    : "";
+  return partes + " = <strong>" + String(total) + " piezas</strong>." + recorte;
+}
+
+/** Repinta la cuenta sin rehacer la pantalla: se lee mientras se elige. */
+function refreshGenerationTotals(): void {
+  const node = query<HTMLElement>("#generation-total");
+  if (node) node.innerHTML = generationTotalsText();
 }
 
 function permissionsHtml(project: Project): string {
@@ -3468,6 +3756,7 @@ function bindFormatSelector(): void {
   query<HTMLInputElement>("#auto-formats")?.addEventListener("change", (event) => {
     state.autoFormats = (event.currentTarget as HTMLInputElement).checked;
     query<HTMLElement>("#manual-formats")!.hidden = state.autoFormats;
+    refreshGenerationTotals();
   });
   queryAll<HTMLButtonElement>(".platform-filter").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -3483,6 +3772,7 @@ function bindFormatSelector(): void {
       else state.selectedFormats.delete(checkBox.value);
       const badge = query<HTMLElement>(".card .badge");
       if (badge && badge.textContent?.includes("ELEGIDOS")) badge.textContent = String(state.selectedFormats.size) + " ELEGIDOS";
+      refreshGenerationTotals();
     });
   });
 }
@@ -3507,6 +3797,18 @@ function bindGenerate(project: Project): void {
     select.innerHTML = '<option value="">Predeterminado</option>' + modelOptionsFor(state.generationEngine);
     select.disabled = !engineTakesModel(state.generationEngine);
   });
+  query<HTMLInputElement>("#keep-template")?.addEventListener("change", (event) => {
+    state.keepTemplate = (event.currentTarget as HTMLInputElement).checked;
+    const campo = query<HTMLInputElement>("#generation-count")!;
+    // Con el diseño conservado solo hay una composición por medida: el campo se
+    // apaga en vez de aceptar un número que después no se cumple.
+    campo.disabled = state.keepTemplate;
+    refreshGenerationTotals();
+  });
+  query<HTMLInputElement>("#generation-count")?.addEventListener("input", (event) => {
+    state.proposalsPerFormat = Number((event.currentTarget as HTMLInputElement).value) || 1;
+    refreshGenerationTotals();
+  });
   bindFormatSelector();
   query("#run-generation")?.addEventListener("click", () => {
     if (state.generationMode === "catalog") runCatalogGeneration();
@@ -3517,8 +3819,13 @@ function bindGenerate(project: Project): void {
 function generationSettings(): Record<string, any> {
   const generalInstruction = query<HTMLTextAreaElement>("#generation-instruction")!.value.trim();
   return {
+    // Propuestas POR FORMATO. El backend las multiplica por las medidas
+    // elegidas: es lo que antes se repartía entre ellas y dejaba formatos con
+    // una sola pieza —o, en sustitución fiel, con ninguna—.
     count: Number(query<HTMLInputElement>("#generation-count")!.value),
     formats: state.autoFormats ? null : Array.from(state.selectedFormats),
+    // Ya no se deduce de si hay fondo nuevo o indicaciones: lo dice la casilla.
+    template_mode: Boolean(query<HTMLInputElement>("#keep-template")?.checked),
     intensity: query<HTMLSelectElement>("#generation-intensity")!.value,
     instruction: generalInstruction || null,
     product_position_instruction: null,
@@ -3618,7 +3925,7 @@ async function runCatalogGeneration(): Promise<void> {
           replace_existing: firstBatch,
           product_label: productName(file),
           product_arrangement: "auto",
-          template_mode: !settings.regenerate_background && !settings.instruction,
+          template_mode: settings.template_mode,
           regenerate_background: settings.regenerate_background && firstBatch,
           text_overrides: textOverrides(project, productKey(file)),
         });
@@ -3650,7 +3957,7 @@ async function runCatalogGeneration(): Promise<void> {
           replace_existing: firstBatch,
           product_label: label,
           product_arrangement: group.arrangement,
-          template_mode: !settings.regenerate_background && !settings.instruction,
+          template_mode: settings.template_mode,
           regenerate_background: settings.regenerate_background && firstBatch,
           text_overrides: textOverrides(project, COMBO_PREFIX + group.id),
         });
@@ -3687,10 +3994,14 @@ async function runComposeGeneration(project: Project): Promise<void> {
   }
   const settings = generationSettings();
   const layouts = queryAll<HTMLInputElement>(".layout-check:checked").map((item) => item.value);
+  const formats = Array.from(state.selectedFormats);
   const payload = {
-    count: settings.count,
+    // El `count` de /generate son composiciones totales y se reparten entre los
+    // formatos; en pantalla se piden POR formato. Multiplicarlo aquí es lo que
+    // hace que «2 propuestas y 3 formatos» sean seis piezas y no dos.
+    count: Math.min(30, Math.max(formats.length, settings.count * formats.length)),
     seed: settings.seed,
-    formats: Array.from(state.selectedFormats),
+    formats,
     intensity: settings.intensity,
     instruction: settings.instruction,
     product_position_instruction: settings.product_position_instruction,

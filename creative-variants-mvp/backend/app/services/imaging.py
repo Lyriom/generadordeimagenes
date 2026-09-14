@@ -1,6 +1,7 @@
 """Utilidades compartidas de imagen (Pillow + OpenCV + NumPy)."""
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import cv2
@@ -241,6 +242,22 @@ def dilate_mask(mask: np.ndarray, amount: int) -> np.ndarray:
 
 
 # ---------------------------------------------------------------- composición
+def rotated_bounds(width: float, height: float, degrees: float) -> tuple[float, float]:
+    """Caja que ocupa un rectángulo girado, que es la que Pillow devuelve al rotar.
+
+    Girar con `expand=True` no deforma nada, pero sí cambia la proporción de la
+    **caja**: un rectángulo 2:1 girado 15° ocupa una caja 1.48:1. Quien mida la
+    capa por su caja tiene que contar con el giro o verá una deformación que no
+    existe.
+    """
+    radians = math.radians(degrees)
+    cosine, sine = abs(math.cos(radians)), abs(math.sin(radians))
+    return (
+        width * cosine + height * sine,
+        width * sine + height * cosine,
+    )
+
+
 def fit_contain(
     src_w: int, src_h: int, box_w: int, box_h: int, allow_upscale: bool = True
 ) -> tuple[int, int]:

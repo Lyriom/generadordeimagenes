@@ -428,3 +428,48 @@ def test_no_insiste_para_siempre(monkeypatch):
     v = _simular(monkeypatch, [(50, 1.0)] * 10)
     _, _, _, attempts = v._compose_until_clean(None, None, _PlanFalso())
     assert attempts == v.MAX_ATTEMPTS
+
+
+def test_el_control_no_marca_lo_que_el_motor_hizo_a_proposito():
+    """El suelo de legibilidad es parte del diseño, no un defecto de la pieza.
+
+    En un combo con mucha diferencia de tamaño el motor sube el más pequeño a
+    `MIN_RELATIVE_HEIGHT` a propósito —un celular junto a una refrigeradora
+    saldría al 9% y sería invisible—. El control comparaba contra el cociente
+    crudo de centímetros, que no lleva ese suelo, y declaraba irreal justo esa
+    pieza: un defecto que invalida, que no depende de la semilla y que por eso
+    ningún replanteo podía arreglar. Se probaban tres composiciones y las tres
+    salían marcadas con el mismo aviso falso encabezando la lista.
+    """
+    combo = {
+        "refrigeradora side by side.png": (900, 1900),
+        "cocina 20p.png": (900, 1580),
+        "celular smartphone.png": (600, 1200),
+    }
+    placements, _ = build_placements(
+        _combo(combo),
+        "product_center_headline_top",
+        *CANVAS,
+        random.Random(7),
+        intensity="moderate",
+        source_canvas=CANVAS,
+        product_arrangement="horizontal",
+    )
+    productos = [p for p in placements if p.layer.category == LayerCategory.PRODUCT]
+    altura = {p.layer.name: p.height for p in productos}
+    # El motor sí respeta el orden de tamaños reales...
+    assert (
+        altura["refrigeradora side by side.png"]
+        > altura["cocina 20p.png"]
+        > altura["celular smartphone.png"]
+    )
+    # ...y sube el celular al suelo legible en vez de dejarlo a su 9% fiel.
+    minimo = product_scale.MIN_RELATIVE_HEIGHT
+    assert altura["celular smartphone.png"] >= altura[
+        "refrigeradora side by side.png"
+    ] * (minimo - 0.02)
+
+    # Y el control, que juzga con la misma regla, no tiene nada que decir.
+    report = evaluate_variant(_project(), _plan(productos))
+    assert report.metrics["product_scale_conflicts"] == 0.0
+    assert not [aviso for aviso in report.warnings if "Proporción irreal" in aviso]

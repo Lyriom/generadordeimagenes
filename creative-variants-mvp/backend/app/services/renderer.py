@@ -467,6 +467,15 @@ def draw_image_layer(
     with Image.open(path) as source:
         asset = source.convert("RGBA").copy()
 
+    # El giro va **antes** de medir. Girando después, la caja crecía por su
+    # cuenta —un 2:1 a 15° ocupa un 1.48:1— y el elemento se salía del hueco que
+    # se le había asignado por los cuatro lados. El motor no autoriza girar lo
+    # que es pixel_critical: producto, logo y persona van como estaban.
+    if layer.rotation and not layer.pixel_critical:
+        asset = asset.rotate(
+            -layer.rotation, expand=True, resample=Image.Resampling.BICUBIC
+        )
+
     if placement.stretch:
         # Escenografía a sangre: llena el borde. El motor solo lo autoriza para
         # fondos y franjas, nunca para producto, logo o persona.
@@ -493,9 +502,6 @@ def draw_image_layer(
         resized = resized.filter(
             ImageFilter.UnsharpMask(radius=1.1, percent=115, threshold=3)
         )
-
-    if layer.rotation and not layer.pixel_critical:
-        resized = resized.rotate(-layer.rotation, expand=True, resample=Image.Resampling.BICUBIC)
 
     x = placement.x + (placement.width - resized.width) // 2
     y = placement.y + (placement.height - resized.height) // 2

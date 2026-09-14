@@ -143,11 +143,18 @@ def extract_layers(
     extracted: list[str] = []
     skipped: list[str] = []
     warnings: list[str] = []
-    targets = [
-        layer
-        for layer in project.layers
-        if layer_ids is None or layer.id in set(layer_ids)
-    ]
+    # El fondo nunca se recorta —se reconstruye aparte—, así que pedir "todas"
+    # no lo incluye. Incluirlo ponía un aviso de uso interno ("usa
+    # reconstruct-background") en la lista que lee el usuario, y en la propia
+    # capa de fondo, en cada análisis. Si alguien la nombra a propósito sí se le
+    # contesta: ahí la pregunta es real.
+    if layer_ids is None:
+        targets = [
+            layer for layer in project.layers if layer.category.value != "background"
+        ]
+    else:
+        wanted = set(layer_ids)
+        targets = [layer for layer in project.layers if layer.id in wanted]
     for layer in targets:
         ok, warning = extract_layer(project, layer, feather=feather, force=force)
         if ok:

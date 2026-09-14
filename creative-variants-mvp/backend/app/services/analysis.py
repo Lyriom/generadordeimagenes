@@ -444,7 +444,12 @@ def analyze_project(
     if extract:
         _, _, extract_warnings = layer_extraction.extract_layers(
             project,
-            [layer.id for layer in layers if layer.type == LayerType.IMAGE],
+            [
+                layer.id
+                for layer in layers
+                if layer.type == LayerType.IMAGE
+                and layer.category != LayerCategory.BACKGROUND
+            ],
             feather=2,
         )
         warnings.extend(extract_warnings)

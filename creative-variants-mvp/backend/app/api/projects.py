@@ -60,6 +60,8 @@ from ..models import (
     ProjectReferences,
     IngestImportRequest,
     ProjectImportResponse,
+    ProductZoneRequest,
+    ProductZoneResponse,
     ProjectSummary,
     ReconstructBackgroundRequest,
     ReconstructBackgroundResponse,
@@ -1044,9 +1046,28 @@ async def upload_mask(project_id: str, layer_id: str, mask_file: UploadFile = Fi
     try:
         import numpy as np
         from PIL import Image
-        img = Image.open(temp_path).convert("L")
-        mask = np.array(img)
-        
+
+        try:
+            with Image.open(temp_path) as opened:
+                drawn = opened.convert("L")
+        except Exception as exc:  # noqa: BLE001
+            raise bad_request(f"No se pudo leer la máscara subida: {exc}") from exc
+
+        # La máscara vive en coordenadas del lienzo. Si llega a otro tamaño no se
+        # puede usar, y guardarla igual era perder el trabajo en silencio: al
+        # recortar, `ensure_mask` veía una forma que no cuadraba, la cambiaba por
+        # el rectángulo de la capa y devolvía un 200 como si nada. Se ajusta al
+        # lienzo, que es lo que el usuario quiso decir al pintarla.
+        canvas_size = (project.canvas.width, project.canvas.height)
+        llegada = drawn.size
+        if llegada != canvas_size:
+            drawn = drawn.resize(canvas_size, Image.Resampling.NEAREST)
+            layer.warnings.append(
+                f"La máscara llegó a {llegada[0]}x{llegada[1]} y el lienzo mide "
+                f"{canvas_size[0]}x{canvas_size[1]}: se ajustó al lienzo."
+            )
+        mask = np.array(drawn)
+
         layer_extraction.write_mask(project, layer, mask)
         layer.meta["mask_edited"] = True
         layer.extracted = False
@@ -1131,6 +1152,83 @@ def replaceable_layers(project_id: str) -> ReplaceableLayersResponse:
             for layer in replacement.candidate_layers(project)
         ],
     )
+
+
+@router.put(
+    "/{project_id}/product-zone",
+    response_model=ProductZoneResponse,
+    summary="Elegir a mano en qué parte del arte va el producto",
+)
+def set_product_zone(
+    project_id: str, request: ProductZoneRequest
+) -> ProductZoneResponse:
+    """Fija el recuadro donde debe caer el producto en todas las salidas.
+
+    El motor deduce esa zona del hueco que el producto ocupaba en el PSD, y casi
+    siempre acierta. Casi: cuando el KV traía tres prendas y entra una sola, o
+    cuando el arte se lleva a una proporción distinta, quien sabe dónde debe ir
+    el producto es quien está mirando la pieza. Esto es ese recuadro, en
+    fracciones del lienzo para que la misma decisión valga en los cinco formatos
+    de la tanda.
+    """
+    project = load_project_or_404(project_id)
+    project.product_zone = request.zone
+    project.touch()
+    storage.save_project(project)
+
+    warnings: list[str] = []
+    if request.zone is not None:
+        productos = [
+            layer
+            for layer in project.layers
+            if layer.category == LayerCategory.PRODUCT and layer.visible
+        ]
+        if not productos:
+            warnings.append(
+                "Este KV todavía no tiene ninguna capa marcada como producto: la "
+                "zona queda guardada y se aplicará en cuanto la tenga."
+            )
+        pisados = _layers_under_zone(project, request.zone)
+        if pisados:
+            warnings.append(
+                "La zona elegida cae encima de "
+                + ", ".join(f"«{nombre}»" for nombre in pisados[:4])
+                + (f" y {len(pisados) - 4} más" if len(pisados) > 4 else "")
+                + ". Al componer, el producto manda: donde el motor recompone se "
+                "apartan, y donde conserva el diseño del KV quedan detrás."
+            )
+    return ProductZoneResponse(
+        project_id=project.project_id, zone=project.product_zone, warnings=warnings
+    )
+
+
+#: Cuánto tiene que taparse un elemento para avisar de que el producto lo
+#: desplazará. Por debajo de esto es un roce entre cajas, no un choque.
+ZONE_CLASH = 0.35
+
+
+def _layers_under_zone(project: Project, zone) -> list[str]:
+    """Elementos del arte que quedan debajo del recuadro elegido, por nombre."""
+    canvas_w = max(1, project.canvas.width)
+    canvas_h = max(1, project.canvas.height)
+    zx, zy = zone.x * canvas_w, zone.y * canvas_h
+    zw, zh = zone.width * canvas_w, zone.height * canvas_h
+    chocan: list[str] = []
+    for layer in project.layers:
+        if layer.category in {
+            LayerCategory.BACKGROUND,
+            LayerCategory.PRODUCT,
+            LayerCategory.DECORATION,
+        } or not layer.visible:
+            continue
+        ancho = min(zx + zw, layer.x + layer.width) - max(zx, layer.x)
+        alto = min(zy + zh, layer.y + layer.height) - max(zy, layer.y)
+        if ancho <= 0 or alto <= 0:
+            continue
+        propio = max(1, layer.width * layer.height)
+        if (ancho * alto) / propio >= ZONE_CLASH:
+            chocan.append(layer.name)
+    return chocan
 
 
 @router.post(
@@ -1358,6 +1456,10 @@ def art_texts(project_id: str) -> ArtTextListResponse:
                     else max(1, len(art_text.blocks(project, layer)))
                 ),
                 part_of=layer.meta.get("split_from"),
+                # Lo que se comprobó al separarla. Sin esto, una separación que
+                # se dejó una pieza fuera solo se descubría al generar la tanda.
+                split_ok=(layer.meta.get("split_check") or {}).get("ok"),
+                split_check=(layer.meta.get("split_check") or {}).get("detail"),
             )
         )
     return ArtTextListResponse(

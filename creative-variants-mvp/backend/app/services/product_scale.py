@@ -219,17 +219,6 @@ def relative_heights(
     return [max(MIN_RELATIVE_HEIGHT, value / tallest) for value in heights], True
 
 
-def expected_ratio(first: Measurement, second: Measurement) -> float:
-    """Proporción de altos que el motor puede prometer entre dos productos.
-
-    No es el cociente crudo: el suelo de legibilidad de `MIN_RELATIVE_HEIGHT` es
-    parte del diseño, así que comparar contra el cociente real marcaría como
-    defecto algo que el motor hace a propósito.
-    """
-    raw = first.height_cm / second.height_cm
-    return min(max(raw, MIN_RELATIVE_HEIGHT), 1 / MIN_RELATIVE_HEIGHT)
-
-
 def proportion_conflicts(
     entries: list[tuple[str, Measurement | None, int]],
 ) -> list[str]:
@@ -238,16 +227,30 @@ def proportion_conflicts(
     `entries` son tripletes (nombre, medida, alto en píxeles). Solo se juzgan las
     parejas de las que se conocen las dos medidas: sin eso no hay nada que
     comparar y callar es lo correcto.
+
+    Lo esperado sale de `relative_heights`, que es **la misma** cuenta con la que
+    el motor decidió los altos. Comparar contra el cociente crudo de centímetros
+    era juzgar con una regla distinta de la que se jugó: en un combo de
+    refrigeradora, cocina y celular el motor sube el celular al suelo legible a
+    propósito, y el control marcaba esa pieza como irreal —un defecto que
+    invalida— tres veces seguidas, porque el suelo no depende de la semilla y
+    replantear no lo podía arreglar.
     """
+    ratios, from_real = relative_heights([item for _, item, _ in entries])
+    if not from_real:
+        # Sin dos medidas el motor iguala los altos: no prometió proporción
+        # ninguna y no hay nada que reprocharle.
+        return []
+
     warnings: list[str] = []
     known = [
-        (name, item, height)
-        for name, item, height in entries
-        if item is not None and height > 0
+        (name, ratio, height)
+        for (name, item, height), ratio in zip(entries, ratios)
+        if item is not None and height > 0 and ratio > 0
     ]
-    for index, (name_a, measure_a, px_a) in enumerate(known):
-        for name_b, measure_b, px_b in known[index + 1 :]:
-            expected = expected_ratio(measure_a, measure_b)
+    for index, (name_a, ratio_a, px_a) in enumerate(known):
+        for name_b, ratio_b, px_b in known[index + 1 :]:
+            expected = ratio_a / ratio_b
             rendered = px_a / px_b
             if abs(rendered - expected) / expected <= PROPORTION_TOLERANCE:
                 continue
