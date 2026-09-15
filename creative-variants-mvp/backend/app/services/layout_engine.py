@@ -823,9 +823,16 @@ FAITHFUL_LAYOUT = "faithful"
 #: arte original. Es el que se usa cuando el formato pedido obliga a recomponer.
 SOURCE_FLOW_LAYOUT = "source_flow"
 
-#: Ninguno de los dos entra en el sorteo de familias: los dos se asignan a
+#: Layout intermedio: conserva el tamaño y la posición de cada elemento como
+#: "faithful", pero reparte la holgura del formato entre las bandas del arte en
+#: vez de dejarla toda en dos bordes. Es lo que evita el letterbox en formatos
+#: que no son tan distintos del original como para justificar un reflujo
+#: completo (un 1:1 llevado a 4:5, por ejemplo).
+ADAPTIVE_LAYOUT = "adaptive"
+
+#: Ninguno de los tres entra en el sorteo de familias: los tres se asignan a
 #: propósito, según cuánto se parezca el formato de salida al de origen.
-SYNTHETIC_LAYOUTS = {FAITHFUL_LAYOUT, SOURCE_FLOW_LAYOUT}
+SYNTHETIC_LAYOUTS = {FAITHFUL_LAYOUT, SOURCE_FLOW_LAYOUT, ADAPTIVE_LAYOUT}
 
 # Se registra aquí, con las familias ya definidas, porque parte de
 # `vertical_stack`: si el arte no da para deducir una retícula —un solo bloque,
@@ -835,6 +842,17 @@ LAYOUTS[SOURCE_FLOW_LAYOUT] = {
     "label": "Recompuesto con la retícula del original",
     "derive_from_source": True,
     "zones": dict(LAYOUTS["vertical_stack"]["zones"]),
+    "align": "center",
+}
+
+# Parte de las zonas de "faithful": si la holgura resulta demasiado pequeña
+# para repartir (`_adaptive_boxes` devuelve vacío), cae en el mismo anclaje
+# fiel de siempre gracias a `keep_all_relative`.
+LAYOUTS[ADAPTIVE_LAYOUT] = {
+    "label": "Adaptado al formato (mismo diseño, sin bandas muertas)",
+    "adapt_from_source": True,
+    "keep_all_relative": True,
+    "zones": dict(LAYOUTS[FAITHFUL_LAYOUT]["zones"]),
     "align": "center",
 }
 
@@ -912,6 +930,15 @@ def _reference_share(category: LayerCategory, layout_key: str, index: int) -> fl
     return float(zona[index])
 
 
+#: Un bloque que cubre esta fracción del lienzo de ORIGEN en los dos ejes no es
+#: contenido: es escenografía a sangre (una plancha de fondo, una textura, un
+#: degradado decorativo). Incluirlo como un bloque más en el reflujo o en el
+#: reparto adaptativo lo hace solaparse al 100% con TODO lo demás —el solape se
+#: mide sobre el más pequeño de los dos— y colapsa todas las bandas en una sola,
+#: perdiendo el orden de lectura que estos dos layouts existen para conservar.
+SOURCE_FULL_BLEED_RATIO = 0.92
+
+
 def _source_items(
     by_category: dict[LayerCategory, list[Layer]], source_canvas: tuple[int, int]
 ) -> list[source_layout.Item]:
@@ -941,6 +968,13 @@ def _source_items(
             x1 = max(layer.x + layer.width for layer in bloque)
             y1 = max(layer.y + layer.height for layer in bloque)
             if x1 <= x0 or y1 <= y0:
+                continue
+            if (
+                (x1 - x0) >= source_w * SOURCE_FULL_BLEED_RATIO
+                and (y1 - y0) >= source_h * SOURCE_FULL_BLEED_RATIO
+            ):
+                # Escenografía a sangre: no define una banda de lectura, y
+                # tratarla como una más colapsa el resto en una sola.
                 continue
             box = (
                 x0 / max(1, source_w),
@@ -1067,6 +1101,20 @@ def build_placements(
                 "El arte no tiene bloques suficientes para deducir su retícula: "
                 "la pieza se compuso apilada."
             )
+    elif layout.get("adapt_from_source") and source_canvas is not None:
+        zonas, notas = _adaptive_boxes(
+            layers, source_canvas, canvas_w, canvas_h, product_zone
+        )
+        if zonas:
+            zones = {**zones, **zonas}
+            derived_zones = zonas
+            notes.extend(notas)
+            derived = True
+        else:
+            notes.append(
+                "La proporción es tan parecida a la del arte original que no hay "
+                "holgura que repartir: se conservó el diseño tal cual."
+            )
 
     base_align = bias.get("force_align") or layout.get("align", "left")
     # Voltear una retícula deducida del original destruye justo lo que se estaba
@@ -1096,7 +1144,12 @@ def build_placements(
             if (
                 source_canvas is not None
                 and (
-                    bool(layout.get("keep_all_relative"))
+                    # `not derived`: si el reparto adaptativo tuvo éxito para
+                    # este formato, sus zonas mandan; `keep_all_relative` solo
+                    # sirve de red cuando no hubo holgura real que repartir
+                    # (`_adaptive_boxes` devolvió vacío) y hay que anclar todo
+                    # exactamente igual que "faithful".
+                    (bool(layout.get("keep_all_relative")) and not derived)
                     or (category in KEEP_RELATIVE_CATEGORIES and not derived)
                     # Solo los recortes confirmados del PSD conservan la composición
                     # original. Las capas manuales de la misma categoría siguen editables.
@@ -1548,6 +1601,254 @@ def _pinned_box(
     return x, y, width, height, False
 
 
+#: Cuánto de la holgura repartida se pueden llevar los dos huecos exteriores
+#: (antes del primer bloque y después del último) entre los dos. Sin este
+#: tope, un arte con huecos internos pequeños y bordes grandes vuelve a dejar
+#: casi toda la holgura en los bordes: el letterbox por la puerta de atrás,
+#: con otro nombre.
+ADAPTIVE_EDGE_SLACK_SHARE = 0.35
+
+#: Cuánta holgura puede absorber la banda del producto antes de repartir el
+#: resto entre los huecos del arte. Es lo que hace que, en un formato muy
+#: alto, el producto crezca en vez de dejar un vacío nuevo en medio de la
+#: pieza. Limitado además por `MAX_UPSCALE`, así que nunca se pixela.
+ADAPTIVE_PRODUCT_SLACK_SHARE = 0.45
+
+#: Por debajo de esta fracción del lienzo, la holgura es un margen normal del
+#: formato, no un letterbox: "faithful" da el mismo resultado con menos
+#: cálculo, así que no merece la pena repartir nada.
+ADAPTIVE_MIN_SLACK = 0.02
+
+
+def _adaptive_boxes(
+    layers: list[Layer],
+    source_canvas: tuple[int, int],
+    canvas_w: int,
+    canvas_h: int,
+    product_zone: tuple[float, float, float, float] | None = None,
+) -> tuple[dict[str, Zone], list[str]]:
+    """Zonas ancladas con la holgura del formato repartida entre las bandas del arte.
+
+    "faithful" usa una única escala y centra: toda la holgura de un formato más
+    alto (o más ancho) que el original cae en dos bordes, y si es mucha, eso es
+    un letterbox — el arte flotando en medio de un relleno. Esta función reparte
+    esa holgura entre los huecos que el propio arte ya tenía entre sus bloques
+    (el mismo hueco que separaba el titular del precio, ahora un poco más
+    grande) en vez de apilarla en los bordes. Nada cambia de tamaño salvo el
+    producto, al que se le deja absorber parte de la holgura: es preferible a
+    dejarlo del tamaño de siempre en medio de un vacío nuevo.
+
+    `product_zone` es el recuadro que una persona dibujó a mano. Cuando existe,
+    el producto NO entra en el reparto de bandas —manda el recuadro, no el
+    reflujo—: se ancla ahí igual que el legal se ancla al pie, para no dejar un
+    hueco "fantasma" del tamaño que el producto habría ocupado si hubiera
+    participado en el reparto.
+
+    Sigue el mismo patrón que `source_layout.derive_zones`: un `dict` de zonas
+    relativas al lienzo de salida, indexado por `layer.id` (o por
+    `category.value` para un combo de productos), que `build_placements` funde
+    con las zonas base del layout. Devuelve `({}, [])` cuando la proporción es
+    tan parecida a la de origen que no hay holgura real que repartir, o cuando
+    el arte no tiene bloques suficientes para hablar de "bandas": ahí el
+    layout cae en su comportamiento base (anclado, como "faithful").
+    """
+    source_w, source_h = source_canvas
+    if source_w <= 0 or source_h <= 0:
+        return {}, []
+
+    scale = _uniform_scale(source_canvas, canvas_w, canvas_h)
+    scale_w, scale_h = canvas_w / source_w, canvas_h / source_h
+    # El eje que NO llega al borde del lienzo con la escala uniforme es el que
+    # tiene holgura que repartir.
+    axis = "y" if scale == scale_w else "x"
+    total = canvas_h if axis == "y" else canvas_w
+    filled = (source_h if axis == "y" else source_w) * scale
+    slack_px = total - filled
+    if slack_px <= 0 or slack_px / max(1, total) < ADAPTIVE_MIN_SLACK:
+        return {}, []
+
+    legal_layers = [
+        layer for layer in layers if layer.category == LayerCategory.LEGAL and layer.visible
+    ]
+    # Con una zona elegida a mano, el producto no participa del reparto: se
+    # ancla directamente ahí, como el legal se ancla al pie.
+    excluidas = {LayerCategory.BACKGROUND, LayerCategory.LEGAL}
+    if product_zone is not None:
+        excluidas = excluidas | {LayerCategory.PRODUCT}
+    by_category: dict[LayerCategory, list[Layer]] = {}
+    for layer in layers:
+        if layer.category in excluidas or not layer.visible:
+            continue
+        by_category.setdefault(layer.category, []).append(layer)
+    items = _source_items(by_category, source_canvas)
+    if len(items) < 2:
+        return {}, []
+
+    # `_source_items` descarta la escenografía a sangre (una capa que cubre casi
+    # todo el lienzo no define una banda de lectura), pero esa capa sigue
+    # viviendo en el MISMO grupo de su categoría dentro de `build_placements`.
+    # Ese grupo solo usa estas zonas si TODAS sus capas tienen una asignada:
+    # sin esto, la capa a sangre se quedaba sin zona, el grupo entero caía al
+    # reparto genérico de "faithful" y diez decoraciones terminaban amontonadas
+    # en la esquina que le toca a "decoration" en esa familia. Se ancla igual
+    # que "faithful" — misma escala uniforme, centrada —: es fondo, no
+    # contenido que deba repartirse en bandas.
+    item_keys = {item.key for item in items}
+    bleed_zones: dict[str, Zone] = {}
+    for layer in layers:
+        if (
+            layer.category in excluidas
+            or not layer.visible
+            or layer.id in item_keys
+        ):
+            # El producto con zona manual también se salta aquí: no se le da
+            # NINGUNA zona desde esta función, para que `build_placements` lo
+            # resuelva entero con el recuadro dibujado a mano.
+            continue
+        px, py, pw, ph, _ = _pinned_box(layer, source_canvas, canvas_w, canvas_h)
+        bleed_zones[layer.id] = (px / canvas_w, py / canvas_h, pw / canvas_w, ph / canvas_h)
+
+    tramos = source_layout.clusters(items, axis)
+    if len(tramos) < 2:
+        # Un solo tramo: no hay huecos internos que ensanchar, solo centrar.
+        # "faithful" ya hace exactamente eso.
+        return {}, []
+
+    def extent(item: source_layout.Item) -> tuple[float, float]:
+        x, y, w, h = item.box
+        return (y, y + h) if axis == "y" else (x, x + w)
+
+    tramo_extent = []
+    for tramo in tramos:
+        los = [extent(item)[0] for item in tramo]
+        his = [extent(item)[1] for item in tramo]
+        tramo_extent.append((min(los), max(his)))
+
+    # El eje de la holgura no puede invadir la reserva del pie donde vive el
+    # legal: si no, el reparto empuja el último bloque encima del texto legal.
+    limite = 1.0
+    if axis == "y" and legal_layers:
+        limite = min(layer.y / max(1, source_h) for layer in legal_layers)
+    tramo_extent = [(lo, min(hi, limite)) for lo, hi in tramo_extent]
+
+    huecos = [max(0.0, tramo_extent[0][0])]
+    for previo, siguiente in zip(tramo_extent, tramo_extent[1:]):
+        huecos.append(max(0.0, siguiente[0] - previo[1]))
+    huecos.append(max(0.0, limite - tramo_extent[-1][1]))
+
+    # ¿Hay banda de producto? Se le reserva parte de la holgura para que
+    # crezca, en vez de solo desplazarse con el resto.
+    product_keys = {LayerCategory.PRODUCT.value} | {
+        layer.id for layer in by_category.get(LayerCategory.PRODUCT, [])
+    }
+    producto_idx = next(
+        (i for i, tramo in enumerate(tramos) if any(item.key in product_keys for item in tramo)),
+        None,
+    )
+    slack_producto_px = 0.0
+    if producto_idx is not None:
+        lo, hi = tramo_extent[producto_idx]
+        size_source_px = (hi - lo) * (source_h if axis == "y" else source_w)
+        size_actual_px = size_source_px * scale
+        tope_px = size_actual_px * (MAX_UPSCALE - 1.0)
+        slack_producto_px = max(0.0, min(slack_px * ADAPTIVE_PRODUCT_SLACK_SHARE, tope_px))
+    slack_huecos_px = slack_px - slack_producto_px
+
+    # Reparto proporcional de la holgura restante entre los huecos, con tope a
+    # lo que se pueden llevar los dos extremos entre los dos.
+    total_huecos = sum(huecos)
+    if total_huecos <= 1e-6:
+        # Arte sin aire medible entre bloques: reparte a partes iguales entre
+        # los huecos interiores, y solo a los extremos si no hay ninguno.
+        interior = list(range(1, len(huecos) - 1))
+        pesos = [0.0] * len(huecos)
+        if interior:
+            for i in interior:
+                pesos[i] = 1.0 / len(interior)
+        else:
+            pesos[0] = pesos[-1] = 0.5
+    else:
+        pesos = [hueco / total_huecos for hueco in huecos]
+        extremos = pesos[0] + pesos[-1]
+        if extremos > ADAPTIVE_EDGE_SLACK_SHARE:
+            interior_total = total_huecos - (huecos[0] + huecos[-1])
+            factor = ADAPTIVE_EDGE_SLACK_SHARE / extremos if extremos > 0 else 0.0
+            sobra = extremos - ADAPTIVE_EDGE_SLACK_SHARE
+            pesos[0] *= factor
+            pesos[-1] *= factor
+            if interior_total > 1e-9:
+                for i in range(1, len(pesos) - 1):
+                    pesos[i] += sobra * (huecos[i] / interior_total)
+
+    huecos_px = [slack_huecos_px * peso for peso in pesos]
+
+    cursor_px = huecos_px[0]
+    tramo_offset_px: list[float] = []
+    tramo_size_px: list[float] = []
+    for idx, (lo, hi) in enumerate(tramo_extent):
+        size_px = (hi - lo) * (source_h if axis == "y" else source_w) * scale
+        extra = slack_producto_px if idx == producto_idx else 0.0
+        tramo_offset_px.append(cursor_px)
+        tramo_size_px.append(size_px + extra)
+        cursor_px += size_px + extra + huecos_px[idx + 1]
+
+    zones: dict[str, Zone] = {}
+    for tramo_i, tramo in enumerate(tramos):
+        lo, hi = tramo_extent[tramo_i]
+        size_orig = max(1e-6, hi - lo)
+        for item in tramo:
+            e0, e1 = extent(item)
+            # Recortado a los límites del tramo: un bloque que se asomaba un
+            # poco hacia la reserva del legal no debe proyectarse fuera de ella.
+            e0c, e1c = max(lo, min(e0, hi)), max(lo, min(e1, hi))
+            rel0 = (e0c - lo) / size_orig
+            rel1 = (e1c - lo) / size_orig
+            pos0_px = tramo_offset_px[tramo_i] + rel0 * tramo_size_px[tramo_i]
+            pos1_px = tramo_offset_px[tramo_i] + rel1 * tramo_size_px[tramo_i]
+
+            x_frac, y_frac, w_frac, h_frac = item.box
+            if axis == "y":
+                minor_pos_px = x_frac * source_w * scale
+                minor_size_px = w_frac * source_w * scale
+                zones[item.key] = (
+                    minor_pos_px / canvas_w,
+                    pos0_px / canvas_h,
+                    minor_size_px / canvas_w,
+                    max(1.0, pos1_px - pos0_px) / canvas_h,
+                )
+            else:
+                minor_pos_px = y_frac * source_h * scale
+                minor_size_px = h_frac * source_h * scale
+                zones[item.key] = (
+                    pos0_px / canvas_w,
+                    minor_pos_px / canvas_h,
+                    max(1.0, pos1_px - pos0_px) / canvas_w,
+                    minor_size_px / canvas_h,
+                )
+
+    # El legal no entra en el reparto de bandas: vive anclado al pie, igual que
+    # en cualquier otro layout. Un texto legal flotando entre bloques del
+    # reflujo es peor que uno fijo en el sitio de siempre.
+    for layer in legal_layers:
+        w = layer.width * scale
+        h = layer.height * scale
+        if axis == "y":
+            x = layer.x * scale
+            y = canvas_h - h
+        else:
+            x = layer.x * scale
+            y = layer.y * scale
+        zones[layer.id] = (x / canvas_w, y / canvas_h, w / canvas_w, h / canvas_h)
+
+    zones.update(bleed_zones)
+
+    notes = [
+        f"Diseño adaptado al formato: la holgura se repartió entre {len(tramos)} "
+        "bloques del arte en vez de dejarla en los bordes."
+    ]
+    return zones, notes
+
+
 def _relative_zone(layer: Layer, source_canvas: tuple[int, int]) -> Zone:
     """Zona equivalente a la posición que la capa ocupaba en el arte original."""
     source_w, source_h = source_canvas
@@ -1733,8 +2034,9 @@ def _build_plan(
     width, height = SUPPORTED_FORMATS[fmt]
     rng = random.Random(variant_seed)
     background_style = ctx.preset["backgrounds"][index % len(ctx.preset["backgrounds"])]
-    if layout_key == FAITHFUL_LAYOUT:
+    if layout_key in {FAITHFUL_LAYOUT, ADAPTIVE_LAYOUT}:
         # Conservar el diseño exige conservar su fondo real, no uno generado.
+        # "adaptive" reparte la posición de los bloques pero es el mismo KV.
         background_style = "plate"
 
     placements, notes = build_placements(
@@ -1940,6 +2242,27 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
                 ctx.layers, ctx.source_canvas, ancho, alto
             ):
                 pool.append(SOURCE_FLOW_LAYOUT)
+            if not pool and anchored:
+                # Ni tan parecido como para ser fiel, ni tan apretado como para
+                # forzar el reflujo: es la tierra de nadie donde "faithful"
+                # dejaba el arte en una franja con el resto del lienzo en
+                # bandas muertas (un 1:1 llevado a 4:5, por ejemplo). Solo
+                # importa cuando se pidió conservar el diseño: en modo compose
+                # normal esta zona ya la cubren las familias genéricas —cambiar
+                # eso ahí sería tocar una garantía que no estaba rota—. Se
+                # prueba primero el reparto adaptativo y solo si no tiene nada
+                # que repartir (o el arte no da bloques que agrupar) se cae al
+                # reflujo. "Viable" aquí es el resultado REAL del cálculo, no
+                # un umbral de proporción adivinado: si el reparto no encuentra
+                # al menos dos bloques con holgura real que repartir, no hay
+                # nada que ganar frente a "faithful".
+                zonas_adaptativas, _ = _adaptive_boxes(
+                    ctx.layers, ctx.source_canvas, ancho, alto, ctx.product_zone
+                )
+                if zonas_adaptativas:
+                    pool.append(ADAPTIVE_LAYOUT)
+                elif reflow_viable(ctx.layers, ctx.source_canvas, ancho, alto):
+                    pool.append(SOURCE_FLOW_LAYOUT)
             if pool:
                 reservados[fmt] = pool
 
@@ -1955,13 +2278,19 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
             # idéntica. Tras cambiar el producto de un KV siempre tiene que haber
             # una pieza «igual al KV», pero una basta.
             layout_key = FAITHFUL_LAYOUT
+        elif orden == 0 and ADAPTIVE_LAYOUT in elegibles:
+            # Mismo razonamiento que "faithful": el reparto es determinista,
+            # así que una segunda pieza con el mismo layout saldría idéntica.
+            layout_key = ADAPTIVE_LAYOUT
         elif SOURCE_FLOW_LAYOUT in elegibles:
             layout_key = SOURCE_FLOW_LAYOUT
+        elif anchored and ADAPTIVE_LAYOUT in elegibles:
+            layout_key = ADAPTIVE_LAYOUT
         elif anchored:
             # Se pidió conservar el diseño. Si este formato no admite ni la copia
-            # fiel ni la retícula del arte, se entrega la copia fiel a escala
-            # antes que una familia genérica: reinventar la pieza es justo lo
-            # contrario de lo que se pidió.
+            # fiel ni el reparto adaptativo ni la retícula del arte, se entrega
+            # la copia fiel a escala antes que una familia genérica: reinventar
+            # la pieza es justo lo contrario de lo que se pidió.
             layout_key = FAITHFUL_LAYOUT
         else:
             layout_key = layout_keys[index]
@@ -1974,18 +2303,46 @@ def plan_variants(project: Project, request) -> tuple[list[VariantPlan], list[st
 _RETRY_SEED_STEP = 7919
 
 
-def replan(project: Project, request, plan: VariantPlan, attempt: int) -> VariantPlan | None:
-    """Rehace **una** variante con otra semilla, dejando lo demás igual.
+def replan(
+    project: Project,
+    request,
+    plan: VariantPlan,
+    attempt: int,
+    metrics: dict[str, float] | None = None,
+) -> VariantPlan | None:
+    """Rehace **una** variante, dejando lo demás igual.
 
     Es lo que permite volver a intentarlo cuando la pieza sale con un defecto que
     la invalida, en vez de entregarla con un aviso y que lo arregle el usuario.
     Devuelve `None` si el proyecto ya no da para plantear nada.
+
+    Casi siempre basta con otra semilla: un solapamiento grave o unas
+    proporciones irreales dependen de cómo cayó la composición. El letterbox
+    no depende de la semilla — es la composición misma la que deja el arte en
+    una franja —, así que ahí lo que cambia es el LAYOUT: de "faithful" a
+    "adaptive" (si tiene huecos reales que repartir para este formato) o, si
+    eso tampoco alcanza, a la retícula del propio arte.
     """
     ctx, _ = _planning(project, request)
     if ctx is None:
         return None
+    layout_key = plan.layout
+    if metrics and metrics.get("letterbox"):
+        ancho, alto = plan.width, plan.height
+        if layout_key == FAITHFUL_LAYOUT:
+            zonas, _ = _adaptive_boxes(
+                ctx.layers, ctx.source_canvas, ancho, alto, ctx.product_zone
+            )
+            if zonas:
+                layout_key = ADAPTIVE_LAYOUT
+            elif reflow_viable(ctx.layers, ctx.source_canvas, ancho, alto):
+                layout_key = SOURCE_FLOW_LAYOUT
+        elif layout_key == ADAPTIVE_LAYOUT and reflow_viable(
+            ctx.layers, ctx.source_canvas, ancho, alto
+        ):
+            layout_key = SOURCE_FLOW_LAYOUT
     return _build_plan(
-        ctx, plan.index, plan.format, plan.layout, plan.seed + _RETRY_SEED_STEP * attempt
+        ctx, plan.index, plan.format, layout_key, plan.seed + _RETRY_SEED_STEP * attempt
     )
 
 

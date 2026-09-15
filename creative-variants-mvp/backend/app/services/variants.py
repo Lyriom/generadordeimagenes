@@ -74,7 +74,7 @@ def _compose_until_clean(project: Project, request, plan):
         defects = quality.blocking_defects(report)
         if not defects or attempt >= MAX_ATTEMPTS:
             break
-        siguiente = layout_engine.replan(project, request, plan, attempt)
+        siguiente = layout_engine.replan(project, request, plan, attempt, report.metrics)
         if siguiente is None:
             break
         logger.info(

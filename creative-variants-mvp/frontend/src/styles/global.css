@@ -1981,7 +1981,14 @@ td.truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white
   position: relative;
   display: grid;
   place-items: center;
-  height: 280px;
+  /* La proporción real del formato, no una caja fija: un 9:16 y un 1.91:1
+     se veían igual de altos y la única forma de distinguirlos era leer el
+     texto de abajo. `--ratio` lo pone `resultCard()` por variante; el tope
+     evita que un banner panorámico colapse a una tira o un story se dispare
+     a toda la pantalla. */
+  aspect-ratio: var(--ratio, 1);
+  max-height: 340px;
+  min-height: 160px;
   padding: 10px;
   background:
     conic-gradient(var(--surface-3) 25%, var(--surface-2) 0 50%,

@@ -395,7 +395,11 @@ def _simular(monkeypatch, guion: list[tuple[int, float]]):
     monkeypatch.setattr(r, "render_variant", lambda *a, **k: (PilImage.new("RGB", (4, 4)), []))
     monkeypatch.setattr(q, "evaluate_variant", lambda *a, **k: _informe(*next(turnos)))
     monkeypatch.setattr(
-        le, "replan", lambda project, request, plan, attempt: _PlanFalso(plan.index, plan.seed + attempt)
+        le,
+        "replan",
+        lambda project, request, plan, attempt, metrics=None: _PlanFalso(
+            plan.index, plan.seed + attempt
+        ),
     )
     return v
 

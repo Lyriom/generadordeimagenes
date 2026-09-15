@@ -146,18 +146,31 @@ def _overlap(a: Zone, b: Zone, axis: str) -> float:
     return solape / menor if menor > 0 else 0.0
 
 
+#: Fuera de este rango de aspecto, la forma del arte manda sin apelación: un
+#: banner de 1920x325 se lee en horizontal aunque sus bloques cayeran dispersos
+#: en vertical por casualidad. Dentro del rango, la forma ya no basta —un KV de
+#: 900x660 (aspecto 1.36, "ancho") puede tener el titular, el precio y el logo
+#: apilados de arriba a abajo igual que uno cuadrado— y manda el reparto real.
+READING_AXIS_HORIZONTAL = 1.8
+READING_AXIS_VERTICAL = 0.6
+
+
 def reading_axis(items: list[Item], source_canvas: tuple[int, int]) -> str:
     """Eje por el que se lee el arte original.
 
-    Un arte ancho se lee en horizontal y uno alto en vertical. Cuando la forma no
-    lo dice —un cuadrado—, lo dice el reparto: el eje en el que los bloques están
-    más desplegados es el que ordena la lectura.
+    Un arte muy ancho se lee en horizontal y uno muy alto en vertical: ahí no
+    hace falta preguntar nada más. En el rango intermedio —que cubre desde un
+    cuadrado hasta un 4:5 o un 900x660— la forma del lienzo ya no dice cómo
+    están agrupados los bloques: lo dice el reparto. Decidirlo solo por la
+    forma colapsaba los bloques de un KV apilado (titular arriba, precio en
+    medio, marca al pie) en una sola columna cuando el arte era "ancho" mirado
+    de fuera, aunque por dentro se leyera de arriba a abajo.
     """
     source_w, source_h = source_canvas
     aspect = source_w / max(1, source_h)
-    if aspect >= 1.15:
+    if aspect >= READING_AXIS_HORIZONTAL:
         return "x"
-    if aspect <= 0.87:
+    if aspect <= READING_AXIS_VERTICAL:
         return "y"
     centros_x = [_centre(item.box, "x") for item in items]
     centros_y = [_centre(item.box, "y") for item in items]
@@ -214,11 +227,22 @@ def _shares(group: list[Item], axis: str) -> list[float]:
 
     Proporcional a lo que ocupaban en el arte, con un suelo: dos bloques en la
     misma banda y uno de ellos reducido a una rendija es peor que repartir.
+
+    El tamaño original no basta cuando la banda junta MUCHOS bloques: una
+    decoración delgada y el producto pueden medir casi lo mismo en el eje que
+    se reparte —una rayita decorativa de 328px de ancho y un producto de
+    358px—, y repartir a partes iguales deja al producto tan estrecho como la
+    rayita, aunque uno importa y el otro no. La prioridad —la misma que ya
+    decide qué se descarta cuando no cabe todo, en `capacity()`— pesa también
+    aquí: no decide solo, pero inclina la balanza.
     """
     minor = "y" if axis == "x" else "x"
     crudos = [max(0.04, item.box[3] if minor == "y" else item.box[2]) for item in group]
-    total = sum(crudos)
-    return [valor / total for valor in crudos]
+    pesos = [
+        crudo * (0.5 + item.priority / 100.0) for crudo, item in zip(crudos, group)
+    ]
+    total = sum(pesos)
+    return [valor / total for valor in pesos]
 
 
 def _fitted(item: Item, box_w: float, box_h: float, canvas_h: int) -> tuple[float, float]:

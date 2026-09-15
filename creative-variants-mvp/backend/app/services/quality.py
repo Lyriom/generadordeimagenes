@@ -11,7 +11,13 @@ from PIL import Image
 from ..models import LayerCategory, LayerType, Project, QualityReport
 from . import product_scale
 from .imaging import contrast_ratio, hex_to_rgb, rotated_bounds
-from .layout_engine import SAFE_MARGIN, Placement, VariantPlan, overlap_ratio
+from .layout_engine import (
+    FAITHFUL_ASPECT_TOLERANCE,
+    SAFE_MARGIN,
+    Placement,
+    VariantPlan,
+    overlap_ratio,
+)
 
 MIN_LOGO_WIDTH_RATIO = 0.055
 MIN_HEADLINE_FONT_RATIO = 0.022
@@ -31,6 +37,14 @@ FULL_BLEED_RATIO = 0.92
 #: Por debajo de esta cobertura la pieza no es una composición, es un arte suelto
 #: sobre un relleno. Deja de ser un aviso menor y pasa a invalidarla.
 EMPTY_FILL = 0.12
+#: Franja muerta a cada lado (arriba+abajo, o izquierda+derecha) a partir de la
+#: cual la pieza está en un buzón: el arte flota en medio y el resto es relleno.
+#: 0.08 es el margen de seguridad típico de un formato; el doble de eso ya es
+#: una banda que se ve a simple vista, no un margen.
+DEAD_BAND_EDGE = 0.08
+#: Y cuánto tienen que sumar las dos bandas de un mismo eje para que deje de ser
+#: aire alrededor de la pieza y pase a ser un defecto que invalida.
+DEAD_BAND_TOTAL = 0.18
 
 
 def _is_full_bleed(placement, canvas_w: int, canvas_h: int) -> bool:
@@ -57,6 +71,33 @@ def _union_coverage(placements, canvas_w: int, canvas_h: int, grid: int = 64) ->
         y1 = max(y0 + 1, min(grid, int((placement.y + placement.height) / canvas_h * grid)))
         mask[y0:y1, x0:x1] = True
     return float(mask.mean())
+
+
+def _dead_bands(
+    placements: list[Placement], canvas_w: int, canvas_h: int
+) -> tuple[float, float, float, float]:
+    """Franjas del lienzo, a cada lado, donde no cae NADA del contenido.
+
+    La unión de cajas no distingue «el contenido cubre el 59% bien repartido»
+    de «el contenido cubre el 59% metido en una franja central con dos bandas
+    muertas arriba y abajo»: esa diferencia es justo la que separa una pieza
+    adaptada a su formato de un arte encogido en medio de un relleno.
+
+    Devuelve (arriba, abajo, izquierda, derecha): cada banda como fracción del
+    lado correspondiente del lienzo, medida desde el borde de la caja
+    envolvente de todo el contenido hasta el borde del lienzo.
+    """
+    if not placements or canvas_w <= 0 or canvas_h <= 0:
+        return 0.0, 0.0, 0.0, 0.0
+    x0 = min(p.x for p in placements)
+    y0 = min(p.y for p in placements)
+    x1 = max(p.x + p.width for p in placements)
+    y1 = max(p.y + p.height for p in placements)
+    arriba = max(0.0, y0) / canvas_h
+    abajo = max(0.0, canvas_h - y1) / canvas_h
+    izquierda = max(0.0, x0) / canvas_w
+    derecha = max(0.0, canvas_w - x1) / canvas_w
+    return arriba, abajo, izquierda, derecha
 
 
 def _text_background_color(
@@ -89,6 +130,7 @@ BLOCKING_METRICS: dict[str, str] = {
     "outside_canvas": "elementos fuera del lienzo",
     "distorted_layers": "capas deformadas",
     "empty_composition": "la pieza es casi todo fondo",
+    "letterbox": "el arte flota en una franja del lienzo",
 }
 
 
@@ -372,6 +414,15 @@ def evaluate_variant(
     filled = _union_coverage(content, canvas_w, canvas_h)
     metrics["fill_ratio"] = round(filled, 4)
     _, high = FILL_RANGE
+    # ¿Esta pieza está en la proporción del arte original, o se le pidió otra?
+    # En su proporción nativa, un diseño aireado es una decisión del diseñador:
+    # no hay nada que corregir. En cuanto cambia de proporción, el vacío ya no
+    # lo puso nadie: lo puso el motor al encoger el arte para que quepa.
+    source_aspect = project.canvas.width / max(1, project.canvas.height)
+    output_aspect = canvas_w / max(1, canvas_h)
+    es_proporcion_nativa = (
+        abs(output_aspect / source_aspect - 1.0) <= FAITHFUL_ASPECT_TOLERANCE
+    )
     # Por debajo de esto no es "le falta aire": es un arte pequeño sobre un
     # relleno de color, que es lo que salía al meter un banner en un formato
     # vertical. No es una pieza a la que le falte un retoque.
@@ -385,9 +436,13 @@ def evaluate_variant(
             f"La pieza es casi todo fondo: el contenido cubre el {filled * 100:.0f}% "
             "del lienzo. Este formato no se puede sacar de este arte.",
         )
-    elif filled < AIRY_FILL and not all(p.pinned for p in content):
+    elif filled < AIRY_FILL and not (
+        es_proporcion_nativa and all(p.pinned for p in content)
+    ):
         # Una reproducción fiel va donde el diseñador lo puso: si el KV aprobado
-        # es aireado, eso es su diseño y no un defecto de la pieza.
+        # es aireado, eso es su diseño y no un defecto de la pieza. Pero eso solo
+        # vale en su propia proporción: en otra, todo anclado + vacío es un
+        # letterbox, no un diseño.
         falta = (AIRY_FILL - filled) / max(1e-6, AIRY_FILL - EMPTY_FILL)
         penalties += int(round(4 + 14 * min(1.0, falta)))
         warnings.append(
@@ -397,6 +452,36 @@ def evaluate_variant(
     elif filled > high:
         penalties += 6
         warnings.append("La composición está saturada: falta aire entre elementos.")
+
+    # 10.b Bandas muertas (letterbox) --------------------------------------
+    # Un arte metido en otra proporción con una sola escala uniforme deja toda
+    # la holgura en dos franjas, arriba+abajo o izquierda+derecha. La unión de
+    # cajas no lo distingue de "bien repartido" (sección 10); esto sí.
+    arriba, abajo, izquierda, derecha = _dead_bands(content, canvas_w, canvas_h)
+    banda_v = arriba + abajo
+    banda_h = izquierda + derecha
+    es_letterbox = (
+        not es_proporcion_nativa
+        and (
+            (min(arriba, abajo) >= DEAD_BAND_EDGE and banda_v >= DEAD_BAND_TOTAL)
+            or (
+                min(izquierda, derecha) >= DEAD_BAND_EDGE
+                and banda_h >= DEAD_BAND_TOTAL
+            )
+        )
+    )
+    metrics["dead_bands_v"] = round(banda_v, 4)
+    metrics["dead_bands_h"] = round(banda_h, 4)
+    metrics["letterbox"] = float(es_letterbox)
+    if es_letterbox:
+        peor_banda = max(banda_v, banda_h)
+        penalties += 20
+        warnings.insert(
+            0,
+            f"El arte flota en una franja del lienzo: el {peor_banda * 100:.0f}% "
+            "queda como relleno vacío arriba y abajo (o a los lados). Este "
+            "formato necesita repartir el diseño, no solo encogerlo.",
+        )
 
     # 11. Proporciones entre productos ------------------------------------
     # Un combo con el cilindro de gas más alto que la cocina es una pieza que no

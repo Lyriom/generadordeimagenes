@@ -4049,8 +4049,12 @@ function resultCard(project: Project, variant: Variant): string {
   const slot = viewerItems.findIndex(
     (item) => item.projectId === project.project_id && item.variantId === variant.id,
   );
+  // La proporción real del formato: sin ella, un story 9:16 y un banner
+  // 1.91:1 se veían igual de altos en la rejilla y el único modo de distinguir
+  // uno de otro era leer el texto de la ficha.
+  const ratio = (variant.width / Math.max(1, variant.height)).toFixed(4);
   return [
-    '<article class="result-card"><div class="result-image">',
+    '<article class="result-card"><div class="result-image" style="--ratio:', ratio, '">',
     '<button type="button" class="result-open" data-slot="', String(slot), '" aria-label="Ver en grande">',
     '<img src="', attr(fileUrl(project.project_id, preview)), '" alt="Variante ', String(variant.index),
     '" title="Ver en grande" loading="lazy" decoding="async"></button><span class="score">',

@@ -80,14 +80,29 @@ def generate_variants_task(self, project_id: str, generation_request_dict: Dict[
     lienzos = {
         SUPPORTED_FORMATS[fmt] for fmt in pedidos if fmt in SUPPORTED_FORMATS
     }
+    source_canvas = (project.canvas.width, project.canvas.height)
+
+    def _hace_falta_extender(ancho: int, alto: int) -> bool:
+        cobertura = background_expand.cover_upscale(source_canvas, ancho, alto)
+        if cobertura > background_expand.SHARP_UPSCALE:
+            return True
+        # El layout adaptativo reparte los bloques por todo el eje que creció,
+        # y ese eje necesita fondo de verdad: recortar la plancha no falla por
+        # falta de píxeles sino porque dejaría los bloques de los extremos
+        # flotando sobre un recorte arbitrario. Pero solo cuando la plancha se
+        # está AMPLIANDO (cobertura >= 1): si sobra de más, recortarla no
+        # pierde nada por ningún lado sin importar cuánto cambie la forma.
+        # Ver `background_expand.aspect_delta`.
+        return cobertura >= 1.0 and (
+            background_expand.aspect_delta(source_canvas, ancho, alto)
+            > background_expand.ASPECT_TRIGGER
+        )
+
     por_extender = [
         (ancho, alto)
         for ancho, alto in sorted(lienzos)
         if background_expand.cached(project, ancho, alto) is None
-        and background_expand.cover_upscale(
-            (project.canvas.width, project.canvas.height), ancho, alto
-        )
-        > background_expand.SHARP_UPSCALE
+        and _hace_falta_extender(ancho, alto)
     ]
     for indice, (ancho, alto) in enumerate(por_extender):
         self.update_state(

@@ -163,9 +163,10 @@ def test_template_mode_keeps_the_design_but_honours_the_chosen_formats(
     # Una por formato, las tres pedidas, ninguna de más.
     assert [variant["format"] for variant in payload["variants"]] == pedidos
     for variant in payload["variants"]:
-        # El diseño del arte manda: o se reproduce tal cual, o se recompone con
-        # la retícula del propio arte. Nunca una familia genérica.
-        assert variant["layout"] in {"faithful", "source_flow"}
+        # El diseño del arte manda: se reproduce tal cual, se reparte su
+        # holgura entre las bandas del arte, o se recompone con su retícula.
+        # Nunca una familia genérica.
+        assert variant["layout"] in {"faithful", "adaptive", "source_flow"}
         assert variant["intensity"] == "conservative"
     # Y se dice por qué se entregó una sola por medida en vez de las seis.
     assert any("una por formato" in aviso for aviso in payload["warnings"])

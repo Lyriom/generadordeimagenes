@@ -74,6 +74,15 @@ SEAM = 10
 #: entera. Ahí es mejor la plancha difuminada, que al menos es el arte.
 MAX_INVENTED = 0.58
 
+#: Cuánto puede diferir la proporción de salida de la de origen antes de que
+#: `SHARP_UPSCALE` deje de ser la única razón para extender. Un 1080x1080 a
+#: 1080x1350 tiene un `cover_upscale` de apenas 1.25 —por debajo del umbral—,
+#: pero el reparto adaptativo del layout deja bastante fondo nuevo a la vista
+#: en el eje que creció: ahí conviene rellenarlo con el modelo (con máscara,
+#: sin tocar el arte) antes que recortando la plancha, que se come los
+#: laterales del diseño.
+ASPECT_TRIGGER = 0.25
+
 
 def relative_path(width: int, height: int) -> str:
     return f"backgrounds/expanded_{width}x{height}.png"
@@ -120,6 +129,24 @@ def cover_upscale(source: tuple[int, int], width: int, height: int) -> float:
     return max(width / source_w, height / source_h)
 
 
+def aspect_delta(source: tuple[int, int], width: int, height: int) -> float:
+    """Cuánto difiere la proporción del lienzo pedido de la del arte original.
+
+    `cover_upscale` mide si faltan píxeles; esto mide si falta FORMA. Un
+    1080x1080 llevado a 1080x1350 tiene cover_upscale bajo (recortar la
+    plancha alcanza), pero su proporción es un 27% distinta: el layout
+    adaptativo reparte los bloques por todo el alto nuevo, y ese alto nuevo
+    necesita fondo de verdad, no una plancha recortada que deja los bloques
+    de los extremos flotando sobre un borde recortado sin sentido.
+    """
+    source_w, source_h = source
+    if min(source_w, source_h, width, height) <= 0:
+        return 0.0
+    source_aspect = source_w / source_h
+    output_aspect = width / height
+    return abs(output_aspect / source_aspect - 1.0)
+
+
 def cached(project: Project, width: int, height: int) -> str | None:
     """La ruta relativa del fondo ya extendido para este lienzo, si existe."""
     rel = relative_path(width, height)
@@ -156,9 +183,16 @@ def expand(
         # un fondo. La plancha difuminada es peor de mirar pero sigue siendo el
         # arte, y no se pelea con el copy.
         return None, warnings
-    if cover_upscale(base.size, width, height) <= SHARP_UPSCALE:
-        # La plancha llena el lienzo con píxeles de verdad: no hay nada que
-        # inventar, y recortarla es mejor que reducir el arte para hacer sitio.
+    cobertura = cover_upscale(base.size, width, height)
+    if cobertura <= SHARP_UPSCALE and (
+        cobertura < 1.0 or aspect_delta(base.size, width, height) <= ASPECT_TRIGGER
+    ):
+        # La plancha llena el lienzo con píxeles de verdad. Si además sobra de
+        # más (`cobertura < 1.0`: hay que REDUCIRLA, no ampliarla), recortar no
+        # pierde nada por ningún lado sin importar cuánto cambie la forma —un
+        # banner panorámico recortado a una tira más panorámica todavía sigue
+        # siendo solo un recorte—. Si la cobertura es justa y encima la
+        # proporción es parecida, tampoco hay nada que inventar.
         return None, warnings
 
     limpia = bool(project.background.path) and plate != storage.abs_path(

@@ -124,6 +124,49 @@ def test_donde_la_plancha_llena_el_lienzo_no_se_gasta_nada(proyecto_banner, monk
     assert falso.llamadas == []
 
 
+def test_aspect_delta_mide_forma_no_pixeles():
+    assert background_expand.aspect_delta(CUADRADO, 1080, 1080) == 0.0
+    assert background_expand.aspect_delta(CUADRADO, 1080, 1350) == pytest.approx(0.2, abs=0.01)
+    assert background_expand.aspect_delta(CUADRADO, 1080, 1650) == pytest.approx(0.345, abs=0.01)
+
+
+def test_un_cambio_de_forma_extiende_aunque_el_cover_sea_bajo(proyecto, monkeypatch):
+    """El layout adaptativo reparte los bloques por todo el eje que creció.
+
+    1080x1080 a 1080x1650 tiene un `cover_upscale` de apenas 1.53 —por debajo
+    de `SHARP_UPSCALE`—, así que antes esto nunca llamaba al modelo: recortar
+    la plancha "alcanzaba". Pero recortar no es lo mismo que rellenar el
+    trozo nuevo con fondo de verdad, y ese trozo es justo donde el reparto
+    adaptativo deja bloques cerca del borde.
+    """
+    falso = _RellenoFalso()
+    monkeypatch.setattr(background_expand, "get_inpainting_provider", lambda *a, **k: falso)
+    lienzo = (1080, 1650)
+    assert background_expand.cover_upscale(CUADRADO, *lienzo) <= background_expand.SHARP_UPSCALE
+    assert background_expand.aspect_delta(CUADRADO, *lienzo) > background_expand.ASPECT_TRIGGER
+
+    rel, avisos = background_expand.expand(proyecto, *lienzo)
+    assert rel is not None and avisos == []
+    assert len(falso.llamadas) == 1
+
+
+def test_donde_sobra_plancha_de_mas_el_cambio_de_forma_no_importa(proyecto_banner, monkeypatch):
+    """Un banner recortado a una tira más panorámica sigue siendo solo un recorte.
+
+    Con `cover_upscale < 1` la plancha sobra en TODAS direcciones: no hay
+    ningún borde nuevo que rellenar, sin importar cuánto cambie la forma.
+    """
+    falso = _RellenoFalso()
+    monkeypatch.setattr(background_expand, "get_inpainting_provider", lambda *a, **k: falso)
+    lienzo = (970, 90)
+    assert background_expand.cover_upscale(BANNER, *lienzo) < 1.0
+    assert background_expand.aspect_delta(BANNER, *lienzo) > background_expand.ASPECT_TRIGGER
+
+    rel, avisos = background_expand.expand(proyecto_banner, *lienzo)
+    assert rel is None and avisos == []
+    assert falso.llamadas == []
+
+
 def test_lo_que_habria_que_inventar_casi_entero_no_se_pide(proyecto_banner, monkeypatch):
     """Medido: pedir el 86% de un 1080x1350 devolvía una ilustración con casas.
 
