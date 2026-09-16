@@ -257,6 +257,8 @@ interface CampaignBrief {
   notes: string;
   referenceUrl: string;
   referenceTitle: string;
+  referencePosts: string[];
+  styleGuide: string;
 }
 
 interface MatrixRow {
@@ -301,7 +303,7 @@ const state: State = {
   copySource: null,
   copyFields: new Set(),
   productTexts: {},
-  campaignBrief: { name: "", client: "", objective: "", notes: "", referenceUrl: "", referenceTitle: "" },
+  campaignBrief: { name: "", client: "", objective: "", notes: "", referenceUrl: "", referenceTitle: "", referencePosts: [], styleGuide: "" },
   productionMatrix: [],
 };
 
@@ -788,9 +790,11 @@ function campaignBriefHtml(compact: boolean): string {
     '<label class="field"><span>Cliente / marca</span><input id="campaign-client" value="', attr(brief.client), '" placeholder="Nombre de la marca"></label></div>',
     '<label class="field" style="margin-top:14px"><span>Objetivo y mensaje principal</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="Ej. Impulsar cuotas sin intereses y crédito inmediato"></label>',
     '<label class="field" style="margin-top:14px"><span>Notas de dirección creativa</span><textarea id="campaign-notes" placeholder="Tono, restricciones, elementos obligatorios, fechas, legales…">', esc(brief.notes), '</textarea></label>',
-    '<div class="reference-entry"><label class="field"><span>Referencia visual pública</span><input id="campaign-reference" type="url" value="', attr(brief.referenceUrl), '" placeholder="https://instagram.com/marca o https://marca.com/campaña"></label>',
-    '<div><span class="label">Biblioteca visual</span><p class="muted tiny">Lee título, descripción e imagen pública para documentar la referencia sin salir del flujo.</p><button class="ghost-button" type="button" id="inspect-reference" style="margin-top:8px">Analizar referencia</button></div></div>',
+    '<div class="reference-entry"><label class="field"><span>Perfil público del cliente</span><input id="campaign-reference" type="url" value="', attr(brief.referenceUrl), '" placeholder="https://instagram.com/marca"></label>',
+    '<div><span class="label">Biblioteca del perfil</span><p class="muted tiny">Lee los posts públicos disponibles y usa OpenAI para convertirlos en reglas visuales de la campaña.</p><button class="ghost-button" type="button" id="inspect-reference" style="margin-top:8px">Cargar posts del perfil</button></div></div>',
     brief.referenceTitle ? '<p class="notice success" id="reference-insight">Referencia leída: <strong>' + esc(brief.referenceTitle) + '</strong></p>' : '<div id="reference-insight"></div>',
+    brief.referencePosts?.length ? '<div class="profile-posts">' + brief.referencePosts.slice(0, 8).map((image) => '<img src="' + attr(image) + '" alt="Post público de referencia" loading="lazy">').join("") + '</div><div class="button-row" style="margin-top:12px"><button class="button" type="button" id="analyze-profile-style">✦ Crear guía visual con OpenAI</button></div>' : '',
+    brief.styleGuide ? '<section class="style-guide"><span class="kicker">GUÍA VISUAL DEL PERFIL</span><p>' + esc(brief.styleGuide) + '</p></section>' : '',
     '<div class="button-row" style="margin-top:16px"><button class="ghost-button" id="save-campaign-brief">Guardar briefing</button>', reference, '</div></section>',
   ].join("");
 }
@@ -818,9 +822,19 @@ function bindCampaignBrief(): void {
       const result = await post<any>("/references/inspect", { url });
       state.campaignBrief.referenceUrl = result.url;
       state.campaignBrief.referenceTitle = result.title || "Referencia visual";
+      state.campaignBrief.referencePosts = Array.isArray(result.posts) ? result.posts : (result.image ? [result.image] : []);
       saveSession();
       if (insight) insight.innerHTML = '<span class="notice success">Referencia leída: <strong>' + esc(result.title || "Sitio público") + '</strong>' + (result.description ? '<br><small>' + esc(result.description) + '</small>' : '') + '</span>';
     } catch (error) { if (insight) insight.textContent = ""; toast(errorMessage(error), "error"); }
+  });
+  query("#analyze-profile-style")?.addEventListener("click", async () => {
+    busy("Analizando el perfil", "OpenAI está identificando el lenguaje visual de sus posts…", 30);
+    try {
+      const result = await post<any>("/references/profile-analysis", { profile_url: state.campaignBrief.referenceUrl, images: state.campaignBrief.referencePosts });
+      state.campaignBrief.styleGuide = result.guide || "";
+      state.campaignBrief.notes = [state.campaignBrief.notes, result.guide].filter(Boolean).join("\n\nGuía visual del perfil:\n");
+      saveSession(); toast("Guía visual creada y añadida al briefing.", "success"); await renderCampaign();
+    } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
   });
 }
 
