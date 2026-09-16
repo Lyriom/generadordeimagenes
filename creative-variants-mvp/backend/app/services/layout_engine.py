@@ -1153,7 +1153,21 @@ def build_placements(
                     or (category in KEEP_RELATIVE_CATEGORIES and not derived)
                     # Solo los recortes confirmados del PSD conservan la composición
                     # original. Las capas manuales de la misma categoría siguen editables.
-                    or all(layer.meta.get("mandatory_art") for layer in group)
+                    #
+                    # `not derived` también aquí, y por el mismo motivo que arriba.
+                    # `mandatory_art` dice de dónde salen los PÍXELES —del recorte
+                    # del PSD, nunca redibujados— y no dónde va la capa; son dos
+                    # cosas distintas y estaban confundidas. Sin esta condición, en
+                    # un KV importado de PSD el titular, el precio, el logo y el
+                    # legal se anclaban a su sitio del original mientras el producto
+                    # sí se movía a su banda: el reflujo y el reparto adaptativo
+                    # producían el letterbox de «faithful» con el producto suelto en
+                    # medio, que es peor que cualquiera de los dos. Y los avisos
+                    # seguían diciendo que la pieza se había recompuesto.
+                    or (
+                        all(layer.meta.get("mandatory_art") for layer in group)
+                        and not derived
+                    )
                 )
             )
             else None

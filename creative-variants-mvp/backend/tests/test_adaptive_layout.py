@@ -324,3 +324,88 @@ def test_el_reparto_de_banda_pesa_la_prioridad_no_solo_el_tamano():
         "el producto (prioridad 92) debe llevarse bastante más ancho que la "
         "rayita decorativa (prioridad 12), aunque midan casi lo mismo"
     )
+
+
+# ------------------------------------------------- importado de PSD, no a mano
+def _como_de_psd(capas: list[Layer]) -> list[Layer]:
+    """Las mismas capas tal y como las deja `psd_import`.
+
+    El importador marca `mandatory_art` en logo, titular, subtítulo, precio, CTA
+    y legal: significa que sus PÍXELES salen del recorte del PSD y nunca se
+    redibujan. Todo lo demás de la capa es idéntico.
+    """
+    from app.services.psd_import import MANDATORY_ART_CATEGORIES
+
+    for capa in capas:
+        if capa.category in MANDATORY_ART_CATEGORIES:
+            capa.meta["mandatory_art"] = True
+    return capas
+
+
+def _posiciones(capas: list[Layer], layout: str, salida=(1080, 1920)) -> dict[str, tuple[int, int]]:
+    places, _ = build_placements(
+        capas,
+        layout,
+        *salida,
+        random.Random(1),
+        intensity="conservative",
+        source_canvas=SOURCE,
+    )
+    return {p.layer.id: (p.x, p.y) for p in places}
+
+
+def test_venir_de_un_psd_no_cambia_donde_cae_nada():
+    """`mandatory_art` dice de dónde salen los píxeles, no dónde va la capa.
+
+    Estaban confundidos, y el precio lo pagaba justo el caso normal: un KV
+    importado de PSD. El titular, el precio, el logo y el legal se anclaban a su
+    sitio del original —la copia fiel, con sus bandas muertas— mientras el
+    producto sí se movía a la banda que le tocaba. Salía el letterbox de
+    "faithful" con el producto suelto en medio, que es peor que cualquiera de
+    los dos, y los avisos seguían diciendo que la pieza se había recompuesto.
+
+    Las capas manuales nunca lo sufrieron, y por eso el resto de este archivo no
+    lo veía: ninguna de sus capas lleva la marca.
+    """
+    for layout in (ADAPTIVE_LAYOUT, "source_flow"):
+        a_mano = _posiciones(_layers(), layout)
+        de_psd = _posiciones(_como_de_psd(_layers()), layout)
+        assert de_psd == a_mano, (
+            f"{layout}: importar de PSD movió las capas.\n"
+            f"  a mano: {a_mano}\n"
+            f"  de psd: {de_psd}"
+        )
+
+
+def test_el_kv_de_psd_tampoco_queda_en_bandas_muertas():
+    """La consecuencia visible, medida como la mide el control de calidad."""
+    capas = _como_de_psd(_layers())
+    places, _ = build_placements(
+        capas,
+        ADAPTIVE_LAYOUT,
+        1080,
+        1920,
+        random.Random(1),
+        intensity="conservative",
+        source_canvas=SOURCE,
+    )
+    contenido = [p for p in places if not quality._is_full_bleed(p, 1080, 1920)]
+    arriba, abajo, _izq, _der = quality._dead_bands(contenido, 1080, 1920)
+    assert arriba + abajo < quality.DEAD_BAND_TOTAL, (
+        f"bandas muertas de {(arriba + abajo) * 100:.0f}%: el arte sigue flotando"
+    )
+
+    # Y con "faithful" sí las tiene: la comparación es lo que da sentido a la de
+    # arriba, y fija que el layout fiel no ha cambiado de comportamiento.
+    fieles, _ = build_placements(
+        _como_de_psd(_layers()),
+        FAITHFUL_LAYOUT,
+        1080,
+        1920,
+        random.Random(1),
+        intensity="conservative",
+        source_canvas=SOURCE,
+    )
+    f_contenido = [p for p in fieles if not quality._is_full_bleed(p, 1080, 1920)]
+    f_arriba, f_abajo, _, _ = quality._dead_bands(f_contenido, 1080, 1920)
+    assert f_arriba + f_abajo >= quality.DEAD_BAND_TOTAL
