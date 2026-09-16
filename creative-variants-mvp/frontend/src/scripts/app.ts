@@ -784,18 +784,18 @@ function campaignBriefHtml(compact: boolean): string {
     '</section>',
   ].join("");
   return [
-    '<section class="card campaign-brief"><div class="card-head"><div><span class="kicker">01 · CONTEXTO</span><h2>Construye la campaña antes de producir</h2>',
-    '<p>El PSD aporta la estructura; el briefing y las referencias fijan el lenguaje visual para cada adaptación.</p></div></div>',
+    '<section class="card campaign-brief"><div class="card-head campaign-intro"><div><span class="kicker">NUEVA CAMPAÑA</span><h2>Define la base creativa</h2>',
+    '<p>Reunimos marca, perfil visual y PSD para construir plantillas que ya nacen listas para producir.</p></div><span class="campaign-step">1 de 4</span></div>',
     '<div class="form-grid"><label class="field"><span>Nombre de campaña</span><input id="campaign-name" value="', attr(brief.name), '" placeholder="Ej. Credifest · Vuelta a clases"></label>',
     '<label class="field"><span>Cliente / marca</span><input id="campaign-client" value="', attr(brief.client), '" placeholder="Nombre de la marca"></label></div>',
     '<label class="field" style="margin-top:14px"><span>Objetivo y mensaje principal</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="Ej. Impulsar cuotas sin intereses y crédito inmediato"></label>',
     '<label class="field" style="margin-top:14px"><span>Notas de dirección creativa</span><textarea id="campaign-notes" placeholder="Tono, restricciones, elementos obligatorios, fechas, legales…">', esc(brief.notes), '</textarea></label>',
-    '<div class="reference-entry"><label class="field"><span>Perfil público del cliente</span><input id="campaign-reference" type="url" value="', attr(brief.referenceUrl), '" placeholder="https://instagram.com/marca"></label>',
-    '<div><span class="label">Biblioteca del perfil</span><p class="muted tiny">Lee los posts públicos disponibles y usa OpenAI para convertirlos en reglas visuales de la campaña.</p><button class="ghost-button" type="button" id="inspect-reference" style="margin-top:8px">Cargar posts del perfil</button></div></div>',
-    brief.referenceTitle ? '<p class="notice success" id="reference-insight">Referencia leída: <strong>' + esc(brief.referenceTitle) + '</strong></p>' : '<div id="reference-insight"></div>',
+    '<section class="profile-import"><div class="profile-import-copy"><span class="profile-overline">REFERENCIA DE MARCA</span><h3>Analiza el perfil del cliente</h3><p>Usaremos sus posts públicos para definir el sistema visual de las plantillas.</p></div>',
+    '<div class="profile-import-action"><label class="field"><span>URL del perfil</span><input id="campaign-reference" type="url" value="', attr(brief.referenceUrl), '" placeholder="instagram.com/marca"></label><button class="button" type="button" id="inspect-reference">Analizar perfil</button></div></section>',
+    brief.referenceTitle ? '<div class="profile-status success" id="reference-insight"><i>✓</i><span><strong>Perfil conectado</strong><small>' + esc(brief.referenceTitle) + '</small></span></div>' : '<div id="reference-insight"></div>',
     brief.referencePosts?.length ? '<div class="profile-posts">' + brief.referencePosts.slice(0, 8).map((image) => '<img src="' + attr(image) + '" alt="Post público de referencia" loading="lazy">').join("") + '</div><div class="button-row" style="margin-top:12px"><button class="button" type="button" id="analyze-profile-style">✦ Crear guía visual con OpenAI</button></div>' : '',
     brief.styleGuide ? '<section class="style-guide"><span class="kicker">GUÍA VISUAL DEL PERFIL</span><p>' + esc(brief.styleGuide) + '</p></section>' : '',
-    '<div class="button-row" style="margin-top:16px"><button class="ghost-button" id="save-campaign-brief">Guardar briefing</button>', reference, '</div></section>',
+    '<div class="button-row campaign-footer"><button class="ghost-button" id="save-campaign-brief">Guardar borrador</button><span>Después sube el PSD maestro para crear la campaña.</span></div></section>',
   ].join("");
 }
 
@@ -824,7 +824,7 @@ function bindCampaignBrief(): void {
       state.campaignBrief.referenceTitle = result.title || "Referencia visual";
       state.campaignBrief.referencePosts = Array.isArray(result.posts) ? result.posts : (result.image ? [result.image] : []);
       saveSession();
-      if (insight) insight.innerHTML = '<span class="notice success">Referencia leída: <strong>' + esc(result.title || "Sitio público") + '</strong>' + (result.description ? '<br><small>' + esc(result.description) + '</small>' : '') + '</span>';
+      if (insight) insight.innerHTML = '<div class="profile-status success"><i>✓</i><span><strong>Perfil conectado</strong><small>' + esc(result.title || "Referencia pública") + '</small></span></div>';
     } catch (error) { if (insight) insight.textContent = ""; toast(errorMessage(error), "error"); }
   });
   query("#analyze-profile-style")?.addEventListener("click", async () => {

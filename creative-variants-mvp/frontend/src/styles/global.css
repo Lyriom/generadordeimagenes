@@ -1272,8 +1272,13 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
 
 /* El briefing deja de ser un detalle escondido tras la subida: es la cabecera
    que conecta referencia, PSD, plantilla y la tanda final. */
-.campaign-brief { max-width: 1080px; margin-inline: auto; border-top: 3px solid var(--accent); }
+.campaign-brief { max-width: 1180px; margin-inline: auto; border:0; box-shadow:0 16px 45px rgba(43,45,88,.10); }
+.campaign-intro { align-items:flex-start; padding-bottom:20px; border-bottom:1px solid var(--line); }.campaign-intro h2 { font-size:28px; margin-top:5px; }.campaign-intro p { max-width:660px; margin-top:7px; }
+.campaign-step { display:inline-flex; padding:7px 10px; border-radius:999px; color:var(--accent-soft-fg); background:var(--accent-soft); font-size:var(--fs-xs); font-weight:800; }
 .reference-entry { display:grid; grid-template-columns:minmax(0,1fr) minmax(220px,.8fr); gap:18px; align-items:end; margin-top:14px; padding:14px; border-radius:var(--radius); background:var(--surface-2); }
+.profile-import { display:grid; grid-template-columns:minmax(0,.9fr) minmax(420px,1.1fr); align-items:center; gap:28px; margin-top:22px; padding:24px; overflow:hidden; border-radius:var(--radius-lg); color:#fff; background:radial-gradient(circle at 90% 15%,rgba(255,122,184,.45),transparent 31%),linear-gradient(120deg,#26245e,#4d47be); }.profile-import h3 { margin:5px 0 7px; font-size:21px; }.profile-import p { max-width:420px; color:rgba(255,255,255,.78); }.profile-overline { color:#d8d5ff; font-size:11px; font-weight:800; letter-spacing:.12em; }.profile-import-action { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:end; }.profile-import .field span { color:#ebeaff; }.profile-import input { border-color:transparent; color:#202040; background:#fff; }.profile-import .button { min-height:46px; color:#332e8f; background:#fff; }.profile-import .button:hover { background:#f0efff; }
+.profile-status { display:flex; align-items:center; gap:10px; margin-top:12px; padding:11px 14px; border-radius:12px; width:fit-content; max-width:100%; }.profile-status i { display:grid; place-items:center; width:22px; height:22px; border-radius:50%; font-style:normal; font-weight:900; }.profile-status span { display:flex; flex-direction:column; gap:1px; }.profile-status small { color:var(--fg-muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:680px; }.profile-status.success { color:#19765e; background:var(--success-soft); }.profile-status.success i { color:#fff; background:var(--success); }
+.campaign-footer { align-items:center; margin-top:22px; padding-top:18px; border-top:1px solid var(--line); }.campaign-footer span { color:var(--fg-muted); font-size:var(--fs-sm); }
 .reference-link { display:inline-flex; align-items:center; gap:6px; color:var(--accent-soft-fg); font-weight:700; text-decoration:none; }
 .campaign-summary { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:22px 24px; border:1px solid var(--line); border-radius:var(--radius-lg); background:linear-gradient(110deg,var(--surface),var(--accent-soft)); }
 .campaign-summary h2 { margin-top:3px; font-size:22px; }.campaign-summary p { color:var(--fg-soft); margin-top:4px; }
@@ -2372,7 +2377,7 @@ details .inventory { margin-top: 14px; }
   .page-head h1 { font-size: 26px; }
   .page-head p { font-size: var(--fs-md); }
   .grid.two, .grid.three, .grid.four, .stat-row,
-  .form-grid, .form-grid.four, .switch-grid, .reference-entry, .matrix-upload { grid-template-columns: 1fr; }
+  .form-grid, .form-grid.four, .switch-grid, .reference-entry, .matrix-upload, .profile-import, .profile-import-action { grid-template-columns: 1fr; }
   .campaign-summary, .template-callout { align-items:flex-start; flex-direction:column; }
   .profile-posts { grid-template-columns:repeat(2, minmax(0,1fr)); }
   .layer-workbench { grid-template-columns: 1fr; }
