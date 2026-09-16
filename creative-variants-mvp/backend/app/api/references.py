@@ -70,7 +70,7 @@ def _public_image_urls(html: str, page_url: str) -> list[str]:
 
 
 @router.post("/inspect")
-def inspect_reference(request: InspectRequest) -> dict[str, str]:
+def inspect_reference(request: InspectRequest) -> dict[str, object]:
     url = str(request.url)
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
