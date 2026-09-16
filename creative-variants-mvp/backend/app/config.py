@@ -50,6 +50,10 @@ class Settings:
         default_data = Path(__file__).resolve().parents[2] / "data"
         self.data_dir: Path = Path(os.getenv("DATA_DIR", str(default_data))).resolve()
         self.projects_dir: Path = self.data_dir / "projects"
+        # Biblioteca de marcas y plantillas. **No entra en el barrido de
+        # retención**: un proyecto es desechable, pero la decisión de qué campo
+        # cambia en cada arte se toma una vez y se reutiliza en cada tanda.
+        self.brands_dir: Path = self.data_dir / "brands"
         # Carpeta para dejar artes/KV grandes sin subirlos por el navegador.
         self.ingest_dir: Path = Path(
             os.getenv("INGEST_DIR", str(default_data / "ingest"))

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from .api.health import router as health_router
 from .api.ingest import router as ingest_router
 from .api.projects import router as projects_router
+from .api.templates import router as templates_router
 from .config import settings
 from .providers import provider_status
 from .services import storage
@@ -51,6 +52,13 @@ app = FastAPI(
     openapi_tags=[
         {"name": "sistema", "description": "Estado del servicio y capacidades."},
         {"name": "proyectos", "description": "Ciclo completo de un proyecto creativo."},
+        {
+            "name": "marcas",
+            "description": (
+                "Biblioteca permanente: marcas, plantillas con campos y sus "
+                "másters por formato. No la toca la limpieza de proyectos."
+            ),
+        },
     ],
 )
 
@@ -65,6 +73,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(ingest_router)
 app.include_router(projects_router)
+app.include_router(templates_router)
 
 
 @app.exception_handler(FileValidationError)

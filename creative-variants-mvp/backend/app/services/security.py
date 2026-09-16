@@ -278,8 +278,18 @@ def resolve_inside(base_dir: Path, relative: str) -> Path:
     return candidate
 
 
-def validate_project_id(project_id: str) -> str:
+def validate_uuid(value: str, label: str = "id") -> str:
+    """Un identificador que va a ser nombre de carpeta solo puede ser un uuid.
+
+    Es la única defensa que hace falta: un uuid no contiene ni barras ni puntos,
+    así que no hay ruta que escapar. Comprobarlo aquí y no en cada endpoint
+    evita que un camino nuevo se olvide del control.
+    """
     try:
-        return str(uuid.UUID(str(project_id)))
+        return str(uuid.UUID(str(value)))
     except (ValueError, AttributeError, TypeError) as exc:
-        raise PathTraversalError("project_id inválido.") from exc
+        raise PathTraversalError(f"{label} inválido.") from exc
+
+
+def validate_project_id(project_id: str) -> str:
+    return validate_uuid(project_id, "project_id")

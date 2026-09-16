@@ -840,6 +840,72 @@ curl -s -o variantes.zip "http://localhost:8000/projects/$PID/export"
 
 ---
 
+## 7.b Biblioteca de marca: plantillas con campos
+
+Un proyecto se borra a las ocho horas y cada tanda vuelve a componer desde cero.
+Eso vale para explorar variantes y no vale para producir el catálogo de un mes.
+La biblioteca es lo contrario: un KV se convierte **una vez** en una plantilla de
+la marca —campos con nombre, plancha limpia, y una adaptación aprobada por
+formato— y producir pasa a ser rellenar celdas.
+
+Vive en `data/brands/`, que **la limpieza de proyectos no toca**. Los recortes y
+la plancha se **copian** dentro de la plantilla: referenciarlos al proyecto
+dejaba una biblioteca que se rompía sola.
+
+```text
+POST   /brands                                          Crear marca
+GET    /brands                                          Listar marcas
+GET    /brands/{brand_id}                               Obtener
+PUT    /brands/{brand_id}                               Tipografías, paleta y cuentas de redes
+DELETE /brands/{brand_id}                               Borra la marca y toda su biblioteca
+POST   /brands/{id}/templates/from-project              Convertir un KV importado en plantilla
+GET    /brands/{id}/templates                           Biblioteca de la marca
+GET    /brands/{id}/templates/{template_id}             Plantilla completa
+PUT    /brands/{id}/templates/{template_id}             Corregir: campos, nombres, cajas
+DELETE /brands/{id}/templates/{template_id}             Borrar plantilla
+GET    /brands/{id}/templates/{tid}/files/{ruta}        Plancha, recorte o vista previa
+```
+
+**Qué es campo y qué no.** Es campo lo que cambia de un arte al siguiente:
+producto y precio (requeridos), titular, subtítulo, CTA y legal (opcionales, con
+el valor del KV por defecto). Logo, persona, decoración y fondo son la identidad
+del KV y quedan como **capas fijas**. Es una propuesta que se corrige: `PUT`
+acepta `promote` (una capa fija pasa a campo) y `demote` (al revés).
+
+**Las cajas van en fracciones del lienzo (0..1)**, como la zona del producto: la
+misma decisión vale para las cinco medidas de la tanda. El identificador de un
+campo es un slug legible (`precio`, `producto_2`) porque **es la cabecera de la
+columna** en la matriz y en el CSV que rellena el cliente.
+
+**La plancha se congela ya vaciada.** Al crear la plantilla, los elementos que
+pasan a ser campo se quitan del arte con el mismo mecanismo de *Textos y logos
+del arte*, y el fondo resultante es el de la plantilla. Sin eso, los doscientos
+artes de la tanda llevan debajo el precio del KV original. Como efecto, el KV de
+origen queda con esos elementos retirados; se devuelven con «Volver al original».
+
+```bash
+MARCA=$(curl -s -X POST localhost:8000/brands -H 'Content-Type: application/json' \
+        -d '{"name":"Marcimex"}' | jq -r .brand.brand_id)
+curl -s -X POST localhost:8000/brands/$MARCA/templates/from-project \
+     -H 'Content-Type: application/json' \
+     -d "{\"project_id\":\"$PID\",\"name\":\"CREDIFEST · KV motos\"}" | jq '.template.slots[].id'
+```
+
+**Cuando el PSD no dice qué es cada capa.** Photoshop entrega «Decoración 7» y el
+importador no puede saber que ese rectángulo es el precio: en un KV real de
+agencia de quince capas, la propuesta automática reconoce el producto y poco más.
+Dos cosas pasan entonces: se consulta una vez al clasificador de visión que ya
+existía (solo corría en artes planos; `classify_with_vision: false` lo desactiva,
+y sin `ENABLE_LAYER_VISION` ni clave no consulta nada), y la respuesta **avisa**
+de cuántas capas fijas hay que revisar en vez de dejar la plantilla coja en
+silencio.
+
+El plan completo —másters por formato, matriz de producción y perfil de marca
+desde redes— está en
+[PLAN-PLANTILLAS-Y-PRODUCCION-MASIVA.md](PLAN-PLANTILLAS-Y-PRODUCCION-MASIVA.md).
+
+---
+
 ## 8. Modelo de datos
 
 ```text

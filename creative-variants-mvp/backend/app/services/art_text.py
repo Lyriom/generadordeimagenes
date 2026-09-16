@@ -442,6 +442,22 @@ def _choose_face(
     return option, path, size, font
 
 
+def measured_face(
+    project: Project, style: TextStyle, text: str
+) -> tuple[str, int]:
+    """Peso y cuerpo con los que se reproduce un texto ya medido en el arte.
+
+    Lo usa la creación de plantillas para no inventarse el estilo de un campo.
+    Es la misma decisión que toma `apply` al reescribir —escribir el texto en
+    cada peso disponible y quedarse con el que da el mismo grosor de palo—,
+    expuesta aparte para que se pueda tomar sin reescribir nada todavía.
+    """
+    weight, _path, size, _font = _choose_face(
+        project, style, text, weight=None, font_size=None
+    )
+    return weight, int(size)
+
+
 def _line_height(font, style: TextStyle) -> float:
     """Interlínea que reproduce el paso entre líneas medido en el arte."""
     if not style.line_pitch:
