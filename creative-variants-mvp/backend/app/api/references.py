@@ -8,12 +8,14 @@ from html import unescape
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, HttpUrl
 
 from .deps import bind_session
 
-router = APIRouter(prefix="/references", tags=["referencias"], dependencies=[bind_session])
+router = APIRouter(
+    prefix="/references", tags=["referencias"], dependencies=[Depends(bind_session)]
+)
 
 
 class InspectRequest(BaseModel):
