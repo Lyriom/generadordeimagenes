@@ -1269,6 +1269,19 @@ body.menu-open .scrim { opacity: 1; pointer-events: auto; }
    anchura cómoda y se centra; dentro, dos columnas que reparten el espacio en
    vez de dejarlo en blanco, y una sola por debajo de 860 px. */
 .upload-card { max-width: 1080px; margin-inline: auto; }
+
+/* El briefing deja de ser un detalle escondido tras la subida: es la cabecera
+   que conecta referencia, PSD, plantilla y la tanda final. */
+.campaign-brief { max-width: 1080px; margin-inline: auto; border-top: 3px solid var(--accent); }
+.reference-entry { display:grid; grid-template-columns:minmax(0,1fr) minmax(220px,.8fr); gap:18px; align-items:end; margin-top:14px; padding:14px; border-radius:var(--radius); background:var(--surface-2); }
+.reference-link { display:inline-flex; align-items:center; gap:6px; color:var(--accent-soft-fg); font-weight:700; text-decoration:none; }
+.campaign-summary { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:22px 24px; border:1px solid var(--line); border-radius:var(--radius-lg); background:linear-gradient(110deg,var(--surface),var(--accent-soft)); }
+.campaign-summary h2 { margin-top:3px; font-size:22px; }.campaign-summary p { color:var(--fg-soft); margin-top:4px; }
+.campaign-summary-actions { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.template-callout { display:flex; align-items:center; justify-content:space-between; gap:24px; padding:24px; border-radius:var(--radius-lg); color:#fff; background:linear-gradient(120deg,#24255f,#6157d8); box-shadow:var(--shadow); }
+.template-callout h2 { margin:4px 0 6px; font-size:20px; }.template-callout p { color:rgba(255,255,255,.78); max-width:650px; }.template-callout .kicker { color:#d8d5ff; }
+.matrix-card { border-top:3px solid var(--success); }.matrix-upload { display:grid; grid-template-columns:minmax(0,1fr) minmax(220px,.75fr); align-items:stretch; gap:14px; }
+.matrix-guide { display:flex; flex-direction:column; justify-content:center; gap:4px; padding:18px; border-radius:var(--radius); background:var(--surface-2); color:var(--fg-soft); }.matrix-guide small { color:var(--fg-muted); }.matrix-preview { margin-top:16px; }
 .upload-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
@@ -2357,7 +2370,8 @@ details .inventory { margin-top: 14px; }
   .page-head h1 { font-size: 26px; }
   .page-head p { font-size: var(--fs-md); }
   .grid.two, .grid.three, .grid.four, .stat-row,
-  .form-grid, .form-grid.four, .switch-grid { grid-template-columns: 1fr; }
+  .form-grid, .form-grid.four, .switch-grid, .reference-entry, .matrix-upload { grid-template-columns: 1fr; }
+  .campaign-summary, .template-callout { align-items:flex-start; flex-direction:column; }
   .layer-workbench { grid-template-columns: 1fr; }
   .layer-list { max-height: 300px; }
   .layer-editor { grid-column: auto; }

@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from .api.health import router as health_router
 from .api.ingest import router as ingest_router
 from .api.projects import router as projects_router
+from .api.references import router as references_router
 from .api.templates import router as templates_router
 from .config import settings
 from .providers import provider_status
@@ -73,6 +74,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(ingest_router)
 app.include_router(projects_router)
+app.include_router(references_router)
 app.include_router(templates_router)
 
 

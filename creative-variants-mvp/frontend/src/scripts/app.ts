@@ -28,11 +28,11 @@ import type {
 } from "./types";
 
 const VIEW_LABELS: Record<ViewName, string> = {
-  campaign: "Cargar KV",
-  layers: "Revisar capas",
-  products: "Productos",
-  generate: "Generar",
-  results: "Resultados",
+  campaign: "Campaña",
+  layers: "Base y capas",
+  products: "Plantilla",
+  generate: "Producción",
+  results: "Entregables",
 };
 
 /* El flujo conserva un orden sugerido, pero la revisión de capas no bloquea el
@@ -244,6 +244,28 @@ interface State {
    * —separar una capa, quitar un elemento, cambiar de pieza—, y con ella se
    * perdía sin avisar lo que hubiera escrito y no hubiera guardado. */
   copyDrafts: Record<string, string>;
+  /** Contexto que acompaña a todos los PSD y tandas de esta campaña. */
+  campaignBrief: CampaignBrief;
+  /** Filas de la matriz de producción cargada por el equipo. */
+  productionMatrix: MatrixRow[];
+}
+
+interface CampaignBrief {
+  name: string;
+  client: string;
+  objective: string;
+  notes: string;
+  referenceUrl: string;
+  referenceTitle: string;
+}
+
+interface MatrixRow {
+  product: string;
+  image: string;
+  headline: string;
+  price: string;
+  cta: string;
+  formats: string;
 }
 
 const state: State = {
@@ -279,6 +301,8 @@ const state: State = {
   copySource: null,
   copyFields: new Set(),
   productTexts: {},
+  campaignBrief: { name: "", client: "", objective: "", notes: "", referenceUrl: "", referenceTitle: "" },
+  productionMatrix: [],
 };
 
 const ARRANGEMENT_OPTIONS: Record<string, string> = {
@@ -473,6 +497,8 @@ function saveSession(): void {
     sessionStorage.setItem("creative-campaign", JSON.stringify(state.campaignIds));
     if (state.activeId) sessionStorage.setItem("creative-active", state.activeId);
     else sessionStorage.removeItem("creative-active");
+    sessionStorage.setItem("creative-campaign-brief", JSON.stringify(state.campaignBrief));
+    sessionStorage.setItem("creative-production-matrix", JSON.stringify(state.productionMatrix));
   } catch {
     /* modo privado: la campaña solo vive en memoria */
   }
@@ -676,6 +702,8 @@ async function renderCampaign(): Promise<void> {
     ),
     state.campaign.length
       ? [
+          campaignBriefHtml(true),
+          '<div class="spacer"></div>',
           '<div class="stat-row">',
           '<div class="stat"><strong>', String(state.campaign.length), '</strong><span>KV activos</span></div>',
           '<div class="stat"><strong>', String(state.campaign.reduce((n, p) => n + p.layers.length, 0)), '</strong><span>Capas detectadas</span></div>',
@@ -697,7 +725,9 @@ async function renderCampaign(): Promise<void> {
           // parte en dos columnas —arrastre a la izquierda, ajustes y botón a la
           // derecha—, que en una pantalla ancha ocupan el espacio en vez de
           // dejarlo en blanco. Por debajo de 860 px vuelve a una sola columna.
-          '<section class="card elevated upload-card"><div class="card-head"><div><h2>Subir archivos</h2><p>Hasta 300 MB por archivo</p></div></div>',
+          campaignBriefHtml(false),
+          '<div class="spacer"></div>',
+          '<section class="card elevated upload-card"><div class="card-head"><div><h2>Archivos base de la campaña</h2><p>Sube el PSD maestro primero. Hasta 300 MB por archivo.</p></div></div>',
           '<div class="upload-grid"><div class="upload-main">',
           '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
           '<span class="drop-icon" id="drop-icon">⇧</span>',
@@ -722,6 +752,7 @@ async function renderCampaign(): Promise<void> {
   bindStepFooter("campaign");
   bindSavedProjects();
   bindProjectCards();
+  bindCampaignBrief();
   query("#clear-campaign")?.addEventListener("click", () => {
     state.campaignIds = [];
     state.campaign = [];
@@ -736,6 +767,61 @@ async function renderCampaign(): Promise<void> {
     navigate("campaign");
   });
   if (!state.campaign.length) bindUpload();
+}
+
+function campaignBriefHtml(compact: boolean): string {
+  const brief = state.campaignBrief;
+  const reference = brief.referenceUrl
+    ? '<a class="reference-link" href="' + attr(brief.referenceUrl) + '" target="_blank" rel="noreferrer">↗ Ver referencia</a>'
+    : '<span class="muted tiny">Puedes pegar un perfil de Instagram, sitio web o carpeta de referencias.</span>';
+  if (compact) return [
+    '<section class="campaign-summary">',
+    '<div><span class="kicker">CAMPAÑA ACTIVA</span><h2>', esc(brief.name || "Campaña sin nombre"), '</h2>',
+    '<p>', esc(brief.client || "Cliente por definir"), brief.objective ? ' · ' + esc(brief.objective) : '', '</p></div>',
+    '<div class="campaign-summary-actions">', reference, '</div>',
+    '</section>',
+  ].join("");
+  return [
+    '<section class="card campaign-brief"><div class="card-head"><div><span class="kicker">01 · CONTEXTO</span><h2>Construye la campaña antes de producir</h2>',
+    '<p>El PSD aporta la estructura; el briefing y las referencias fijan el lenguaje visual para cada adaptación.</p></div></div>',
+    '<div class="form-grid"><label class="field"><span>Nombre de campaña</span><input id="campaign-name" value="', attr(brief.name), '" placeholder="Ej. Credifest · Vuelta a clases"></label>',
+    '<label class="field"><span>Cliente / marca</span><input id="campaign-client" value="', attr(brief.client), '" placeholder="Nombre de la marca"></label></div>',
+    '<label class="field" style="margin-top:14px"><span>Objetivo y mensaje principal</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="Ej. Impulsar cuotas sin intereses y crédito inmediato"></label>',
+    '<label class="field" style="margin-top:14px"><span>Notas de dirección creativa</span><textarea id="campaign-notes" placeholder="Tono, restricciones, elementos obligatorios, fechas, legales…">', esc(brief.notes), '</textarea></label>',
+    '<div class="reference-entry"><label class="field"><span>Referencia visual pública</span><input id="campaign-reference" type="url" value="', attr(brief.referenceUrl), '" placeholder="https://instagram.com/marca o https://marca.com/campaña"></label>',
+    '<div><span class="label">Biblioteca visual</span><p class="muted tiny">Lee título, descripción e imagen pública para documentar la referencia sin salir del flujo.</p><button class="ghost-button" type="button" id="inspect-reference" style="margin-top:8px">Analizar referencia</button></div></div>',
+    brief.referenceTitle ? '<p class="notice success" id="reference-insight">Referencia leída: <strong>' + esc(brief.referenceTitle) + '</strong></p>' : '<div id="reference-insight"></div>',
+    '<div class="button-row" style="margin-top:16px"><button class="ghost-button" id="save-campaign-brief">Guardar briefing</button>', reference, '</div></section>',
+  ].join("");
+}
+
+function bindCampaignBrief(): void {
+  const save = () => {
+    const value = (id: string) => query<HTMLInputElement | HTMLTextAreaElement>(id)?.value.trim() || "";
+    state.campaignBrief = {
+      ...state.campaignBrief,
+      name: value("#campaign-name") || state.campaignBrief.name,
+      client: value("#campaign-client") || state.campaignBrief.client,
+      objective: value("#campaign-objective") || state.campaignBrief.objective,
+      notes: value("#campaign-notes") || state.campaignBrief.notes,
+      referenceUrl: value("#campaign-reference") || state.campaignBrief.referenceUrl,
+    };
+    saveSession(); renderChrome(); toast("Briefing de campaña guardado.", "success");
+  };
+  query("#save-campaign-brief")?.addEventListener("click", save);
+  query("#inspect-reference")?.addEventListener("click", async () => {
+    const url = query<HTMLInputElement>("#campaign-reference")?.value.trim();
+    if (!url) { toast("Pega primero una URL pública.", "error"); return; }
+    const insight = query<HTMLElement>("#reference-insight");
+    if (insight) insight.innerHTML = '<span class="muted tiny">Leyendo referencia pública…</span>';
+    try {
+      const result = await post<any>("/references/inspect", { url });
+      state.campaignBrief.referenceUrl = result.url;
+      state.campaignBrief.referenceTitle = result.title || "Referencia visual";
+      saveSession();
+      if (insight) insight.innerHTML = '<span class="notice success">Referencia leída: <strong>' + esc(result.title || "Sitio público") + '</strong>' + (result.description ? '<br><small>' + esc(result.description) + '</small>' : '') + '</span>';
+    } catch (error) { if (insight) insight.textContent = ""; toast(errorMessage(error), "error"); }
+  });
 }
 
 function bindSavedProjects(): void {
@@ -1106,6 +1192,18 @@ function bindUpload(): void {
   button.addEventListener("click", async () => {
     const files = queuedFiles;
     if (!files.length) return;
+    // El briefing no es decorativo: se conserva antes de empezar una subida
+    // larga para que el PSD, referencias y producción sigan siendo un conjunto.
+    const field = (id: string) => query<HTMLInputElement | HTMLTextAreaElement>(id)?.value.trim() || "";
+    state.campaignBrief = {
+      ...state.campaignBrief,
+      name: field("#campaign-name") || state.campaignBrief.name,
+      client: field("#campaign-client") || state.campaignBrief.client,
+      objective: field("#campaign-objective") || state.campaignBrief.objective,
+      notes: field("#campaign-notes") || state.campaignBrief.notes,
+      referenceUrl: field("#campaign-reference") || state.campaignBrief.referenceUrl,
+    };
+    saveSession();
     const logo = query<HTMLInputElement>("#logo-file")?.files?.[0];
     const font = query<HTMLInputElement>("#font-file")?.files?.[0];
     const created: Project[] = [];
@@ -1175,6 +1273,10 @@ export async function mountApp(): Promise<void> {
       ? saved.filter((id): id is string => typeof id === "string" && id.length > 0)
       : [];
     state.activeId = sessionStorage.getItem("creative-active");
+    const brief = JSON.parse(sessionStorage.getItem("creative-campaign-brief") || "{}");
+    if (brief && typeof brief === "object") state.campaignBrief = { ...state.campaignBrief, ...brief };
+    const matrix = JSON.parse(sessionStorage.getItem("creative-production-matrix") || "[]");
+    if (Array.isArray(matrix)) state.productionMatrix = matrix.filter((row) => row && typeof row === "object");
   } catch {
     state.campaignIds = [];
     state.activeId = null;
@@ -3357,6 +3459,25 @@ function textOverrides(project: Project, targetKey: string): Array<Record<string
   return overrides;
 }
 
+/** Resuelve las columnas comunes de una matriz contra las categorías del PSD. */
+function matrixTextOverrides(project: Project, file: File): Array<Record<string, string>> {
+  const row = state.productionMatrix.find((item) => matrixFileMatches(item, file));
+  if (!row) return [];
+  const values: Record<string, string> = { headline: row.headline, price: row.price, cta: row.cta };
+  return project.layers.filter((layer) => Boolean(values[layer.category]))
+    .map((layer) => ({ layer_id: layer.id, content: values[layer.category] }));
+}
+
+function matrixFileMatches(row: MatrixRow, file: File): boolean {
+  const base = file.name.replace(/\.[^.]+$/, "").toLowerCase();
+  const target = (row.image || row.product).replace(/\.[^.]+$/, "").toLowerCase();
+  return Boolean(target) && (target === base || base.includes(target) || target.includes(base));
+}
+
+function matrixProductFile(row: MatrixRow): File | undefined {
+  return state.products.find((file) => matrixFileMatches(row, file));
+}
+
 /* ---------------------------------------------------------------- paso 3
    Productos: qué se pone, si va individual o en combinación, y en qué posición.
    El paso 4 solo decide el cómo (modelo, contexto, formatos). */
@@ -3401,10 +3522,11 @@ async function renderProducts(): Promise<void> {
   content().innerHTML = [
     stepBar("products"),
     pageHead(
-      "Paso 3 de 4",
-      "Qué producto va en la plantilla",
-      "Marca los productos que necesitan un arte individual. Si necesitas un combo, créalo una sola vez debajo.",
+      "03 · PLANTILLA",
+      "Convierte el PSD en una plantilla reutilizable",
+      "Confirma qué queda fijo y qué cambia. Luego usa la misma base para todos los productos y formatos.",
     ),
+    '<section class="template-callout"><div><span class="kicker">BASE APROBABLE</span><h2>Guardar plantilla de ', esc(state.campaignBrief.name || reference?.name || "esta campaña"), '</h2><p>Los campos detectados —producto, precio, titular y CTA— quedan listos para alimentar la matriz.</p></div><button class="button" id="save-template"', reference ? "" : " disabled", '>Guardar como plantilla</button></section>',
     targetsNotice,
     pendingReviews.length
       ? '<div class="notice warning" style="margin-bottom:16px">Hay ' + String(pendingReviews.length) +
@@ -3446,6 +3568,31 @@ async function renderProducts(): Promise<void> {
   bindProductStep();
   bindProductZone();
   bindProductCopy();
+  query("#save-template")?.addEventListener("click", () => void saveCampaignTemplate(reference));
+}
+
+/** La biblioteca permanente vive en el backend, no en la sesión efímera del PSD. */
+async function saveCampaignTemplate(reference: Project | null): Promise<void> {
+  if (!reference) return;
+  const brandName = state.campaignBrief.client || "Marca sin nombre";
+  busy("Guardando plantilla", "Convirtiendo capas del PSD en campos editables…", 35);
+  try {
+    const listed = await get<any>("/brands");
+    const brands = listed.brands || [];
+    let brand = brands.find((item: any) => String(item.name).toLowerCase() === brandName.toLowerCase());
+    if (!brand) brand = (await post<any>("/brands", { name: brandName })).brand;
+    await post("/brands/" + brand.brand_id + "/templates/from-project", {
+      project_id: reference.project_id,
+      name: state.campaignBrief.name || reference.name,
+      erase_slots_from_plate: true,
+      classify_with_vision: true,
+    });
+    toast("Plantilla guardada en la biblioteca de " + brandName + ".", "success");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
 }
 
 function bindProductStep(): void {
@@ -3563,7 +3710,9 @@ async function renderGenerate(): Promise<void> {
   state.generationMode = "catalog";
   content().innerHTML = [
     stepBar("generate"),
-    pageHead("Paso 4 de 4", "Generar artes", "Productos → formatos → indicaciones → modelo → generar"),
+    pageHead("04 · PRODUCCIÓN", "Matriz → formatos → artes", "Carga el pedido de producción y genera todas las adaptaciones desde la plantilla aprobada."),
+    productionMatrixHtml(),
+    '<div class="spacer"></div>',
     '<section class="card"><div class="card-head"><div><h2>1. Productos</h2><p>',
     String(selectedProductFiles().length + validGroups().length),
     ' seleccionados · ', String(state.campaign.length), ' KV de referencia</p></div>',
@@ -3574,6 +3723,43 @@ async function renderGenerate(): Promise<void> {
   query("#edit-generation-products")?.addEventListener("click", () => navigate("products"));
   bindStepBar();
   bindGenerate(active);
+  bindProductionMatrix();
+}
+
+function productionMatrixHtml(): string {
+  const rows = state.productionMatrix;
+  const matched = rows.filter((row) => matrixProductFile(row)).length;
+  const preview = rows.slice(0, 4).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline) + '</td><td>' + esc(row.price) + '</td><td>' + esc(row.cta) + '</td><td>' + esc(row.formats) + '</td></tr>').join("");
+  return [
+    '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Cada fila es un arte: imagen de producto + titular + precio + CTA + formatos.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
+    '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,text/csv"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV</strong><span>producto, imagen, titular, precio, cta, formatos</span></label>',
+    '<label class="dropzone compact"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"><span class="drop-icon">⇧</span><strong>2. Subir imágenes de producto</strong><span>Se cruzan con “imagen” o “producto” de cada fila</span></label></div>',
+    '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' imágenes vinculadas</span><small>La generación toma los datos de cada fila y su imagen correspondiente.</small></div>',
+    rows.length ? '<div class="inventory matrix-preview"><table><thead><tr><th>Producto</th><th>Imagen</th><th>Titular</th><th>Precio</th><th>CTA</th><th>Formatos</th></tr></thead><tbody>' + preview + '</tbody></table></div><div class="button-row" style="margin-top:12px"><button class="ghost-button" id="clear-production-matrix">Quitar matriz</button><span class="muted tiny">La matriz alimenta directamente el copy de las artes.</span></div>' : '',
+    '</section>',
+  ].join("");
+}
+
+function bindProductionMatrix(): void {
+  query<HTMLInputElement>("#production-matrix")?.addEventListener("change", async (event) => {
+    const file = (event.currentTarget as HTMLInputElement).files?.[0];
+    if (!file) return;
+    const raw = await file.text();
+    const lines = raw.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim());
+    const split = (line: string) => line.split(line.includes("\t") ? "\t" : ",").map((cell) => cell.trim().replace(/^"|"$/g, ""));
+    const header = split(lines.shift() || "").map((cell) => cell.toLowerCase());
+    const at = (names: string[]) => Math.max(...names.map((name) => header.indexOf(name)));
+    const product = at(["producto", "product", "sku"]), image = at(["imagen", "image", "archivo", "file"]), headline = at(["titular", "headline", "copy"]), price = at(["precio", "price"]), cta = at(["cta", "llamado"]), formats = at(["formatos", "formats", "formato"]);
+    state.productionMatrix = lines.map(split).map((cells) => ({ product: cells[product] || "", image: cells[image] || "", headline: cells[headline] || "", price: cells[price] || "", cta: cells[cta] || "", formats: cells[formats] || "" })).filter((row) => Object.values(row).some(Boolean));
+    saveSession(); toast(String(state.productionMatrix.length) + " filas importadas en la matriz.", "success"); await renderGenerate();
+  });
+  query<HTMLInputElement>("#matrix-product-files")?.addEventListener("change", async (event) => {
+    const files = Array.from((event.currentTarget as HTMLInputElement).files || []).filter((file) => /\.(png|jpe?g|webp|tiff?|avif)$/i.test(file.name));
+    state.products = mergeUniqueFiles(state.products, files);
+    for (const file of files) if (state.productionMatrix.some((row) => matrixFileMatches(row, file))) state.individualProducts.add(productKey(file));
+    saveSession(); toast(String(files.length) + " imágenes añadidas a la tanda.", "success"); await renderGenerate();
+  });
+  query("#clear-production-matrix")?.addEventListener("click", async () => { state.productionMatrix = []; saveSession(); await renderGenerate(); });
 }
 
 /** El nombre del motor tal como se lee en pantalla. */
@@ -3927,7 +4113,10 @@ async function runCatalogGeneration(): Promise<void> {
           product_arrangement: "auto",
           template_mode: settings.template_mode,
           regenerate_background: settings.regenerate_background && firstBatch,
-          text_overrides: textOverrides(project, productKey(file)),
+          text_overrides: [
+            ...matrixTextOverrides(project, file),
+            ...(textOverrides(project, productKey(file)) || []),
+          ],
         });
         const result = await pollTask(project.project_id, task.task_id, (progress, detail) => {
           const batchProgress = (completed + progress / 100) / Math.max(1, total) * 100;
