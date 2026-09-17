@@ -8,7 +8,9 @@ import logging
 import mimetypes
 import shutil
 import uuid
+import zipfile
 from pathlib import Path
+from PIL import Image
 
 from fastapi import (
     APIRouter,
@@ -323,6 +325,58 @@ async def create_project(
     except Exception as exc:  # noqa: BLE001
         storage.delete_project(project_id)  # limpieza segura si algo falla
         raise as_http_error(exc) from exc
+
+
+def _project_from_raster(name: str, payload: bytes) -> Project:
+    """Convierte una página/diapositiva extraída en un KV normal del flujo."""
+    with Image.open(io.BytesIO(payload)) as image:
+        image.load()
+        image = image.convert("RGB")
+        width, height = image.size
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+    project_id = new_id()
+    storage.ensure_project_dirs(project_id)
+    rel = "original/importado.png"
+    data = buffer.getvalue()
+    storage.write_bytes(project_id, rel, data)
+    project = Project(
+        project_id=project_id, name=name[:120], canvas=Canvas(width=width, height=height),
+        source=SourceImage(path=rel, width=width, height=height, format="PNG", original_filename=name[:180], bytes=len(data)),
+    )
+    project.warnings.append("Importado desde documento: revisa y separa las capas asistidas.")
+    storage.save_project(project)
+    return project
+
+
+@router.post("/campaign-documents", response_model=list[Project], status_code=status.HTTP_201_CREATED)
+async def import_campaign_documents(files: list[UploadFile] = File(...)) -> list[Project]:
+    """Importa PDF (páginas) y PPTX (recursos visuales) como piezas de campaña."""
+    projects: list[Project] = []
+    for upload_file in files:
+        name = upload_file.filename or "documento"
+        payload = await _read_upload(upload_file, settings.max_upload_bytes)
+        suffix = Path(name).suffix.lower()
+        try:
+            if suffix == ".pdf":
+                import fitz
+                document = fitz.open(stream=payload, filetype="pdf")
+                for index, page in enumerate(document):
+                    pix = page.get_pixmap(matrix=fitz.Matrix(1.5, 1.5), alpha=False)
+                    projects.append(_project_from_raster(f"{Path(name).stem} · página {index + 1}", pix.tobytes("png")))
+            elif suffix == ".pptx":
+                with zipfile.ZipFile(io.BytesIO(payload)) as deck:
+                    media = [item for item in deck.namelist() if item.startswith("ppt/media/")]
+                    for index, item in enumerate(media):
+                        try: projects.append(_project_from_raster(f"{Path(name).stem} · recurso {index + 1}", deck.read(item)))
+                        except Exception: continue
+            else:
+                raise FileValidationError("Solo se pueden importar PDF y PPTX aquí.")
+        except Exception as exc:
+            if isinstance(exc, FileValidationError): raise
+            raise as_http_error(exc) from exc
+    if not projects: raise bad_request("No encontramos páginas o recursos visuales utilizables.")
+    return projects
 
 
 def _source_from_ingest(

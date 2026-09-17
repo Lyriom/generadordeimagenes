@@ -730,10 +730,10 @@ async function renderCampaign(): Promise<void> {
           // dejarlo en blanco. Por debajo de 860 px vuelve a una sola columna.
           '<section class="card elevated upload-card"><div class="card-head"><div><span class="kicker">01 · MATERIAL BASE</span><h2>Sube todo lo que tengas de la campaña</h2><p>Empieza por el PSD maestro; después añadimos referencias y la IA prepara el briefing.</p></div></div>',
           '<div class="upload-grid"><div class="upload-main">',
-          '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
+          '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
           '<span class="drop-icon" id="drop-icon">⇧</span>',
           '<strong class="drop-title" id="drop-title">Arrastra tus KV aquí</strong>',
-          '<span class="drop-hint" id="drop-hint">PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
+          '<span class="drop-hint" id="drop-hint">PSD, PDF, PPTX, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
           '<div id="upload-summary" class="queue-summary" hidden></div>',
           '<div id="upload-file-list" class="queue-list"></div>',
           '</div><div class="upload-side">',
@@ -1082,7 +1082,7 @@ function bindProjectCards(): void {
   });
 }
 
-const ARTWORK_EXTENSIONS = /\.(psd|psb|png|jpe?g|webp|tiff?|avif)$/i;
+const ARTWORK_EXTENSIONS = /\.(psd|psb|pdf|pptx|png|jpe?g|webp|tiff?|avif)$/i;
 
 /** Tamaño legible. En MB con un decimal un PNG de 40 KB sale como "0.0 MB",
  *  que es peor que no poner nada: parece que el archivo está vacío. */
@@ -1261,7 +1261,10 @@ function bindUpload(): void {
           );
         };
 
-        if (/\.(psd|psb)$/i.test(artwork.name)) {
+        if (/\.(pdf|pptx)$/i.test(artwork.name)) {
+          const result = await upload<Project[]>("/projects/campaign-documents", (() => { const form = new FormData(); form.append("files", artwork); return form; })(), alSubir, alTerminarSubida);
+          created.push(...result);
+        } else if (/\.(psd|psb)$/i.test(artwork.name)) {
           const result = await upload<any>("/projects/split", data, alSubir, alTerminarSubida);
           created.push(...result.projects);
         } else {
