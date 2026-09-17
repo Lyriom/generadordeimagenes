@@ -258,6 +258,7 @@ interface CampaignBrief {
   referenceUrl: string;
   referenceTitle: string;
   referencePosts: string[];
+  referenceUrls: string[];
   styleGuide: string;
 }
 
@@ -303,7 +304,7 @@ const state: State = {
   copySource: null,
   copyFields: new Set(),
   productTexts: {},
-  campaignBrief: { name: "", client: "", objective: "", notes: "", referenceUrl: "", referenceTitle: "", referencePosts: [], styleGuide: "" },
+  campaignBrief: { name: "", client: "", objective: "", notes: "", referenceUrl: "", referenceUrls: [], referenceTitle: "", referencePosts: [], styleGuide: "" },
   productionMatrix: [],
 };
 
@@ -791,7 +792,7 @@ function campaignBriefHtml(compact: boolean): string {
     '<label class="field" style="margin-top:14px"><span>Objetivo y mensaje principal</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="Ej. Impulsar cuotas sin intereses y crédito inmediato"></label>',
     '<label class="field" style="margin-top:14px"><span>Notas de dirección creativa</span><textarea id="campaign-notes" placeholder="Tono, restricciones, elementos obligatorios, fechas, legales…">', esc(brief.notes), '</textarea></label>',
     '<section class="profile-import"><div class="profile-import-copy"><span class="profile-overline">REFERENCIA DE MARCA</span><h3>Analiza el perfil del cliente</h3><p>Usaremos sus posts públicos para definir el sistema visual de las plantillas.</p></div>',
-    '<div class="profile-import-action"><label class="field"><span>URL del perfil</span><input id="campaign-reference" type="url" value="', attr(brief.referenceUrl), '" placeholder="instagram.com/marca"></label><button class="button" type="button" id="inspect-reference">Analizar perfil</button></div></section>',
+    '<div class="profile-import-action"><label class="field"><span>Perfiles o sitios de la marca</span><textarea id="campaign-reference" rows="2" placeholder="instagram.com/marca&#10;facebook.com/marca&#10;tiktok.com/@marca">', esc((brief.referenceUrls?.length ? brief.referenceUrls : [brief.referenceUrl]).filter(Boolean).join("\n")), '</textarea></label><button class="button" type="button" id="inspect-reference">Analizar redes</button></div></section>',
     brief.referenceTitle ? '<div class="profile-status success" id="reference-insight"><i>✓</i><span><strong>Perfil conectado</strong><small>' + esc(brief.referenceTitle) + '</small></span></div>' : '<div id="reference-insight"></div>',
     brief.referencePosts?.length ? '<div class="profile-posts">' + brief.referencePosts.slice(0, 8).map((image) => '<img src="' + attr(image) + '" alt="Post público de referencia" loading="lazy">').join("") + '</div><div class="button-row" style="margin-top:12px"><button class="button" type="button" id="analyze-profile-style">✦ Crear guía visual con OpenAI</button></div>' : '',
     brief.styleGuide ? '<section class="style-guide"><span class="kicker">GUÍA VISUAL DEL PERFIL</span><p>' + esc(brief.styleGuide) + '</p></section>' : '',
@@ -814,17 +815,21 @@ function bindCampaignBrief(): void {
   };
   query("#save-campaign-brief")?.addEventListener("click", save);
   query("#inspect-reference")?.addEventListener("click", async () => {
-    const url = query<HTMLInputElement>("#campaign-reference")?.value.trim();
-    if (!url) { toast("Pega primero una URL pública.", "error"); return; }
+    const raw = query<HTMLTextAreaElement>("#campaign-reference")?.value || "";
+    const urls = raw.split(/[\n,]/).map((value) => value.trim()).filter(Boolean).map((value) => /^https?:\/\//i.test(value) ? value : "https://" + value);
+    if (!urls.length) { toast("Pega al menos una red social o sitio público.", "error"); return; }
     const insight = query<HTMLElement>("#reference-insight");
     if (insight) insight.innerHTML = '<span class="muted tiny">Leyendo referencia pública…</span>';
     try {
-      const result = await post<any>("/references/inspect", { url });
-      state.campaignBrief.referenceUrl = result.url;
-      state.campaignBrief.referenceTitle = result.title || "Referencia visual";
-      state.campaignBrief.referencePosts = Array.isArray(result.posts) ? result.posts : (result.image ? [result.image] : []);
+      const inspected = await Promise.allSettled(urls.map((url) => post<any>("/references/inspect", { url })));
+      const results = inspected.filter((item): item is PromiseFulfilledResult<any> => item.status === "fulfilled").map((item) => item.value);
+      if (!results.length) throw new Error("No se pudo leer ninguna red pública.");
+      state.campaignBrief.referenceUrls = results.map((result) => result.url);
+      state.campaignBrief.referenceUrl = results[0].url;
+      state.campaignBrief.referenceTitle = results.map((result) => result.title).filter(Boolean).join(" · ");
+      state.campaignBrief.referencePosts = results.flatMap((result) => Array.isArray(result.posts) ? result.posts : (result.image ? [result.image] : [])).filter((url, index, all) => all.indexOf(url) === index);
       saveSession();
-      if (insight) insight.innerHTML = '<div class="profile-status success"><i>✓</i><span><strong>Perfil conectado</strong><small>' + esc(result.title || "Referencia pública") + '</small></span></div>';
+      if (insight) insight.innerHTML = '<div class="profile-status success"><i>✓</i><span><strong>' + String(results.length) + ' redes conectadas</strong><small>' + esc(state.campaignBrief.referenceTitle) + '</small></span></div>';
     } catch (error) { if (insight) insight.textContent = ""; toast(errorMessage(error), "error"); }
   });
   query("#analyze-profile-style")?.addEventListener("click", async () => {
@@ -1270,6 +1275,20 @@ function bindUpload(): void {
       saveSession();
       busyProgress(96, "Preparando las vistas previas…");
       await refreshAll();
+      // Con el PSD ya importado y las redes analizadas, la IA completa el
+      // briefing antes de que el equipo entre a corregir capas.
+      if (state.campaignBrief.referencePosts.length && !state.campaignBrief.styleGuide) {
+        try {
+          const guide = await post<any>("/references/profile-analysis", {
+            profile_url: state.campaignBrief.referenceUrl,
+            images: state.campaignBrief.referencePosts,
+          });
+          state.campaignBrief.styleGuide = guide.guide || "";
+          state.campaignBrief.notes = [state.campaignBrief.notes, state.campaignBrief.styleGuide]
+            .filter(Boolean).join("\n\nGuía visual IA:\n");
+          saveSession();
+        } catch { toast("Se importó el PSD; puedes continuar mientras la guía visual se vuelve a intentar.", "info"); }
+      }
       toast("Campaña importada correctamente.", "success");
       await navigate("layers");
     } catch (error) {
