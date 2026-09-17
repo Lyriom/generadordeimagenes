@@ -62,6 +62,11 @@ def _public_image_urls(html: str, page_url: str) -> list[str]:
             _public_host(parsed.hostname)
         except HTTPException:
             continue
+        # Las redes suelen exponer su propio logo, favicon y botones antes que
+        # cualquier post. No son piezas creativas y contaminan la guía de IA.
+        path = parsed.path.lower()
+        if any(token in path for token in ("favicon", "logo", "icon", "instagram", "fb_logo")):
+            continue
         if url not in clean:
             clean.append(url)
         if len(clean) == 12:

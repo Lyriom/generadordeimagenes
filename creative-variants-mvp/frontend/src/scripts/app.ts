@@ -728,9 +728,7 @@ async function renderCampaign(): Promise<void> {
           // parte en dos columnas —arrastre a la izquierda, ajustes y botón a la
           // derecha—, que en una pantalla ancha ocupan el espacio en vez de
           // dejarlo en blanco. Por debajo de 860 px vuelve a una sola columna.
-          campaignBriefHtml(false),
-          '<div class="spacer"></div>',
-          '<section class="card elevated upload-card"><div class="card-head"><div><h2>Archivos base de la campaña</h2><p>Sube el PSD maestro primero. Hasta 300 MB por archivo.</p></div></div>',
+          '<section class="card elevated upload-card"><div class="card-head"><div><span class="kicker">01 · MATERIAL BASE</span><h2>Sube todo lo que tengas de la campaña</h2><p>Empieza por el PSD maestro; después añadimos referencias y la IA prepara el briefing.</p></div></div>',
           '<div class="upload-grid"><div class="upload-main">',
           '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
           '<span class="drop-icon" id="drop-icon">⇧</span>',
@@ -745,6 +743,8 @@ async function renderCampaign(): Promise<void> {
           "</div></details>",
           '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button>',
           '</div></div></section>',
+          '<div class="spacer"></div>',
+          campaignBriefHtml(false),
         ].join(""),
     state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
     '<div class="spacer"></div>',
