@@ -3917,8 +3917,10 @@ function matrixTextOverrides(project: Project, file: File): Array<Record<string,
 
 function matrixFileMatches(row: MatrixRow, file: File): boolean {
   const base = file.name.replace(/\.[^.]+$/, "").toLowerCase();
-  const target = (row.image || row.product).replace(/\.[^.]+$/, "").toLowerCase();
-  return Boolean(target) && (target === base || base.includes(target) || target.includes(base));
+  const targets = (row.image || row.product).split(/[|;]/).map((item) =>
+    item.trim().replace(/\.[^.]+$/, "").toLowerCase()
+  ).filter(Boolean);
+  return targets.some((target) => target === base || base.includes(target) || target.includes(base));
 }
 
 function matrixProductFile(row: MatrixRow): File | undefined {
