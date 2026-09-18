@@ -55,7 +55,7 @@ SLOT_CATEGORIES = {
 #: antes de producir en vez de salir con un hueco. Los demás campos —titular,
 #: subtítulo, CTA y legal— suelen ser de campaña, los mismos en toda la tanda:
 #: son campo, pero opcional, y se rellenan una vez con su valor por defecto.
-REQUIRED_SLOT_CATEGORIES = {LayerCategory.PRODUCT, LayerCategory.PRICE}
+REQUIRED_SLOT_CATEGORIES = {LayerCategory.PRODUCT}
 
 #: Relación entre el alto de tinta medido y el cuerpo de letra que lo produce.
 #: Una mayúscula ocupa en torno al 72 % del cuerpo en las tipografías de palo

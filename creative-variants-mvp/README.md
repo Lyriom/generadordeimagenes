@@ -1,10 +1,27 @@
-# Creative Variants MVP
+# Creative Studio · Campaign-first
 
-Generador de artes publicitarios por producto a partir de **varios KV en PSD**.
-Importa las capas reales de cada KV, recibe varios productos recortados en PNG y produce
-la matriz KV × producto × formato. Exporta PNG final, PSD por capas y SVG editable
-para Illustrator. JPG/PNG aplanados se mantienen
-como flujo alternativo para ajustes finos.
+Sistema de producción de imágenes estáticas que primero **aprende una campaña** y
+después produce sus adaptaciones. El flujo principal ya no convierte cada página
+de un PDF o diapositiva en un KV independiente:
+
+1. Se crea o selecciona un cliente permanente.
+2. Se reúne en una campaña todo el conocimiento disponible: PDF, PPTX, PSD/PSB,
+   documentos, hojas, imágenes, logos, tipografías y varias URLs públicas.
+3. El análisis separa estrategia de evidencia visual y construye un brief
+   corregible. Si OpenAI no está disponible, existe un análisis local funcional.
+4. Se proponen entre 3 y 5 plantillas **sin productos**, con zonas adaptables para
+   producto, precio, copy, CTA, vigencia y legales. Una persona las aprueba.
+5. Una matriz CSV/TSV indica productos, imágenes, formatos y número de propuestas.
+   El motor elige la plantilla compatible, oculta campos vacíos y recompone cada
+   orientación.
+6. Cada tanda entrega PNG, JPG, PSD por capas, ZIP organizado y CSV de estado.
+
+Las plantillas aprobadas y las correcciones viven en la memoria del cliente para
+campañas futuras. La generación actual se concentra en piezas estáticas; no crea
+video ni carruseles.
+
+El editor anterior de KV sigue disponible como flujo avanzado para intervenir
+capas concretas de un PSD o de un arte aplanado.
 
 - **Backend:** FastAPI (toda la lógica de negocio) · Python 3.11
 - **Frontend:** Astro + TypeScript, servido por Nginx (solo presentación, consume la API)
@@ -15,7 +32,7 @@ como flujo alternativo para ajustes finos.
 
 ---
 
-## 1. Advertencia importante sobre artes aplanados
+## 1. Editor avanzado: advertencia sobre artes aplanados
 
 Un JPG/PNG aplanado **no contiene las capas originales**. Este MVP no promete una
 separación perfecta: implementa una **descomposición asistida**.

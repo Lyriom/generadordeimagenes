@@ -280,3 +280,22 @@ jobs:
             echo "ERROR: SAM no quedó activo. Respuesta:"; echo "$salud" | head -c 600; exit 1; }
           echo "correcto: OCR y SAM activos"
           REMOTO
+
+      # La portada y /health pueden responder aunque el router nuevo no haya
+      # quedado dentro de la imagen. Este smoke test protege el flujo que usa la
+      # interfaz antes de dar el despliegue por terminado.
+      - name: Comprobar que la API de campañas quedó publicada
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            bash -s <<'REMOTO'
+          set -eu
+          clientes=$(curl -fsS http://127.0.0.1:8014/api/clients)
+          case "$clientes" in
+            \[*\]) echo "correcto: API de clientes/campañas disponible" ;;
+            *) echo "ERROR: /api/clients no devolvió una lista JSON"; echo "$clientes" | head -c 600; exit 1 ;;
+          esac
+          curl -fsS http://127.0.0.1:8014/api/openapi.json \
+            | grep -q '"/clients/{client_id}/campaigns"' || {
+              echo "ERROR: OpenAPI no contiene las rutas campaign-first"; exit 1; }
+          REMOTO

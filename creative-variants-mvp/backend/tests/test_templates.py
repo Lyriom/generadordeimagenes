@@ -55,17 +55,21 @@ def _crear_plantilla(client: TestClient, brand: dict, kv: dict, **extra) -> dict
 
 
 def test_propone_campos_para_lo_que_cambia_y_congela_el_resto(client, brand, kv):
-    """Producto y precio son campos requeridos; el logo es identidad, no campo."""
+    """Solo el producto es imprescindible; el copy se adapta a lo que venga.
+
+    Una plantilla de campaña no puede obligar a inventar un precio, titular o
+    CTA cuando la fila (o el propio brief) no los usa. Esos campos se reservan
+    para poder llenarlos, pero si llegan vacíos el render debe omitirlos y
+    redistribuir la composición.
+    """
     plantilla = _crear_plantilla(client, brand, kv)
 
     campos = {slot["id"]: slot for slot in plantilla["slots"]}
     assert "producto" in campos
     assert "precio" in campos
     assert campos["producto"]["required"] is True
-    assert campos["precio"]["required"] is True
-    # Titular, CTA y legal son campo pero opcional: suelen ser de campaña.
-    assert campos["titular"]["required"] is False
-    assert campos["cta"]["required"] is False
+    for campo in ("precio", "titular", "cta", "legal"):
+        assert campos[campo]["required"] is False
 
     fijas = {layer["category"] for layer in plantilla["fixed_layers"]}
     assert "logo" in fijas

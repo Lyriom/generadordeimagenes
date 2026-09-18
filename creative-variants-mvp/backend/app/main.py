@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from .api.health import router as health_router
+from .api.campaigns import router as campaigns_router
 from .api.ingest import router as ingest_router
 from .api.projects import router as projects_router
 from .api.references import router as references_router
@@ -24,11 +25,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DESCRIPTION = """
-API para generar variaciones automáticas de artes publicitarios a partir de un
-JPG/PNG **aplanado**.
+API campaign-first para reunir el conocimiento de una campaña, construir un
+brief asistido, aprobar entre 3 y 5 plantillas estáticas sin productos y producir
+adaptaciones masivas desde una matriz. PDF, PPTX, PSD, documentos, imágenes,
+tipografías y perfiles públicos se conservan como fuentes dentro del cliente;
+no se convierten en falsos KV independientes.
 
-Un arte aplanado no contiene las capas originales, por lo que el flujo es una
-**descomposición asistida**:
+El editor avanzado de artes sigue disponible. En ese flujo, un arte aplanado no
+contiene sus capas originales y requiere una **descomposición asistida**:
 
 0. `GET /ingest` + `POST /projects/from-ingest` — para PSD grandes dejados en
    `data/ingest/`: se importan sus **capas reales** (exactas, sin adivinar).
@@ -54,6 +58,13 @@ app = FastAPI(
         {"name": "sistema", "description": "Estado del servicio y capacidades."},
         {"name": "proyectos", "description": "Ciclo completo de un proyecto creativo."},
         {
+            "name": "clientes y campanas",
+            "description": (
+                "Memoria permanente por cliente, fuentes de campaña, brief, "
+                "aprobación de plantillas y producción por matriz."
+            ),
+        },
+        {
             "name": "marcas",
             "description": (
                 "Biblioteca permanente: marcas, plantillas con campos y sus "
@@ -72,6 +83,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router)
+app.include_router(campaigns_router)
 app.include_router(ingest_router)
 app.include_router(projects_router)
 app.include_router(references_router)

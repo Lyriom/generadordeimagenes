@@ -109,3 +109,31 @@ from .template_schemas import (  # noqa: F401
     TemplateSummary,
     TemplateUpdateRequest,
 )
+from .campaign import (  # noqa: F401
+    ApprovedCandidateMemory,
+    BriefField,
+    Campaign,
+    CampaignBrief,
+    CampaignBriefPatchRequest,
+    CampaignCreateRequest,
+    CampaignUpdateRequest,
+    CampaignSource,
+    CampaignSourceKind,
+    CampaignSourceRole,
+    CampaignSourcesResponse,
+    CandidateDecisionRequest,
+    CandidateDecisionResponse,
+    ClientCreateRequest,
+    ClientKnowledge,
+    ClientProfile,
+    GenerateBriefRequest,
+    GenerateBriefResponse,
+    ProductCountRange,
+    TemplateCandidate,
+    TemplateSlotProposal,
+)
+from .campaign_production import (  # noqa: F401
+    ProductionBatch,
+    ProductionBatchList,
+    ProductionPiece,
+)

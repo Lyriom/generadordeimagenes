@@ -195,3 +195,153 @@ export interface ProductGroup {
   members: string[];
   arrangement: "auto" | "horizontal" | "vertical" | "overlap";
 }
+
+/** Cliente persistente. El backend nuevo lo llama `client`; durante la
+ * transición también normalizamos las marcas existentes (`/brands`) a esta
+ * forma para que la pantalla no dependa de dos contratos distintos. */
+export interface ClientProfile {
+  client_id: string;
+  name: string;
+  slug?: string;
+  social_urls: string[];
+  templates: number;
+  campaigns: number;
+  updated_at?: string;
+}
+
+export type CampaignSourceKind =
+  | "document"
+  | "presentation"
+  | "layered_artwork"
+  | "image"
+  | "font"
+  | "text"
+  | "other";
+
+/** Archivo que informa a la IA. Una fuente NO es un KV ni una plantilla: un
+ * PDF de 25 páginas sigue siendo una sola fuente, aunque tenga 25 previews. */
+export interface CampaignSource {
+  source_id: string;
+  filename: string;
+  kind: CampaignSourceKind;
+  media_type?: string;
+  bytes?: number;
+  pages?: number;
+  status: "uploaded" | "processing" | "ready" | "warning" | "error";
+  summary?: string;
+  role?: string;
+  preview?: string | null;
+  previews?: string[];
+  warnings: string[];
+  /** Solo existe en el fallback legado y nunca se presenta como un KV. */
+  legacy_project_ids?: string[];
+}
+
+export interface CampaignWorkspace {
+  campaign_id: string;
+  client_id: string;
+  name: string;
+  objective?: string;
+  social_urls: string[];
+  status?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface BriefSection {
+  key: string;
+  label: string;
+  value: string | string[];
+  confidence?: number;
+  source_ids?: string[];
+}
+
+export interface CampaignIntelligence {
+  objective: string;
+  audience: string;
+  message: string;
+  tone: string[];
+  concept: string;
+  palette: string[];
+  typography: string[];
+  visual_rules: string[];
+  product_treatment: string[];
+  required_elements: string[];
+  optional_elements: string[];
+  forbidden_elements: string[];
+  legal: string[];
+  sections: BriefSection[];
+  summary: string;
+  engine?: string;
+  warnings: string[];
+}
+
+export type TemplateCandidateStatus = "proposed" | "approved" | "rejected";
+
+export interface TemplateCandidateField {
+  id: string;
+  label: string;
+  kind: "image" | "text";
+  category?: string;
+  required: boolean;
+  generated_when_missing?: boolean;
+  hide_when_empty?: boolean;
+}
+
+/** Propuesta todavía sin productos. Define estructura, campos y comportamiento
+ * multiformato; la imagen de producto entra únicamente desde la matriz. */
+export interface TemplateCandidate {
+  candidate_id: string;
+  name: string;
+  description: string;
+  category: string;
+  rationale: string;
+  status: TemplateCandidateStatus;
+  fields: TemplateCandidateField[];
+  supported_product_count?: { min: number; max: number };
+  preview?: string | null;
+  preview_url?: string | null;
+  source_project_id?: string | null;
+  warnings: string[];
+  approved_at?: string | null;
+  decision_notes?: string | null;
+}
+
+export interface CampaignBriefResult {
+  campaign_id: string;
+  brief: CampaignIntelligence;
+  template_candidates: TemplateCandidate[];
+  engine?: string;
+  warnings: string[];
+}
+
+export interface ProductionPiece {
+  piece_id: string;
+  row_number: number;
+  product: string;
+  template_name: string;
+  format: string;
+  width: number;
+  height: number;
+  proposal: number;
+  preview_url: string;
+  png_url: string;
+  jpg_url: string;
+  psd_url: string;
+  warnings: string[];
+  status: string;
+}
+
+export interface ProductionBatch {
+  batch_id: string;
+  client_id: string;
+  campaign_id: string;
+  created_at: string;
+  status: string;
+  total_rows: number;
+  total_pieces: number;
+  warnings: string[];
+  zip_url: string;
+  manifest_url: string;
+  pieces: ProductionPiece[];
+}

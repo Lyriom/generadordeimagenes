@@ -196,6 +196,28 @@ class Settings:
         )
         self.max_variants: int = _env_int("MAX_VARIANTS", 30)
         self.min_variants: int = _env_int("MIN_VARIANTS", 4)
+        # Una tanda campaña-first puede pedir varias propuestas por fila y por
+        # formato. El límite evita que un CSV accidental llene el disco en una
+        # sola petición; matrices mayores se dividen sin perder la campaña.
+        self.campaign_max_pieces: int = _env_int("CAMPAIGN_MAX_PIECES", 120)
+        # El editor histórico admite pliegos enormes desde la carpeta de
+        # ingesta. El flujo campaign-first pasa por HTTP y además renderiza
+        # previews/PSD: necesita límites propios para que una campaña no tumbe
+        # el único contenedor de API.
+        self.campaign_max_source_mb: int = _env_int("CAMPAIGN_MAX_SOURCE_MB", 500)
+        self.campaign_max_request_mb: int = _env_int("CAMPAIGN_MAX_REQUEST_MB", 1500)
+        self.campaign_max_source_megapixels: int = _env_int(
+            "CAMPAIGN_MAX_SOURCE_MEGAPIXELS", 80
+        )
+        self.campaign_max_product_megapixels: int = _env_int(
+            "CAMPAIGN_MAX_PRODUCT_MEGAPIXELS", 50
+        )
+        self.campaign_max_output_megapixels: int = _env_int(
+            "CAMPAIGN_MAX_OUTPUT_MEGAPIXELS", 16
+        )
+        self.campaign_max_batch_megapixels: int = _env_int(
+            "CAMPAIGN_MAX_BATCH_MEGAPIXELS", 240
+        )
         self.request_timeout: int = _env_int("PROVIDER_TIMEOUT", 180)
 
         self.projects_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +230,30 @@ class Settings:
     @property
     def max_image_pixels(self) -> int:
         return self.max_image_megapixels * 1_000_000
+
+    @property
+    def campaign_max_source_bytes(self) -> int:
+        return self.campaign_max_source_mb * 1024 * 1024
+
+    @property
+    def campaign_max_request_bytes(self) -> int:
+        return self.campaign_max_request_mb * 1024 * 1024
+
+    @property
+    def campaign_max_source_pixels(self) -> int:
+        return self.campaign_max_source_megapixels * 1_000_000
+
+    @property
+    def campaign_max_product_pixels(self) -> int:
+        return self.campaign_max_product_megapixels * 1_000_000
+
+    @property
+    def campaign_max_output_pixels(self) -> int:
+        return self.campaign_max_output_megapixels * 1_000_000
+
+    @property
+    def campaign_max_batch_pixels(self) -> int:
+        return self.campaign_max_batch_megapixels * 1_000_000
 
 
 @lru_cache(maxsize=1)

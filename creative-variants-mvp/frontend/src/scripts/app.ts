@@ -8,9 +8,22 @@ import {
   put,
   sessionId,
   thumbnailUrl,
-  upload,
   variantPngUrl,
 } from "./api";
+import {
+  createCampaign,
+  createClient,
+  decideTemplateCandidate,
+  generateCampaignBrief,
+  listCampaigns,
+  listClients,
+  listProductionBatches,
+  loadCampaignState,
+  produceCampaign,
+  reviseCampaignBrief,
+  updateCampaignContext,
+  uploadCampaignSources,
+} from "./campaign-api";
 import type {
   ArtTextLayer,
   ArtTexts,
@@ -21,16 +34,22 @@ import type {
   Layer,
   ProductGroup,
   ProductZone,
+  ProductionBatch,
   Project,
   ProjectSummary,
   Variant,
   ViewName,
+  CampaignIntelligence,
+  CampaignSource,
+  CampaignWorkspace,
+  ClientProfile,
+  TemplateCandidate,
 } from "./types";
 
 const VIEW_LABELS: Record<ViewName, string> = {
   campaign: "Campaña",
-  layers: "Base y capas",
-  products: "Plantilla",
+  layers: "Brief y activos",
+  products: "Plantillas",
   generate: "Producción",
   results: "Entregables",
 };
@@ -78,25 +97,34 @@ function nameList(projects: Project[], max = 3): string {
 }
 
 function stepState(): StepState {
-  const hasCampaign = state.campaign.length > 0;
-  const reviewed = hasCampaign && state.campaign.every(layersConfirmed);
-  const hasProducts = productsReady();
+  const hasKnowledge = state.campaignSources.length > 0;
+  const hasLegacyCampaign = state.campaign.length > 0;
+  const hasCampaign = hasKnowledge || hasLegacyCampaign;
+  const reviewed = state.campaignWorkspace
+    ? Boolean(state.campaignIntelligence)
+    : hasLegacyCampaign && state.campaign.every(layersConfirmed);
+  const approvedTemplates = state.templateCandidates.filter((item) => item.status === "approved").length;
+  const templatesReady = state.campaignWorkspace
+    ? approvedTemplates > 0
+    : productsReady();
 
   const done: Record<string, boolean> = {
     campaign: hasCampaign,
     layers: reviewed,
-    products: hasProducts,
+    products: templatesReady,
     generate: false,
   };
   const blocked: Record<string, string | null> = {
     campaign: null,
-    layers: hasCampaign ? null : "Primero carga al menos un KV.",
+    layers: hasCampaign ? null : "Primero reúne y analiza el material de la campaña.",
     products: !hasCampaign
-      ? "Primero carga al menos un KV."
-      : null,
-    // Composing the existing KV does not require a replacement product.
-    // Catalog generation validates its selection when the user generates.
-    generate: hasCampaign ? null : "Primero carga al menos un KV.",
+      ? "Primero reúne el material de la campaña."
+      : reviewed ? null : "Primero genera y revisa el brief con IA.",
+    generate: !hasCampaign
+      ? "Primero reúne el material de la campaña."
+      : state.campaignWorkspace && !approvedTemplates
+        ? "Aprueba al menos una plantilla antes de producir."
+        : null,
     results: null,
   };
   const next = STEP_ORDER.find((view) => !done[view]) || "generate";
@@ -246,8 +274,18 @@ interface State {
   copyDrafts: Record<string, string>;
   /** Contexto que acompaña a todos los PSD y tandas de esta campaña. */
   campaignBrief: CampaignBrief;
+  /** Cliente persistente y espacio de conocimiento de la campaña. */
+  clients: ClientProfile[];
+  activeClientId: string | null;
+  campaignWorkspace: CampaignWorkspace | null;
+  campaignSources: CampaignSource[];
+  campaignIntelligence: CampaignIntelligence | null;
+  templateCandidates: TemplateCandidate[];
   /** Filas de la matriz de producción cargada por el equipo. */
   productionMatrix: MatrixRow[];
+  productionMatrixFile: File | null;
+  productionBatch: ProductionBatch | null;
+  clientCampaigns: CampaignWorkspace[];
 }
 
 interface CampaignBrief {
@@ -266,9 +304,19 @@ interface MatrixRow {
   product: string;
   image: string;
   headline: string;
+  subtitle: string;
   price: string;
+  previousPrice: string;
+  installment: string;
+  discount: string;
   cta: string;
+  legal: string;
+  validity: string;
   formats: string;
+  proposals: number;
+  notes: string;
+  template: string;
+  omit: string[];
 }
 
 const state: State = {
@@ -305,7 +353,16 @@ const state: State = {
   copyFields: new Set(),
   productTexts: {},
   campaignBrief: { name: "", client: "", objective: "", notes: "", referenceUrl: "", referenceUrls: [], referenceTitle: "", referencePosts: [], styleGuide: "" },
+  clients: [],
+  activeClientId: null,
+  campaignWorkspace: null,
+  campaignSources: [],
+  campaignIntelligence: null,
+  templateCandidates: [],
   productionMatrix: [],
+  productionMatrixFile: null,
+  productionBatch: null,
+  clientCampaigns: [],
 };
 
 const ARRANGEMENT_OPTIONS: Record<string, string> = {
@@ -501,7 +558,13 @@ function saveSession(): void {
     if (state.activeId) sessionStorage.setItem("creative-active", state.activeId);
     else sessionStorage.removeItem("creative-active");
     sessionStorage.setItem("creative-campaign-brief", JSON.stringify(state.campaignBrief));
+    sessionStorage.setItem("creative-active-client", state.activeClientId || "");
+    sessionStorage.setItem("creative-campaign-workspace", JSON.stringify(state.campaignWorkspace));
+    sessionStorage.setItem("creative-campaign-sources", JSON.stringify(state.campaignSources));
+    sessionStorage.setItem("creative-campaign-intelligence", JSON.stringify(state.campaignIntelligence));
+    sessionStorage.setItem("creative-template-candidates", JSON.stringify(state.templateCandidates));
     sessionStorage.setItem("creative-production-matrix", JSON.stringify(state.productionMatrix));
+    sessionStorage.setItem("creative-production-batch", JSON.stringify(state.productionBatch));
   } catch {
     /* modo privado: la campaña solo vive en memoria */
   }
@@ -541,14 +604,49 @@ async function refreshProject(projectId: string): Promise<Project> {
 async function refreshAll(): Promise<void> {
   // El listado va acotado a la sesión: el trabajo de sesiones anteriores no se
   // ofrece porque el servidor lo borra por antigüedad.
-  const [health, capabilities, projects] = await Promise.all([
+  const [health, capabilities, projects, clients] = await Promise.all([
     get<any>("/health"),
     get<Capabilities>("/capabilities"),
     get<ProjectSummary[]>("/projects?session=" + encodeURIComponent(sessionId())),
+    listClients().catch(() => []),
   ]);
   state.health = health;
   state.capabilities = capabilities;
   state.projects = projects;
+  state.clients = clients;
+
+  if (state.activeClientId) {
+    state.clientCampaigns = await listCampaigns(state.activeClientId).catch(() => []);
+  } else {
+    state.clientCampaigns = [];
+  }
+  if (state.activeClientId && state.campaignWorkspace?.campaign_id) {
+    try {
+      const recovered = await loadCampaignState(
+        state.activeClientId,
+        state.campaignWorkspace.campaign_id,
+      );
+      state.campaignWorkspace = recovered.workspace;
+      state.campaignSources = recovered.sources;
+      state.campaignIntelligence = recovered.brief;
+      state.templateCandidates = recovered.candidates;
+      const batches = await listProductionBatches(
+        state.activeClientId,
+        recovered.workspace.campaign_id,
+      ).catch(() => []);
+      if (!state.productionBatch && batches.length) state.productionBatch = batches[0];
+      // Las fuentes de conocimiento del flujo nuevo nunca son Projects/KV. Una
+      // sesión antigua podía conservar las 25 páginas del PDF en esta lista.
+      state.campaignIds = [];
+      state.campaign = [];
+      state.activeId = null;
+    } catch {
+      state.campaignWorkspace = null;
+      state.campaignSources = [];
+      state.campaignIntelligence = null;
+      state.templateCandidates = [];
+    }
+  }
 
   const existing = new Set(projects.map((item) => item.project_id));
   state.campaignIds = state.campaignIds.filter((id) => existing.has(id));
@@ -598,15 +696,24 @@ function renderChrome(): void {
   live.innerHTML = '<i></i><span>' + (connected ? "Motor conectado" : "Sin conexión") + "</span>";
 
   const project = activeProject();
+  const client = state.clients.find((item) => item.client_id === state.activeClientId);
   const panel = query<HTMLElement>("#sidebar-project")!;
-  panel.innerHTML = project
+  panel.innerHTML = state.campaignWorkspace
+    ? [
+        '<span class="eyebrow">', esc(client?.name || "CLIENTE"), '</span>',
+        '<strong>', esc(state.campaignWorkspace.name), '</strong>',
+        '<small>', String(state.campaignSources.length), ' fuentes · ',
+        String(state.templateCandidates.filter((item) => item.status === "approved").length),
+        ' plantillas aprobadas</small>',
+      ].join("")
+    : project
     ? [
         '<span class="eyebrow">CAMPAÑA · ', String(state.campaign.length), " KV</span>",
         "<strong>", esc(project.name), "</strong>",
         "<small>", String(project.canvas.width), "×", String(project.canvas.height),
         " · ", String(project.variants.length), " variantes</small>",
       ].join("")
-    : '<span class="eyebrow">SIN CAMPAÑA</span><strong>Carga tu primer KV</strong><small>PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF</small>';
+    : '<span class="eyebrow">SIN CAMPAÑA</span><strong>Reúne el material</strong><small>Documentos, artes, manuales y redes</small>';
 }
 
 async function navigate(view: ViewName): Promise<void> {
@@ -639,30 +746,6 @@ async function navigate(view: ViewName): Promise<void> {
   }
 }
 
-function projectCard(project: Project | ProjectSummary, full?: Project): string {
-  const id = project.project_id;
-  const canvas = project.canvas;
-  const layerCount = "layers" in project && typeof project.layers === "number"
-    ? project.layers
-    : full?.layers.length || 0;
-  const variantCount = "variants" in project && typeof project.variants === "number"
-    ? project.variants
-    : full?.variants.length || 0;
-  // Siempre hay miniatura: el endpoint la genera desde el KV y la cachea, así
-  // que funciona igual para un proyecto abierto y para uno solo listado.
-  const image = '<img src="' + attr(thumbnailUrl(id, 420)) + '" alt="' + attr(project.name) +
-    '" loading="lazy" decoding="async">';
-  return [
-    '<article class="project-card', state.activeId === id ? " is-active" : "", '" data-project="', attr(id), '">',
-    '<div class="project-thumb">', image, "</div>",
-    '<div class="project-info"><strong>', esc(project.name), "</strong>",
-    '<div class="project-meta"><span>', String(canvas.width), "×", String(canvas.height),
-    "</span><span>", String(layerCount), " capas · ", String(variantCount), " artes</span></div></div>",
-    '<div class="project-actions"><button class="ghost-button open-project" data-id="', attr(id), '">Abrir</button>',
-    '<button class="danger-button delete-project" data-id="', attr(id), '">Borrar</button></div></article>',
-  ].join("");
-}
-
 /* El trabajo de esta sesión, en lista compacta con selección múltiple. No hay
    "trabajos guardados": lo de sesiones anteriores el servidor ya lo borró. */
 function savedProjectsHtml(items: ProjectSummary[]): string {
@@ -688,65 +771,30 @@ function savedProjectsHtml(items: ProjectSummary[]): string {
 }
 
 async function renderCampaign(): Promise<void> {
-  const activeCards = state.campaign
-    .map((project) => projectCard(project, project))
-    .join("");
-  const saved = state.projects.filter((item) => !state.campaignIds.includes(item.project_id));
+  if (!state.clients.length) state.clients = await listClients().catch(() => []);
+  const hiddenKnowledgeProjects = new Set(
+    state.campaignSources.flatMap((source) => source.legacy_project_ids || []),
+  );
+  const saved = state.projects.filter((item) =>
+    !state.campaignIds.includes(item.project_id) && !hiddenKnowledgeProjects.has(item.project_id)
+  );
+  const ready = Boolean(state.campaignWorkspace || state.campaignSources.length);
 
   content().innerHTML = [
     stepBar("campaign"),
     pageHead(
-      "Creative workspace",
-      state.campaign.length ? "Tu campaña está lista" : "Empieza con tus key visuals",
-      "Carga uno o varios KV. El PSD conserva sus capas reales; PNG, JPG, WEBP, TIFF y AVIF también funcionan con separación asistida.",
-      state.campaign.length
+      ready ? "Sistema creativo" : "Nueva campaña",
+      ready ? "La campaña ya tiene contexto" : "Primero entendemos; después diseñamos",
+      ready
+        ? "El material se conserva como conocimiento. Las plantillas y los productos se trabajan en pasos separados."
+        : "Selecciona el cliente, reúne todo el material y añade sus redes. La IA hará el brief y propondrá de 3 a 5 plantillas sin productos.",
+      ready
         ? '<button class="ghost-button" id="clear-campaign">Cambiar campaña</button>'
         : "",
     ),
-    state.campaign.length
-      ? [
-          campaignBriefHtml(true),
-          '<div class="spacer"></div>',
-          '<div class="stat-row">',
-          '<div class="stat"><strong>', String(state.campaign.length), '</strong><span>KV activos</span></div>',
-          '<div class="stat"><strong>', String(state.campaign.reduce((n, p) => n + p.layers.length, 0)), '</strong><span>Capas detectadas</span></div>',
-          '<div class="stat"><strong>', String(state.campaign.reduce((n, p) => n + p.variants.length, 0)), '</strong><span>Artes generadas</span></div>',
-          '<div class="stat"><strong>', String(state.capabilities?.format_catalog.length || 0), '</strong><span>Presets disponibles</span></div>',
-          "</div>",
-          '<h2 class="section-title">KV de esta campaña</h2><div class="project-grid">', activeCards, "</div>",
-          '<div class="spacer"></div><div class="button-row"><button class="ghost-button" id="add-more-kv">Añadir más KV</button></div>',
-        ].join("")
-      : [
-          // Una sola vía de entrada. La carpeta del servidor pedía acceso al
-          // disco de la máquina, que este cliente no tiene, así que era una
-          // columna entera ofreciendo algo imposible.
-          // Sin badge «RECOMENDADO»: recomendaba esta de entre dos, y ya no hay
-          // otra con la que compararla.
-          //
-          // Al quedarse sola, la tarjeta se estiraba a los 1500 px del área de
-          // trabajo con una zona de arrastre vacía dentro. Ahora se acota y se
-          // parte en dos columnas —arrastre a la izquierda, ajustes y botón a la
-          // derecha—, que en una pantalla ancha ocupan el espacio en vez de
-          // dejarlo en blanco. Por debajo de 860 px vuelve a una sola columna.
-          '<section class="card elevated upload-card"><div class="card-head"><div><span class="kicker">01 · MATERIAL BASE</span><h2>Sube todo lo que tengas de la campaña</h2><p>Empieza por el PSD maestro; después añadimos referencias y la IA prepara el briefing.</p></div></div>',
-          '<div class="upload-grid"><div class="upload-main">',
-          '<label class="dropzone" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif">',
-          '<span class="drop-icon" id="drop-icon">⇧</span>',
-          '<strong class="drop-title" id="drop-title">Arrastra tus KV aquí</strong>',
-          '<span class="drop-hint" id="drop-hint">PSD, PDF, PPTX, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios</span></label>',
-          '<div id="upload-summary" class="queue-summary" hidden></div>',
-          '<div id="upload-file-list" class="queue-list"></div>',
-          '</div><div class="upload-side">',
-          '<details class="upload-references"><summary>Logo y tipografía · opcional</summary><div class="upload-references-fields">',
-          '<label class="field"><span>Logo</span><input id="logo-file" type="file" accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"></label>',
-          '<label class="field"><span>Tipografía</span><input id="font-file" type="file" accept=".ttf,.otf"></label>',
-          "</div></details>",
-          '<button class="button large full" id="upload-campaign" disabled>Crear campaña</button>',
-          '</div></div></section>',
-          '<div class="spacer"></div>',
-          campaignBriefHtml(false),
-        ].join(""),
-    state.campaign.length ? stepFooter("campaign", "Revisar capas") : "",
+    campaignPhaseRail(),
+    ready ? activeCampaignHtml() : campaignBriefHtml(false),
+    ready ? stepFooter("campaign", "Revisar brief y activos") : "",
     '<div class="spacer"></div>',
     savedProjectsHtml(saved),
   ].join("");
@@ -760,85 +808,284 @@ async function renderCampaign(): Promise<void> {
     state.campaignIds = [];
     state.campaign = [];
     state.activeId = null;
+    state.campaignWorkspace = null;
+    state.campaignSources = [];
+    state.campaignIntelligence = null;
+    state.templateCandidates = [];
+    state.productionMatrix = [];
+    state.productionMatrixFile = null;
+    state.productionBatch = null;
     saveSession();
     navigate("campaign");
   });
-  query("#add-more-kv")?.addEventListener("click", () => {
-    state.campaignIds = [];
-    state.campaign = [];
-    saveSession();
-    navigate("campaign");
-  });
-  if (!state.campaign.length) bindUpload();
+  if (!ready) bindUpload();
+  else bindActiveCampaign();
+}
+
+function campaignPhaseRail(): string {
+  const phases = [
+    ["1", "Cliente", Boolean(state.activeClientId)],
+    ["2", "Material", state.campaignSources.length > 0],
+    ["3", "Redes", state.campaignBrief.referenceUrls.length > 0],
+    ["4", "Brief IA", Boolean(state.campaignIntelligence)],
+    ["5", "Plantillas", state.templateCandidates.length > 0],
+  ];
+  let currentFound = false;
+  return '<ol class="campaign-phase-rail">' + phases.map(([number, label, done]) => {
+    const current = !currentFound && !done;
+    if (current) currentFound = true;
+    return '<li class="' + (done ? "is-done" : current ? "is-current" : "") + '"><i>' +
+      (done ? "✓" : number) + '</i><span>' + label + '</span></li>';
+  }).join("") + "</ol>";
 }
 
 function campaignBriefHtml(compact: boolean): string {
   const brief = state.campaignBrief;
-  const reference = brief.referenceUrl
-    ? '<a class="reference-link" href="' + attr(brief.referenceUrl) + '" target="_blank" rel="noreferrer">↗ Ver referencia</a>'
-    : '<span class="muted tiny">Puedes pegar un perfil de Instagram, sitio web o carpeta de referencias.</span>';
-  if (compact) return [
-    '<section class="campaign-summary">',
-    '<div><span class="kicker">CAMPAÑA ACTIVA</span><h2>', esc(brief.name || "Campaña sin nombre"), '</h2>',
-    '<p>', esc(brief.client || "Cliente por definir"), brief.objective ? ' · ' + esc(brief.objective) : '', '</p></div>',
-    '<div class="campaign-summary-actions">', reference, '</div>',
-    '</section>',
-  ].join("");
+  if (compact) return "";
+  const clients = state.clients.map((client) => [
+    '<button class="client-choice', client.client_id === state.activeClientId ? " is-selected" : "",
+    '" type="button" data-client="', attr(client.client_id), '">',
+    '<span class="client-monogram">', esc(client.name.slice(0, 2).toUpperCase()), '</span>',
+    '<span><strong>', esc(client.name), '</strong><small>', String(client.templates), ' plantillas · ',
+    String(client.campaigns), ' campañas</small></span><i>', client.client_id === state.activeClientId ? "✓" : "→", '</i></button>',
+  ].join("")).join("");
+  const pastCampaigns = state.activeClientId
+    ? state.clientCampaigns.map((campaign) => [
+        '<button class="campaign-memory-card" type="button" data-open-campaign="', attr(campaign.campaign_id), '">',
+        '<span><strong>', esc(campaign.name), '</strong><small>', esc(campaign.objective || "Campaña guardada"),
+        '</small></span><i>Continuar →</i></button>',
+      ].join("")).join("")
+    : "";
   return [
-    '<section class="card campaign-brief"><div class="card-head campaign-intro"><div><span class="kicker">NUEVA CAMPAÑA</span><h2>Define la base creativa</h2>',
-    '<p>Reunimos marca, perfil visual y PSD para construir plantillas que ya nacen listas para producir.</p></div><span class="campaign-step">1 de 4</span></div>',
-    '<div class="form-grid"><label class="field"><span>Nombre de campaña</span><input id="campaign-name" value="', attr(brief.name), '" placeholder="Ej. Credifest · Vuelta a clases"></label>',
-    '<label class="field"><span>Cliente / marca</span><input id="campaign-client" value="', attr(brief.client), '" placeholder="Nombre de la marca"></label></div>',
-    '<label class="field" style="margin-top:14px"><span>Objetivo y mensaje principal</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="Ej. Impulsar cuotas sin intereses y crédito inmediato"></label>',
-    '<label class="field" style="margin-top:14px"><span>Notas de dirección creativa</span><textarea id="campaign-notes" placeholder="Tono, restricciones, elementos obligatorios, fechas, legales…">', esc(brief.notes), '</textarea></label>',
-    '<section class="profile-import"><div class="profile-import-copy"><span class="profile-overline">REFERENCIA DE MARCA</span><h3>Analiza el perfil del cliente</h3><p>Usaremos sus posts públicos para definir el sistema visual de las plantillas.</p></div>',
-    '<div class="profile-import-action"><label class="field"><span>Perfiles o sitios de la marca</span><textarea id="campaign-reference" rows="2" placeholder="instagram.com/marca&#10;facebook.com/marca&#10;tiktok.com/@marca">', esc((brief.referenceUrls?.length ? brief.referenceUrls : [brief.referenceUrl]).filter(Boolean).join("\n")), '</textarea></label><button class="button" type="button" id="inspect-reference">Analizar redes</button></div></section>',
-    brief.referenceTitle ? '<div class="profile-status success" id="reference-insight"><i>✓</i><span><strong>Perfil conectado</strong><small>' + esc(brief.referenceTitle) + '</small></span></div>' : '<div id="reference-insight"></div>',
-    brief.referencePosts?.length ? '<div class="profile-posts">' + brief.referencePosts.slice(0, 8).map((image) => '<img src="' + attr(image) + '" alt="Post público de referencia" loading="lazy">').join("") + '</div><div class="button-row" style="margin-top:12px"><button class="button" type="button" id="analyze-profile-style">✦ Crear guía visual con OpenAI</button></div>' : '',
-    brief.styleGuide ? '<section class="style-guide"><span class="kicker">GUÍA VISUAL DEL PERFIL</span><p>' + esc(brief.styleGuide) + '</p></section>' : '',
-    '<div class="button-row campaign-footer"><button class="ghost-button" id="save-campaign-brief">Guardar borrador</button><span>Después sube el PSD maestro para crear la campaña.</span></div></section>',
+    '<div class="campaign-intake">',
+    '<section class="card intake-section client-section"><div class="intake-number">1</div><div class="intake-body">',
+    '<div class="card-head"><div><span class="kicker">MEMORIA POR CLIENTE</span><h2>¿Para quién es esta campaña?</h2>',
+    '<p>Las plantillas aprobadas y tus correcciones quedarán guardadas en este cliente.</p></div></div>',
+    clients ? '<div class="client-grid">' + clients + '</div>' : '<div class="notice">Todavía no hay clientes. Crea el primero.</div>',
+    '<div class="create-client-row"><label class="field"><span>Nuevo cliente</span><input id="new-client-name" placeholder="Nombre de la marca"></label>',
+    '<button class="ghost-button" id="create-client" type="button">Crear cliente</button></div>',
+    state.activeClientId && pastCampaigns
+      ? '<div class="campaign-memory"><span class="label">Campañas guardadas de este cliente</span>' + pastCampaigns + '</div>'
+      : '',
+    '</div></section>',
+
+    '<section class="card intake-section"><div class="intake-number">2</div><div class="intake-body">',
+    '<div class="card-head"><div><span class="kicker">FUENTES DE CONOCIMIENTO</span><h2>Sube todo lo que exista de la campaña</h2>',
+    '<p>PDF, PPTX, PSD, artes, manuales, logos, textos y tipografías se analizan como contexto. Un PDF sigue siendo un documento; sus páginas no se convierten en campañas ni KV separados.</p></div></div>',
+    '<div class="form-grid"><label class="field"><span>Nombre de campaña</span><input id="campaign-name" value="', attr(brief.name), '" placeholder="Ej. Credifest 2026"></label>',
+    '<label class="field"><span>Objetivo conocido · opcional</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="La IA lo completará si está vacío"></label></div>',
+    '<label class="dropzone source-drop" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif,.ttf,.otf">',
+    '<span class="drop-icon" id="drop-icon">⇧</span><strong class="drop-title" id="drop-title">Arrastra todo el material aquí</strong>',
+    '<span class="drop-hint" id="drop-hint">Documentos, presentaciones, PSD, imágenes, logos, textos y tipografías</span></label>',
+    '<div id="upload-summary" class="queue-summary" hidden></div><div id="upload-file-list" class="queue-list"></div>',
+    '</div></section>',
+
+    '<section class="card intake-section"><div class="intake-number">3</div><div class="intake-body">',
+    '<div class="card-head"><div><span class="kicker">CONTEXTO PÚBLICO</span><h2>Añade las redes y sitios de la marca</h2>',
+    '<p>Una URL por línea. La IA contrastará cómo usa hoy la marca sus productos, precios, titulares, CTA y legales.</p></div></div>',
+    '<label class="field"><span>Perfiles y sitios</span><textarea id="campaign-reference" rows="4" placeholder="https://instagram.com/marca&#10;https://facebook.com/marca&#10;https://marca.com">',
+    esc((brief.referenceUrls?.length ? brief.referenceUrls : [brief.referenceUrl]).filter(Boolean).join("\n")), '</textarea></label>',
+    '<div class="notice compact"><strong>Acceso público:</strong> si una red bloquea la lectura, la campaña continúa con los demás archivos y podrás añadir capturas.</div>',
+    '</div></section>',
+
+    '<section class="autopilot-launch"><div><span class="kicker">AUTOPILOT DE CAMPAÑA</span><h2>La IA clasifica, redacta el brief y propone 3–5 plantillas</h2>',
+    '<p>Las propuestas no llevan productos. Reservan espacios adaptables para producto, precio, copy, CTA y legales según lo que realmente use esta campaña.</p></div>',
+    '<button class="button large" id="upload-campaign" disabled>Analizar campaña con IA <span>→</span></button></section>',
+    '</div>',
   ].join("");
 }
 
 function bindCampaignBrief(): void {
-  const save = () => {
-    const value = (id: string) => query<HTMLInputElement | HTMLTextAreaElement>(id)?.value.trim() || "";
-    state.campaignBrief = {
-      ...state.campaignBrief,
-      name: value("#campaign-name") || state.campaignBrief.name,
-      client: value("#campaign-client") || state.campaignBrief.client,
-      objective: value("#campaign-objective") || state.campaignBrief.objective,
-      notes: value("#campaign-notes") || state.campaignBrief.notes,
-      referenceUrl: value("#campaign-reference") || state.campaignBrief.referenceUrl,
-    };
-    saveSession(); renderChrome(); toast("Briefing de campaña guardado.", "success");
-  };
-  query("#save-campaign-brief")?.addEventListener("click", save);
-  query("#inspect-reference")?.addEventListener("click", async () => {
-    const raw = query<HTMLTextAreaElement>("#campaign-reference")?.value || "";
-    const urls = raw.split(/[\n,]/).map((value) => value.trim()).filter(Boolean).map((value) => /^https?:\/\//i.test(value) ? value : "https://" + value);
-    if (!urls.length) { toast("Pega al menos una red social o sitio público.", "error"); return; }
-    const insight = query<HTMLElement>("#reference-insight");
-    if (insight) insight.innerHTML = '<span class="muted tiny">Leyendo referencia pública…</span>';
-    try {
-      const inspected = await Promise.allSettled(urls.map((url) => post<any>("/references/inspect", { url })));
-      const results = inspected.filter((item): item is PromiseFulfilledResult<any> => item.status === "fulfilled").map((item) => item.value);
-      if (!results.length) throw new Error("No se pudo leer ninguna red pública.");
-      state.campaignBrief.referenceUrls = results.map((result) => result.url);
-      state.campaignBrief.referenceUrl = results[0].url;
-      state.campaignBrief.referenceTitle = results.map((result) => result.title).filter(Boolean).join(" · ");
-      state.campaignBrief.referencePosts = results.flatMap((result) => Array.isArray(result.posts) ? result.posts : (result.image ? [result.image] : [])).filter((url, index, all) => all.indexOf(url) === index);
+  queryAll<HTMLButtonElement>(".client-choice").forEach((button) => {
+    button.addEventListener("click", async () => {
+      state.activeClientId = button.dataset.client || null;
+      const client = state.clients.find((item) => item.client_id === state.activeClientId);
+      if (client) state.campaignBrief.client = client.name;
+      queryAll<HTMLElement>(".client-choice").forEach((item) => {
+        const selected = item.getAttribute("data-client") === state.activeClientId;
+        item.classList.toggle("is-selected", selected);
+        const mark = item.querySelector("i");
+        if (mark) mark.textContent = selected ? "✓" : "→";
+      });
+      state.clientCampaigns = state.activeClientId
+        ? await listCampaigns(state.activeClientId).catch(() => [])
+        : [];
       saveSession();
-      if (insight) insight.innerHTML = '<div class="profile-status success"><i>✓</i><span><strong>' + String(results.length) + ' redes conectadas</strong><small>' + esc(state.campaignBrief.referenceTitle) + '</small></span></div>';
-    } catch (error) { if (insight) insight.textContent = ""; toast(errorMessage(error), "error"); }
+      await renderCampaign();
+    });
   });
-  query("#analyze-profile-style")?.addEventListener("click", async () => {
-    busy("Analizando el perfil", "OpenAI está identificando el lenguaje visual de sus posts…", 30);
+  queryAll<HTMLButtonElement>("[data-open-campaign]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!state.activeClientId) return;
+      busy("Abriendo campaña", "Recuperando su brief, fuentes y plantillas…", 35);
+      try {
+        const recovered = await loadCampaignState(
+          state.activeClientId,
+          button.dataset.openCampaign || "",
+        );
+        state.campaignWorkspace = recovered.workspace;
+        state.campaignSources = recovered.sources;
+        state.campaignIntelligence = recovered.brief;
+        state.templateCandidates = recovered.candidates;
+        state.campaignBrief.name = recovered.workspace.name;
+        state.campaignBrief.objective = recovered.brief?.objective || recovered.workspace.objective || "";
+        state.campaignBrief.referenceUrls = recovered.workspace.social_urls;
+        state.campaignBrief.referenceUrl = recovered.workspace.social_urls[0] || "";
+        const batches = await listProductionBatches(
+          state.activeClientId,
+          recovered.workspace.campaign_id,
+        ).catch(() => []);
+        state.productionBatch = batches[0] || null;
+        state.productionMatrix = [];
+        state.productionMatrixFile = null;
+        saveSession();
+        await navigate("campaign");
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        idle();
+      }
+    });
+  });
+  query("#create-client")?.addEventListener("click", async () => {
+    const name = query<HTMLInputElement>("#new-client-name")?.value.trim() || "";
+    if (!name) { toast("Escribe el nombre del cliente.", "error"); return; }
+    busy("Creando cliente", "Preparando su biblioteca permanente…", 35);
     try {
-      const result = await post<any>("/references/profile-analysis", { profile_url: state.campaignBrief.referenceUrl, images: state.campaignBrief.referencePosts });
-      state.campaignBrief.styleGuide = result.guide || "";
-      state.campaignBrief.notes = [state.campaignBrief.notes, result.guide].filter(Boolean).join("\n\nGuía visual del perfil:\n");
-      saveSession(); toast("Guía visual creada y añadida al briefing.", "success"); await renderCampaign();
+      const client = await createClient(name, []);
+      state.clients = [...state.clients.filter((item) => item.client_id !== client.client_id), client];
+      state.activeClientId = client.client_id;
+      state.clientCampaigns = [];
+      state.campaignBrief.client = client.name;
+      saveSession();
+      await renderCampaign();
+      toast("Cliente creado. Ya puedes reunir su campaña.", "success");
+    } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+  });
+}
+
+function parseSocialUrls(raw: string): string[] {
+  return raw.split(/[\n,]/).map((value) => value.trim()).filter(Boolean).map((value) =>
+    /^https?:\/\//i.test(value) ? value : "https://" + value
+  ).filter((value, index, all) => all.indexOf(value) === index);
+}
+
+function socialUrlsFromField(): string[] {
+  return parseSocialUrls(query<HTMLTextAreaElement>("#campaign-reference")?.value || "");
+}
+
+function sourceKindLabel(source: CampaignSource): string {
+  const extension = (source.filename.split(".").pop() || "").toLowerCase();
+  const exact: Record<string, string> = {
+    pdf: "PDF", pptx: "PPTX", psd: "PSD", psb: "PSB", docx: "DOCX",
+    xlsx: "XLSX", csv: "CSV", tsv: "TSV", ttf: "TTF", otf: "OTF",
+  };
+  if (exact[extension]) return exact[extension];
+  const labels: Record<string, string> = {
+    document: "Documento", presentation: "Presentación", layered_artwork: "Arte con capas",
+    image: "Imagen", font: "Tipografía", text: "Texto", other: "Archivo",
+  };
+  return labels[source.kind] || "Archivo";
+}
+
+function activeCampaignHtml(): string {
+  const workspace = state.campaignWorkspace;
+  const approved = state.templateCandidates.filter((item) => item.status === "approved").length;
+  const social = workspace?.social_urls || state.campaignBrief.referenceUrls || [];
+  const sources = state.campaignSources.map((source) => [
+    '<article class="source-card"><span class="source-format">', esc(sourceKindLabel(source)), '</span>',
+    '<div><strong>', esc(source.filename), '</strong><small>',
+    source.pages ? String(source.pages) + " páginas · " : "",
+    source.bytes ? readableSize(source.bytes) + " · " : "",
+    esc(source.role || source.summary || "Lista para el análisis"), '</small></div>',
+    '<span class="source-state ', source.status === "error" ? "error" : '', '">',
+    source.status === "error" ? "Error" : source.status === "warning" ? "Revisar" : "✓ Analizada", '</span></article>',
+  ].join("")).join("");
+  return [
+    '<section class="campaign-summary knowledge-summary"><div><span class="kicker">CAMPAÑA ACTIVA</span><h2>',
+    esc(workspace?.name || state.campaignBrief.name || "Campaña"), '</h2><p>',
+    esc(state.campaignBrief.client || "Cliente"), state.campaignBrief.objective ? ' · ' + esc(state.campaignBrief.objective) : '',
+    '</p></div><div class="campaign-summary-actions"><button class="ghost-button" id="reanalyze-campaign">',
+    state.campaignIntelligence ? "Volver a analizar" : "Generar brief con IA", '</button></div></section>',
+    '<div class="stat-row knowledge-stats"><div class="stat"><strong>', String(state.campaignSources.length), '</strong><span>fuentes, no KV</span></div>',
+    '<div class="stat"><strong>', String(social.length), '</strong><span>redes y sitios</span></div>',
+    '<div class="stat"><strong>', state.campaignIntelligence ? "✓" : "—", '</strong><span>brief IA</span></div>',
+    '<div class="stat"><strong>', String(approved), '/', String(state.templateCandidates.length), '</strong><span>plantillas aprobadas</span></div></div>',
+    '<div class="campaign-active-grid"><section class="card"><div class="card-head"><div><h2>Material de campaña</h2>',
+    '<p>Cada archivo conserva su función como fuente de conocimiento.</p></div><label class="ghost-button file-button">Añadir material<input id="add-source-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif,.ttf,.otf"></label></div>',
+    '<div class="source-list">', sources || '<div class="notice">No hay fuentes guardadas todavía.</div>', '</div></section>',
+    '<section class="card"><div class="card-head"><div><h2>Contexto conectado</h2><p>Perfiles que completan el lenguaje visual.</p></div></div>',
+    social.length ? '<div class="social-url-list">' + social.map((url) => '<a href="' + attr(url) + '" target="_blank" rel="noreferrer"><i>↗</i><span>' + esc(url.replace(/^https?:\/\//, "")) + '</span></a>').join("") + '</div>' : '<div class="notice">No se añadieron redes; el análisis usa solo los archivos.</div>',
+    '<details class="context-editor"><summary>Añadir o corregir perfiles</summary><label class="field"><span>Una URL por línea</span><textarea id="connected-socials" rows="4">', esc(social.join("\n")), '</textarea></label>',
+    '<button class="ghost-button" id="save-social-context">Guardar y reanalizar</button></details>',
+    '<div class="button-row campaign-route-actions"><button class="button" id="open-brief"', state.campaignIntelligence ? "" : " disabled", '>Revisar brief</button>',
+    '<button class="ghost-button" id="open-templates"', state.templateCandidates.length ? "" : " disabled", '>Ver propuestas</button></div></section></div>',
+  ].join("");
+}
+
+async function analyzeCurrentCampaign(): Promise<void> {
+  if (!state.activeClientId || !state.campaignWorkspace) return;
+  busy("Entendiendo la campaña", "Clasificando estrategia, artes, recursos y referencias…", 58);
+  try {
+    const result = await generateCampaignBrief(state.activeClientId, state.campaignWorkspace.campaign_id);
+    if (!result) throw new Error("Este servidor aún no tiene habilitado el análisis integral de campaña.");
+    state.campaignIntelligence = result.brief;
+    state.templateCandidates = result.template_candidates;
+    state.campaignBrief.objective = result.brief.objective || state.campaignBrief.objective;
+    state.campaignBrief.notes = result.brief.summary || state.campaignBrief.notes;
+    state.campaignBrief.styleGuide = result.brief.visual_rules.join("\n");
+    saveSession();
+    result.warnings.forEach((warning) => toast(warning, "info"));
+    toast("Brief listo y " + String(result.template_candidates.length) + " plantillas propuestas.", "success");
+    await navigate("layers");
+  } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+}
+
+function bindActiveCampaign(): void {
+  query("#open-brief")?.addEventListener("click", () => navigate("layers"));
+  query("#open-templates")?.addEventListener("click", () => navigate("products"));
+  query("#reanalyze-campaign")?.addEventListener("click", () => void analyzeCurrentCampaign());
+  query("#save-social-context")?.addEventListener("click", async () => {
+    if (!state.activeClientId || !state.campaignWorkspace) return;
+    const urls = parseSocialUrls(query<HTMLTextAreaElement>("#connected-socials")?.value || "");
+    busy("Actualizando referencias", "Guardando los perfiles del cliente…", 25);
+    try {
+      state.campaignWorkspace = await updateCampaignContext(
+        state.activeClientId,
+        state.campaignWorkspace.campaign_id,
+        { social_urls: urls },
+      );
+      state.campaignBrief.referenceUrls = urls;
+      state.campaignBrief.referenceUrl = urls[0] || "";
+      state.campaignIntelligence = null;
+      state.templateCandidates = [];
+      saveSession();
+      idle();
+      await analyzeCurrentCampaign();
+    } catch (error) {
+      toast(errorMessage(error), "error");
+      idle();
+    }
+  });
+  query<HTMLInputElement>("#add-source-files")?.addEventListener("change", async (event) => {
+    const files = Array.from((event.currentTarget as HTMLInputElement).files || []);
+    if (!files.length || !state.activeClientId || !state.campaignWorkspace) return;
+    busy("Añadiendo material", "Guardando nuevas fuentes de conocimiento…", 10);
+    try {
+      const result = await uploadCampaignSources(
+        state.activeClientId, state.campaignWorkspace.campaign_id, files,
+        (sent, total) => busyProgress(total ? 10 + Math.round(sent / total * 70) : 30, "Subiendo material…"),
+        () => busyProgress(84, "Clasificando los archivos…"),
+      );
+      if (!result) throw new Error("Este servidor aún no admite añadir fuentes a la campaña.");
+      const byId = new Map(state.campaignSources.map((source) => [source.source_id, source]));
+      result.sources.forEach((source) => byId.set(source.source_id, source));
+      state.campaignSources = [...byId.values()];
+      state.campaignIntelligence = null;
+      state.templateCandidates = [];
+      saveSession();
+      toast("Material añadido. Vuelve a analizar para actualizar el brief.", "success");
+      await renderCampaign();
     } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
   });
 }
@@ -1082,7 +1329,7 @@ function bindProjectCards(): void {
   });
 }
 
-const ARTWORK_EXTENSIONS = /\.(psd|psb|pdf|pptx|png|jpe?g|webp|tiff?|avif)$/i;
+const ARTWORK_EXTENSIONS = /\.(psd|psb|pdf|pptx|docx|xlsx|csv|tsv|txt|rtf|md|png|jpe?g|webp|tiff?|avif|ttf|otf)$/i;
 
 /** Tamaño legible. En MB con un decimal un PNG de 40 KB sale como "0.0 MB",
  *  que es peor que no poner nada: parece que el archivo está vacío. */
@@ -1101,14 +1348,16 @@ function readableSize(bytes: number): string {
  * que verse elegido. */
 function queueCard(file: File, index: number): string {
   const isLayered = /\.(psd|psb)$/i.test(file.name);
-  const media = isLayered
-    ? '<div class="queue-badge">' + (/\.psb$/i.test(file.name) ? "PSB" : "PSD") + "</div>"
-    : '<img src="' + attr(productUrl(file)) + '" alt="">';
+  const isImage = /\.(png|jpe?g|webp|tiff?|avif|svg)$/i.test(file.name);
+  const extension = (file.name.split(".").pop() || "FILE").toUpperCase();
+  const media = isImage
+    ? '<img src="' + attr(productUrl(file)) + '" alt="">'
+    : '<div class="queue-badge">' + esc(extension) + "</div>";
   return [
     '<article class="queue-card">', media,
     '<div class="queue-meta"><strong>', esc(file.name), "</strong><span>",
     readableSize(file.size),
-    isLayered ? " · conserva sus capas reales" : " · separación asistida",
+    isLayered ? " · capas editables" : isImage ? " · referencia visual" : " · fuente de contexto",
     "</span></div>",
     '<button type="button" class="queue-drop" data-index="', String(index),
     '" title="Quitar de la cola" aria-label="Quitar ', attr(file.name), '">×</button>',
@@ -1129,25 +1378,20 @@ function bindUpload(): void {
 
   const renderQueue = (): void => {
     const total = queuedFiles.reduce((sum, file) => sum + file.size, 0);
-    button.disabled = queuedFiles.length === 0;
-    button.textContent = queuedFiles.length
-      ? "Crear campaña con " + String(queuedFiles.length) + " KV"
-      : "Crear campaña";
-    // Con archivos ya en cola la zona de arrastre se queda en un «+»: sigue
-    // siendo un sitio donde soltar —por eso conserva área y borde de puntos, y
-    // no es un botón redondo—, pero deja de explicar lo que ya se explicó y el
-    // espacio se lo quedan los archivos elegidos, que es lo que hay que ver.
+    const campaignName = query<HTMLInputElement>("#campaign-name")?.value.trim() || "";
+    button.disabled = queuedFiles.length === 0 || !state.activeClientId || !campaignName;
+    button.innerHTML = queuedFiles.length
+      ? "Analizar " + String(queuedFiles.length) + (queuedFiles.length === 1 ? " fuente" : " fuentes") + " con IA <span>→</span>"
+      : "Analizar campaña con IA <span>→</span>";
     const conCola = queuedFiles.length > 0;
     zone.classList.toggle("slim", conCola);
     icon.textContent = conCola ? "+" : "⇧";
-    // El «+» solo no dice nada a un lector de pantalla, y el texto visible ya
-    // no está: el nombre accesible pasa a la etiqueta.
-    zone.setAttribute("aria-label", conCola ? "Añadir más KV" : "");
-    zone.title = conCola ? "Añadir más KV" : "";
-    title.textContent = conCola ? "Añadir más KV" : "Arrastra tus KV aquí";
+    zone.setAttribute("aria-label", conCola ? "Añadir más material" : "");
+    zone.title = conCola ? "Añadir más material" : "";
+    title.textContent = conCola ? "Añadir más material" : "Arrastra todo el material aquí";
     hint.textContent = conCola
       ? ""
-      : "PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF · puedes elegir varios";
+      : "Documentos, presentaciones, PSD, imágenes, logos, textos y tipografías";
     summary.hidden = queuedFiles.length === 0;
     summary.innerHTML = queuedFiles.length
       ? "<strong>" + String(queuedFiles.length) + (queuedFiles.length === 1 ? " archivo" : " archivos") +
@@ -1171,7 +1415,7 @@ function bindUpload(): void {
     if (rejected.length) {
       toast(
         "No se admite " + rejected.map((file) => file.name).join(", ") +
-        ". Formatos válidos: PSD, PSB, PNG, JPG, WEBP, TIFF o AVIF.",
+        ". Usa documentos, presentaciones, PSD, imágenes, textos o tipografías estándar.",
         "error",
       );
     }
@@ -1186,6 +1430,8 @@ function bindUpload(): void {
     enqueue(Array.from(input.files || []));
     input.value = "";
   });
+  query<HTMLInputElement>("#campaign-name")?.addEventListener("input", renderQueue);
+  button.addEventListener("sync", renderQueue);
 
   // El input transparente cubre toda la zona, así que el navegador ya acepta el
   // archivo soltado. Lo que faltaba era que se viera: sin esto, arrastrar sobre
@@ -1210,92 +1456,66 @@ function bindUpload(): void {
 
   button.addEventListener("click", async () => {
     const files = queuedFiles;
-    if (!files.length) return;
-    // El briefing no es decorativo: se conserva antes de empezar una subida
-    // larga para que el PSD, referencias y producción sigan siendo un conjunto.
+    if (!files.length || !state.activeClientId) return;
     const field = (id: string) => query<HTMLInputElement | HTMLTextAreaElement>(id)?.value.trim() || "";
+    const socialUrls = socialUrlsFromField();
+    const client = state.clients.find((item) => item.client_id === state.activeClientId);
     state.campaignBrief = {
       ...state.campaignBrief,
       name: field("#campaign-name") || state.campaignBrief.name,
-      client: field("#campaign-client") || state.campaignBrief.client,
+      client: client?.name || state.campaignBrief.client,
       objective: field("#campaign-objective") || state.campaignBrief.objective,
-      notes: field("#campaign-notes") || state.campaignBrief.notes,
-      referenceUrl: field("#campaign-reference") || state.campaignBrief.referenceUrl,
+      referenceUrl: socialUrls[0] || "",
+      referenceUrls: socialUrls,
     };
     saveSession();
-    const logo = query<HTMLInputElement>("#logo-file")?.files?.[0];
-    const font = query<HTMLInputElement>("#font-file")?.files?.[0];
-    const created: Project[] = [];
-
-    // La barra se reparte por bytes, no por archivos: con un PSD de 200 MB y
-    // dos PNG de 2, contar archivos haría que se quedara clavada en el 33%
-    // durante todo lo que de verdad tarda.
-    const totalBytes = files.reduce((sum, file) => sum + file.size, 0) || 1;
-    let sentBytes = 0;
-    const barra = (extra: number) => 4 + Math.round(((sentBytes + extra) / totalBytes) * 88);
-
-    busy("Importando campaña", "Preparando la subida…", 4);
+    busy("Creando la campaña", "Preparando la biblioteca del cliente…", 4);
     try {
-      for (let index = 0; index < files.length; index += 1) {
-        const artwork = files[index];
-        const cual = files.length > 1 ? " (" + String(index + 1) + "/" + String(files.length) + ")" : "";
-        const data = new FormData();
-        data.append("artwork", artwork);
-        data.append("name", artwork.name.replace(/\.[^.]+$/, ""));
-        data.append("import_layers", "true");
-        if (logo) data.append("logo", logo);
-        if (font) data.append("font", font);
-
-        const alSubir = (sent: number) => {
-          busyProgress(
-            barra(sent),
-            "Subiendo " + artwork.name + cual + " · " + readableSize(sent) + " de " + readableSize(artwork.size),
-          );
-        };
-        const alTerminarSubida = () => {
-          busyProgress(
-            barra(artwork.size),
-            /\.(psd|psb)$/i.test(artwork.name)
-              ? "Leyendo las capas de " + artwork.name + "…"
-              : "Analizando " + artwork.name + "…",
-          );
-        };
-
-        if (/\.(pdf|pptx)$/i.test(artwork.name)) {
-          const result = await upload<Project[]>("/projects/campaign-documents", (() => { const form = new FormData(); form.append("files", artwork); return form; })(), alSubir, alTerminarSubida);
-          created.push(...result);
-        } else if (/\.(psd|psb)$/i.test(artwork.name)) {
-          const result = await upload<any>("/projects/split", data, alSubir, alTerminarSubida);
-          created.push(...result.projects);
-        } else {
-          created.push(await upload<Project>("/projects", data, alSubir, alTerminarSubida));
-        }
-        sentBytes += artwork.size;
+      const workspace = await createCampaign(state.activeClientId, {
+        name: state.campaignBrief.name,
+        objective: state.campaignBrief.objective,
+        social_urls: socialUrls,
+      });
+      if (!workspace) {
+        throw new Error("El servidor todavía no tiene el nuevo espacio de campañas. Actualiza el despliegue y vuelve a intentar.");
       }
-      state.campaign = created;
-      state.campaignIds = created.map((project) => project.project_id);
-      state.activeId = state.campaignIds[0] || null;
+      state.campaignWorkspace = workspace;
       saveSession();
-      busyProgress(96, "Preparando las vistas previas…");
-      await refreshAll();
-      // Con el PSD ya importado y las redes analizadas, la IA completa el
-      // briefing antes de que el equipo entre a corregir capas.
-      if (state.campaignBrief.referencePosts.length && !state.campaignBrief.styleGuide) {
-        try {
-          const guide = await post<any>("/references/profile-analysis", {
-            profile_url: state.campaignBrief.referenceUrl,
-            images: state.campaignBrief.referencePosts,
-          });
-          state.campaignBrief.styleGuide = guide.guide || "";
-          state.campaignBrief.notes = [state.campaignBrief.notes, state.campaignBrief.styleGuide]
-            .filter(Boolean).join("\n\nGuía visual IA:\n");
-          saveSession();
-        } catch { toast("Se importó el PSD; puedes continuar mientras la guía visual se vuelve a intentar.", "info"); }
+      const uploaded = await uploadCampaignSources(
+        state.activeClientId,
+        workspace.campaign_id,
+        files,
+        (sent, total) => busyProgress(
+          total ? 8 + Math.round(sent / total * 62) : 28,
+          total ? "Subiendo " + readableSize(sent) + " de " + readableSize(total) : "Subiendo material…",
+        ),
+        () => busyProgress(74, "Extrayendo texto, imágenes, capas y señales visuales…"),
+      );
+      if (!uploaded) {
+        throw new Error("El servidor todavía no puede guardar documentos como fuentes de campaña.");
       }
-      toast("Campaña importada correctamente.", "success");
+      state.campaignSources = uploaded.sources;
+      saveSession();
+      uploaded.warnings.forEach((warning) => toast(warning, "info"));
+      busyProgress(82, "Construyendo el brief y las plantillas sin productos…");
+      const analysis = await generateCampaignBrief(state.activeClientId, workspace.campaign_id);
+      if (!analysis) {
+        toast("El material quedó guardado, pero el análisis IA aún no está disponible en este despliegue.", "info");
+        await renderCampaign();
+        return;
+      }
+      state.campaignIntelligence = analysis.brief;
+      state.templateCandidates = analysis.template_candidates;
+      state.campaignBrief.objective = analysis.brief.objective || state.campaignBrief.objective;
+      state.campaignBrief.notes = analysis.brief.summary || state.campaignBrief.notes;
+      state.campaignBrief.styleGuide = analysis.brief.visual_rules.join("\n");
+      saveSession();
+      analysis.warnings.forEach((warning) => toast(warning, "info"));
+      toast("Campaña entendida: brief listo y " + String(analysis.template_candidates.length) + " plantillas propuestas.", "success");
       await navigate("layers");
     } catch (error) {
       toast(errorMessage(error), "error");
+      if (state.campaignWorkspace) await renderCampaign();
     } finally {
       idle();
     }
@@ -1311,8 +1531,19 @@ export async function mountApp(): Promise<void> {
     state.activeId = sessionStorage.getItem("creative-active");
     const brief = JSON.parse(sessionStorage.getItem("creative-campaign-brief") || "{}");
     if (brief && typeof brief === "object") state.campaignBrief = { ...state.campaignBrief, ...brief };
+    state.activeClientId = sessionStorage.getItem("creative-active-client") || null;
+    const workspace = JSON.parse(sessionStorage.getItem("creative-campaign-workspace") || "null");
+    if (workspace && typeof workspace === "object") state.campaignWorkspace = workspace;
+    const sources = JSON.parse(sessionStorage.getItem("creative-campaign-sources") || "[]");
+    if (Array.isArray(sources)) state.campaignSources = sources;
+    const intelligence = JSON.parse(sessionStorage.getItem("creative-campaign-intelligence") || "null");
+    if (intelligence && typeof intelligence === "object") state.campaignIntelligence = intelligence;
+    const candidates = JSON.parse(sessionStorage.getItem("creative-template-candidates") || "[]");
+    if (Array.isArray(candidates)) state.templateCandidates = candidates;
     const matrix = JSON.parse(sessionStorage.getItem("creative-production-matrix") || "[]");
     if (Array.isArray(matrix)) state.productionMatrix = matrix.filter((row) => row && typeof row === "object");
+    const batch = JSON.parse(sessionStorage.getItem("creative-production-batch") || "null");
+    if (batch && typeof batch === "object") state.productionBatch = batch;
   } catch {
     state.campaignIds = [];
     state.activeId = null;
@@ -1521,6 +1752,10 @@ function inventoryHtml(project: Project): string {
 }
 
 async function renderLayers(): Promise<void> {
+  if (state.campaignWorkspace) {
+    renderCampaignIntelligence();
+    return;
+  }
   const project = activeProject();
   if (!project) {
     content().innerHTML = emptyState("◫", "Primero abre una campaña", "Carga o abre un KV para revisar sus capas.", '<button class="button" id="go-campaign">Ir a campaña</button>');
@@ -1604,6 +1839,71 @@ async function renderLayers(): Promise<void> {
   bindStepFooter("layers");
   bindCopyEditor(project);
   bindLayerActions(project, layer, layers);
+}
+
+function briefList(items: string[], empty = "No detectado"): string {
+  return items.length
+    ? '<div class="brief-tags">' + items.map((item) => '<span>' + esc(item) + '</span>').join("") + '</div>'
+    : '<span class="muted tiny">' + esc(empty) + '</span>';
+}
+
+function renderCampaignIntelligence(): void {
+  const brief = state.campaignIntelligence;
+  if (!brief) {
+    content().innerHTML = [
+      stepBar("layers"),
+      pageHead("02 · INTELIGENCIA", "Todavía falta construir el brief", "El material ya está guardado; ejecuta el análisis para clasificarlo y proponer las plantillas."),
+      emptyState("✦", "Analiza la campaña", "La IA separará estrategia, identidad visual, recursos y restricciones.", '<button class="button" id="generate-missing-brief">Generar brief con IA</button>'),
+    ].join("");
+    bindStepBar();
+    query("#generate-missing-brief")?.addEventListener("click", () => void analyzeCurrentCampaign());
+    return;
+  }
+  const sourceRows = state.campaignSources.map((source) => [
+    '<div class="knowledge-row"><span class="source-format">', esc(sourceKindLabel(source)), '</span><div><strong>',
+    esc(source.filename), '</strong><small>', esc(source.role || source.summary || "Contexto visual y textual"), '</small></div>',
+    '<i>', source.warnings.length ? "Revisar" : "✓", '</i></div>',
+  ].join("")).join("");
+  content().innerHTML = [
+    stepBar("layers"),
+    pageHead("02 · INTELIGENCIA DE CAMPAÑA", "Este es el brief que entendió la IA", "Corrige únicamente lo necesario. Estas reglas guían las 3–5 plantillas y todas sus adaptaciones."),
+    '<div class="brief-review-layout"><section class="card elevated brief-main"><div class="card-head"><div><span class="kicker">NÚCLEO CREATIVO</span><h2>', esc(brief.concept || state.campaignBrief.name || "Concepto de campaña"), '</h2><p>', esc(brief.summary || "Brief construido desde el material disponible."), '</p></div><span class="badge green">IA · ', esc(brief.engine || "automático"), '</span></div>',
+    '<div class="form-grid"><label class="field"><span>Objetivo</span><textarea id="brief-objective" rows="3">', esc(brief.objective), '</textarea></label>',
+    '<label class="field"><span>Público</span><textarea id="brief-audience" rows="3">', esc(brief.audience), '</textarea></label></div>',
+    '<label class="field" style="margin-top:14px"><span>Mensaje principal</span><textarea id="brief-message" rows="3">', esc(brief.message), '</textarea></label>',
+    '<div class="brief-grid"><div><span class="label">Tono</span>', briefList(brief.tone), '</div><div><span class="label">Paleta</span>', briefList(brief.palette), '</div>',
+    '<div><span class="label">Tipografías</span>', briefList(brief.typography), '</div><div><span class="label">Tratamiento de producto</span>', briefList(brief.product_treatment), '</div></div>',
+    '<div class="button-row" style="margin-top:20px"><button class="button" id="save-intelligence">Guardar correcciones</button><button class="ghost-button" id="rerun-intelligence">Reanalizar todo</button></div></section>',
+    '<aside class="brief-side"><section class="card"><div class="card-head"><div><h2>Reglas visuales</h2><p>Lo que debe respetar cualquier formato.</p></div></div>', briefList(brief.visual_rules), '</section>',
+    '<section class="card"><div class="card-head"><div><h2>Contenido dinámico</h2><p>Aparece solo cuando el brief o la matriz lo requiere.</p></div></div><span class="label">Obligatorio</span>', briefList(brief.required_elements, "Nada marcado como obligatorio"), '<span class="label brief-subhead">Opcional</span>', briefList(brief.optional_elements, "La IA decidirá por plantilla"), '</section></aside></div>',
+    '<div class="spacer"></div><section class="card"><div class="card-head"><div><h2>Qué extrajo de cada archivo</h2><p>Las páginas se analizan dentro de su documento; no aparecen como KV separados.</p></div><span class="badge">', String(state.campaignSources.length), ' FUENTES</span></div><div class="knowledge-list">', sourceRows, '</div></section>',
+    brief.warnings.length ? '<div class="notice warning" style="margin-top:16px"><strong>Revisión recomendada:</strong> ' + esc(brief.warnings.join(" · ")) + '</div>' : '',
+    stepFooter("layers", "Revisar 3–5 plantillas"),
+  ].join("");
+  bindStepBar();
+  bindStepFooter("layers");
+  query("#rerun-intelligence")?.addEventListener("click", () => void analyzeCurrentCampaign());
+  query("#save-intelligence")?.addEventListener("click", async () => {
+    if (!state.campaignIntelligence || !state.activeClientId || !state.campaignWorkspace) return;
+    const objective = query<HTMLTextAreaElement>("#brief-objective")?.value.trim() || "";
+    const audience = query<HTMLTextAreaElement>("#brief-audience")?.value.trim() || "";
+    const message = query<HTMLTextAreaElement>("#brief-message")?.value.trim() || "";
+    busy("Guardando el brief", "Conservando las correcciones en la memoria del cliente…", 45);
+    try {
+      state.campaignIntelligence = await reviseCampaignBrief(
+        state.activeClientId,
+        state.campaignWorkspace.campaign_id,
+        { objective, audience, primary_message: message },
+      );
+      state.campaignBrief.objective = state.campaignIntelligence.objective;
+      saveSession();
+      toast("Brief corregido y guardado permanentemente.", "success");
+    } catch (error) {
+      toast(errorMessage(error), "error");
+    } finally {
+      idle();
+    }
+  });
 }
 
 /** Barra de borrado en bloque. Aparece al marcar la primera capa.
@@ -3518,6 +3818,10 @@ function matrixProductFile(row: MatrixRow): File | undefined {
    Productos: qué se pone, si va individual o en combinación, y en qué posición.
    El paso 4 solo decide el cómo (modelo, contexto, formatos). */
 async function renderProducts(): Promise<void> {
+  if (state.campaignWorkspace) {
+    renderTemplateProposals();
+    return;
+  }
   const reference = copyReference();
   const zoneKv = zoneProject();
   if (reference) await loadTexts(reference.project_id);
@@ -3605,6 +3909,74 @@ async function renderProducts(): Promise<void> {
   bindProductZone();
   bindProductCopy();
   query("#save-template")?.addEventListener("click", () => void saveCampaignTemplate(reference));
+}
+
+function templateWireframe(candidate: TemplateCandidate): string {
+  const fields = candidate.fields.slice(0, 7);
+  const product = fields.find((field) => field.kind === "image");
+  const text = fields.filter((field) => field.kind === "text");
+  return [
+    '<div class="template-wireframe" aria-label="Estructura de ', attr(candidate.name), '">',
+    '<span class="wire-brand">MARCA</span>',
+    product ? '<span class="wire-product">PRODUCTO</span>' : '',
+    text.map((field, index) => '<span class="wire-text wire-' + String(index + 1) + '">' + esc(field.label) + '</span>').join(""),
+    '<span class="wire-safe">Área adaptable</span></div>',
+  ].join("");
+}
+
+function renderTemplateProposals(): void {
+  const candidates = state.templateCandidates;
+  if (!candidates.length) {
+    content().innerHTML = [stepBar("products"), pageHead("03 · PLANTILLAS", "Todavía no hay propuestas", "Genera primero el brief de campaña para que la IA decida qué sistemas necesita."), emptyState("◇", "Sin plantillas", "El análisis debe producir entre 3 y 5 propuestas sin productos.", '<button class="button" id="go-intelligence">Volver al brief</button>')].join("");
+    bindStepBar();
+    query("#go-intelligence")?.addEventListener("click", () => navigate("layers"));
+    return;
+  }
+  const approved = candidates.filter((item) => item.status === "approved").length;
+  const cards = candidates.map((candidate, index) => {
+    const fields = candidate.fields.map((field) => '<span class="field-pill ' + (field.required ? "required" : "") + '">' + esc(field.label) + (field.required ? " *" : "") + '</span>').join("");
+    const preview = candidate.preview_url || candidate.preview;
+    return [
+      '<article class="proposal-card ', candidate.status, '"><div class="proposal-preview">',
+      preview ? '<img src="' + attr(preview) + '" alt="Vista previa de ' + attr(candidate.name) + '" loading="lazy">' : templateWireframe(candidate),
+      '<span class="proposal-index">', String(index + 1).padStart(2, "0"), '</span><span class="proposal-status">',
+      candidate.status === "approved" ? "✓ Aprobada" : candidate.status === "rejected" ? "Descartada" : "Propuesta", '</span></div>',
+      '<div class="proposal-body"><span class="kicker">', esc(candidate.category || "Plantilla estática"), '</span><h2>', esc(candidate.name), '</h2><p>', esc(candidate.description), '</p>',
+      candidate.rationale ? '<div class="proposal-reason"><strong>Por qué funciona</strong><span>' + esc(candidate.rationale) + '</span></div>' : '',
+      '<div class="proposal-meta"><span>', String(candidate.supported_product_count?.min || 1), '–', String(candidate.supported_product_count?.max || 1), ' productos</span><span>Todos los formatos</span></div>',
+      '<div class="field-pills">', fields || '<span class="muted tiny">Los campos se definirán al materializar la plantilla.</span>', '</div>',
+      candidate.warnings.length ? '<div class="notice warning compact">' + esc(candidate.warnings.join(" · ")) + '</div>' : '',
+      '<label class="field proposal-note"><span>Corrección para la IA · opcional</span><input data-note="', attr(candidate.candidate_id), '" value="', attr(candidate.decision_notes || ""), '" placeholder="Ej. más aire para el precio"></label>',
+      '<div class="button-row"><button class="button approve-candidate" data-id="', attr(candidate.candidate_id), '"', candidate.status === "approved" ? " disabled" : "", '>✓ Aprobar plantilla</button>',
+      '<button class="ghost-button reject-candidate" data-id="', attr(candidate.candidate_id), '"', candidate.status === "rejected" ? " disabled" : "", '>Descartar</button></div></div></article>',
+    ].join("");
+  }).join("");
+  content().innerHTML = [
+    stepBar("products"),
+    pageHead("03 · PLANTILLAS SIN PRODUCTOS", "Aprueba el sistema antes de producir", "La IA dejó espacios inteligentes para los campos del brief. Los productos reales entran después, exclusivamente desde la matriz."),
+    '<section class="approval-summary"><div><strong>', String(approved), ' de ', String(candidates.length), ' aprobadas</strong><span>Necesitas al menos una para habilitar producción.</span></div><div class="approval-legend"><span><i class="required-dot"></i> obligatorio según brief</span><span>Los campos opcionales desaparecen sin dejar huecos</span></div></section>',
+    '<div class="proposal-grid">', cards, '</div>',
+    approved ? stepFooter("products", "Abrir matriz de producción") : '<div class="notice warning" style="margin-top:18px">Revisa las propuestas y aprueba al menos una. La matriz no puede producir con plantillas sin aprobar.</div>',
+  ].join("");
+  bindStepBar();
+  if (approved) bindStepFooter("products");
+  queryAll<HTMLButtonElement>(".approve-candidate, .reject-candidate").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!state.activeClientId || !state.campaignWorkspace) return;
+      const id = button.dataset.id || "";
+      const decision = button.classList.contains("approve-candidate") ? "approve" : "reject";
+      const note = query<HTMLInputElement>('[data-note="' + CSS.escape(id) + '"]')?.value.trim() || "";
+      busy(decision === "approve" ? "Aprobando plantilla" : "Descartando propuesta", "Guardando la decisión en la memoria del cliente…", 45);
+      try {
+        const updated = await decideTemplateCandidate(state.activeClientId, state.campaignWorkspace.campaign_id, id, decision, note);
+        if (!updated) throw new Error("Este despliegue todavía no puede guardar la aprobación de plantillas.");
+        state.templateCandidates = state.templateCandidates.map((item) => item.candidate_id === id ? updated : item);
+        saveSession();
+        toast(decision === "approve" ? "Plantilla aprobada y guardada en el cliente." : "Propuesta descartada.", "success");
+        renderTemplateProposals();
+      } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+    });
+  });
 }
 
 /** La biblioteca permanente vive en el backend, no en la sesión efímera del PSD. */
@@ -3741,7 +4113,134 @@ function bindProductStep(): void {
 
 /* ---------------------------------------------------------------- paso 4
    Cómo se genera: formatos, modelo, contexto y el botón final. */
+
+function matrixFormats(row: MatrixRow): string[] {
+  const aliases: Record<string, string> = {
+    feed: "meta_feed_4_5", feed_vertical: "meta_feed_4_5",
+    post: "meta_feed_4_5", post_vertical: "meta_feed_4_5",
+    instagram_feed: "meta_instagram_feed_3_4",
+    cuadrado: "meta_feed_square", square: "meta_feed_square",
+    story: "meta_stories", stories: "meta_stories",
+    historia: "meta_stories", historias: "meta_stories",
+    reel: "meta_reels", reels: "meta_reels",
+    horizontal: "meta_feed_landscape", landscape: "meta_feed_landscape",
+  };
+  const formats = row.formats.split(/[|;]/).map((item) => item.trim()).filter(Boolean)
+    .map((item) => aliases[matrixKey(item)] || item.toLowerCase().replace(/\s+/g, ""));
+  return formats.filter((item, index) => formats.indexOf(item) === index);
+}
+
+function matrixRequestedPieces(): number {
+  const defaultFormatCount = Math.max(1, state.selectedFormats.size);
+  return state.productionMatrix.reduce(
+    (total, row) => total + (matrixFormats(row).length || defaultFormatCount) * Math.max(1, row.proposals),
+    0,
+  );
+}
+
+function matrixMatchedFiles(row: MatrixRow): File[] {
+  const targets = (row.image || row.product).split(/[|;]/).map((item) =>
+    item.trim().replace(/\.[^.]+$/, "").toLowerCase(),
+  ).filter(Boolean);
+  return state.products.filter((file) => {
+    const base = file.name.replace(/\.[^.]+$/, "").toLowerCase();
+    return targets.some((target) => target === base || base.includes(target) || target.includes(base));
+  });
+}
+
+function matrixExpectedProductCount(row: MatrixRow): number {
+  const products = row.product.split(/[|;]/).map((item) => item.trim()).filter(Boolean);
+  const images = row.image.split(/[|;]/).map((item) => item.trim()).filter(Boolean);
+  return Math.max(1, products.length, images.length);
+}
+
+function renderCampaignProduction(): void {
+  const rows = state.productionMatrix;
+  const matched = rows.filter(
+    (row) => matrixMatchedFiles(row).length >= matrixExpectedProductCount(row),
+  ).length;
+  const approved = state.templateCandidates.filter((item) => item.status === "approved");
+  const exact = matrixRequestedPieces();
+  const needsDefaultFormat = rows.some((row) => matrixFormats(row).length === 0);
+  state.autoFormats = false;
+  content().innerHTML = [
+    stepBar("generate"),
+    pageHead(
+      "04 · PRODUCCIÓN AUTOMÁTICA",
+      "La matriz decide el contenido; la IA elige la plantilla",
+      "Cada fila puede pedir su propio formato, cantidad y combinación. Los campos vacíos se completan solo si el brief lo permite; “no poner” los elimina y recompone el diseño.",
+    ),
+    '<section class="production-command"><div><span class="kicker">ORDEN DE PRODUCCIÓN</span><h2>',
+    rows.length ? String(exact) + " artes planificados" : "Sube la matriz para calcular la tanda",
+    '</h2><p>', String(approved.length), ' plantillas aprobadas disponibles para selección automática.</p></div>',
+    '<div class="production-command-stats"><span><strong>', String(rows.length), '</strong> filas</span><span><strong>',
+    String(matched), '</strong> con imagen</span><span><strong>', String(exact), '</strong> salidas</span></div></section>',
+    productionMatrixHtml(),
+    '<div class="spacer"></div>',
+    '<div class="production-format-note"><strong>Formatos por defecto</strong><span>Solo se usan cuando una fila deja “formatos” vacío. La medida escrita en la matriz siempre manda.</span></div>',
+    formatSelectorHtml(false),
+    '<div class="spacer"></div>',
+    '<section class="card production-review"><div><div class="card-head"><div><h2>Revisión antes de producir</h2>',
+    '<p>No se hace una llamada de imagen por pieza. El producto se recorta, mejora y compone localmente; el copy faltante usa como máximo una llamada de IA para toda la tanda.</p></div></div>',
+    '<label class="choice ai-copy-choice"><input id="campaign-ai-copy" type="checkbox" checked> Completar con IA titular, subtítulo o CTA cuando la celda esté vacía y la plantilla lo admita</label>',
+    '<div class="notice compact"><strong>Nunca se inventan:</strong> precio, descuento, cuota, vigencia ni legales. Si faltan, el campo desaparece.</div></div>',
+    '<button class="button large" id="run-campaign-production"',
+    !state.productionMatrixFile || !rows.length || matched < rows.length || !approved.length ||
+      (needsDefaultFormat && !state.selectedFormats.size) ? " disabled" : "",
+    '>Generar ', String(exact || 0), ' artes <span>→</span></button></section>',
+    state.productionBatch
+      ? '<div class="notice success" style="margin-top:18px"><strong>Última tanda:</strong> ' +
+        String(state.productionBatch.total_pieces) + ' artes listos. <button class="ghost-button" id="open-last-batch">Ver entregables</button></div>'
+      : '',
+  ].join("");
+  bindStepBar();
+  bindProductionMatrix();
+  bindFormatSelector();
+  query("#open-last-batch")?.addEventListener("click", () => navigate("results"));
+  query("#run-campaign-production")?.addEventListener("click", () => void runCampaignProduction());
+}
+
+async function runCampaignProduction(): Promise<void> {
+  if (!state.activeClientId || !state.campaignWorkspace || !state.productionMatrixFile) return;
+  if (state.productionMatrix.some(
+    (row) => matrixMatchedFiles(row).length < matrixExpectedProductCount(row)
+  )) {
+    toast("Falta una imagen por cada producto indicado en la matriz, incluidos los combos.", "error");
+    return;
+  }
+  const useAi = query<HTMLInputElement>("#campaign-ai-copy")?.checked !== false;
+  busy("Produciendo la campaña", "Subiendo matriz y productos…", 5);
+  try {
+    const batch = await produceCampaign(
+      state.activeClientId,
+      state.campaignWorkspace.campaign_id,
+      state.productionMatrixFile,
+      state.products,
+      Array.from(state.selectedFormats),
+      useAi,
+      (sent, total) => busyProgress(
+        total ? 5 + Math.round((sent / total) * 50) : 25,
+        total ? "Subiendo " + readableSize(sent) + " de " + readableSize(total) : "Subiendo archivos…",
+      ),
+      () => busyProgress(62, "Eligiendo plantillas y adaptando todos los formatos…"),
+    );
+    state.productionBatch = batch;
+    saveSession();
+    batch.warnings.forEach((warning) => toast(warning, "info"));
+    toast(String(batch.total_pieces) + " artes generados y empaquetados.", "success");
+    await navigate("results");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
+}
+
 async function renderGenerate(): Promise<void> {
+  if (state.campaignWorkspace) {
+    renderCampaignProduction();
+    return;
+  }
   const active = activeProject()!;
   state.generationMode = "catalog";
   content().innerHTML = [
@@ -3764,30 +4263,122 @@ async function renderGenerate(): Promise<void> {
 
 function productionMatrixHtml(): string {
   const rows = state.productionMatrix;
-  const matched = rows.filter((row) => matrixProductFile(row)).length;
-  const preview = rows.slice(0, 4).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline) + '</td><td>' + esc(row.price) + '</td><td>' + esc(row.cta) + '</td><td>' + esc(row.formats) + '</td></tr>').join("");
+  const matched = rows.filter((row) => state.campaignWorkspace
+    ? matrixMatchedFiles(row).length >= matrixExpectedProductCount(row)
+    : matrixProductFile(row)
+  ).length;
+  const preview = rows.slice(0, 6).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline || "IA / vacío") + '</td><td>' + esc(row.price || "—") + '</td><td>' + esc(row.formats || "Por defecto") + '</td><td>' + String(row.proposals) + '</td></tr>').join("");
   return [
-    '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Cada fila es un arte: imagen de producto + titular + precio + CTA + formatos.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
-    '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,text/csv"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV</strong><span>producto, imagen, titular, precio, cta, formatos</span></label>',
+    '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Una fila puede pedir uno o varios productos, formatos y propuestas. “No poner” elimina ese campo.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
+    '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV o TSV</strong><span>producto, imagen, titular, precio, CTA, formatos, propuestas</span></label>',
     '<label class="dropzone compact"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"><span class="drop-icon">⇧</span><strong>2. Subir imágenes de producto</strong><span>Se cruzan con “imagen” o “producto” de cada fila</span></label></div>',
-    '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' imágenes vinculadas</span><small>La generación toma los datos de cada fila y su imagen correspondiente.</small></div>',
-    rows.length ? '<div class="inventory matrix-preview"><table><thead><tr><th>Producto</th><th>Imagen</th><th>Titular</th><th>Precio</th><th>CTA</th><th>Formatos</th></tr></thead><tbody>' + preview + '</tbody></table></div><div class="button-row" style="margin-top:12px"><button class="ghost-button" id="clear-production-matrix">Quitar matriz</button><span class="muted tiny">La matriz alimenta directamente el copy de las artes.</span></div>' : '',
+    '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' imágenes vinculadas</span><small>',
+    state.productionMatrixFile ? esc(state.productionMatrixFile.name) : "Todavía no has subido la matriz.", '</small></div>',
+    rows.length ? '<div class="inventory matrix-preview"><table><thead><tr><th>Producto</th><th>Imagen</th><th>Titular</th><th>Precio</th><th>Formatos</th><th>Propuestas</th></tr></thead><tbody>' + preview + '</tbody></table></div><div class="button-row" style="margin-top:12px"><button class="ghost-button" id="clear-production-matrix">Quitar matriz</button><span class="muted tiny">Vacío = la IA puede completar si corresponde · “no poner” = se omite.</span></div>' : '',
     '</section>',
   ].join("");
+}
+
+const MATRIX_ALIASES: Record<string, keyof MatrixRow> = {
+  producto: "product", product: "product", sku: "product", nombre: "product", nombre_producto: "product",
+  imagen: "image", image: "image", foto: "image", archivo: "image", file: "image", product_image: "image",
+  titular: "headline", headline: "headline", copy: "headline", titulo: "headline",
+  subtitulo: "subtitle", subtitle: "subtitle", subheadline: "subtitle", bajada: "subtitle",
+  precio: "price", precio_actual: "price", precio_oferta: "price", price: "price", current_price: "price",
+  precio_anterior: "previousPrice", old_price: "previousPrice", previous_price: "previousPrice",
+  cuota: "installment", cuotas: "installment", installment: "installment", installments: "installment",
+  descuento: "discount", discount: "discount", ahorro: "discount",
+  cta: "cta", llamado: "cta", llamado_a_la_accion: "cta", call_to_action: "cta",
+  legal: "legal", legales: "legal", terms: "legal", terminos: "legal", restricciones: "legal",
+  vigencia: "validity", validity: "validity", fecha: "validity", fechas: "validity",
+  formatos: "formats", formato: "formats", formats: "formats", format: "formats", tamanos: "formats", medidas: "formats",
+  propuestas: "proposals", cantidad: "proposals", cantidad_propuestas: "proposals", variantes: "proposals", variants: "proposals", proposals: "proposals", count: "proposals",
+  notas: "notes", notes: "notes", instrucciones: "notes",
+  plantilla: "template", template: "template",
+};
+
+function matrixKey(value: string): string {
+  return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function parseDelimited(text: string, delimiter: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [], cell = "", quoted = false;
+  const source = text.replace(/^\uFEFF/, "");
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === '"') {
+      if (quoted && source[index + 1] === '"') { cell += '"'; index += 1; }
+      else quoted = !quoted;
+    } else if (char === delimiter && !quoted) {
+      row.push(cell.trim()); cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && source[index + 1] === "\n") index += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = []; cell = "";
+    } else cell += char;
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  if (quoted) throw new Error("La matriz tiene una comilla abierta sin cerrar.");
+  return rows;
+}
+
+function parseProductionMatrix(raw: string): MatrixRow[] {
+  const choices = [",", "\t", ";"].map((delimiter) => {
+    const table = parseDelimited(raw, delimiter);
+    const known = (table[0] || []).filter((cell) => MATRIX_ALIASES[matrixKey(cell)]).length;
+    return { delimiter, table, known };
+  }).sort((a, b) => b.known - a.known || b.table[0]?.length - a.table[0]?.length);
+  const best = choices[0];
+  if (!best?.known) throw new Error("No reconozco las cabeceras. Incluye producto, imagen, formatos o precio.");
+  const header = best.table[0].map((cell) => MATRIX_ALIASES[matrixKey(cell)] || null);
+  const suppress = new Set(["no_poner", "no_mostrar", "no_usar", "omitir", "suprimir", "sin_contenido"]);
+  const rows: MatrixRow[] = [];
+  best.table.slice(1).forEach((cells, offset) => {
+    const data: MatrixRow = {
+      product: "", image: "", headline: "", subtitle: "", price: "", previousPrice: "",
+      installment: "", discount: "", cta: "", legal: "", validity: "", formats: "",
+      proposals: 1, notes: "", template: "", omit: [],
+    };
+    header.forEach((field, index) => {
+      if (!field) return;
+      const value = (cells[index] || "").trim();
+      if (field === "proposals") {
+        const amount = value ? Number(value) : 1;
+        if (!Number.isInteger(amount) || amount < 1 || amount > 6) {
+          throw new Error("Fila " + String(offset + 2) + ": propuestas debe estar entre 1 y 6.");
+        }
+        data.proposals = amount;
+      } else if (suppress.has(matrixKey(value))) {
+        data.omit.push(String(field));
+        (data as any)[field] = "";
+      } else {
+        (data as any)[field] = value;
+      }
+    });
+    if (Object.entries(data).some(([key, value]) => key !== "proposals" && key !== "omit" && Boolean(value)) || data.omit.length) rows.push(data);
+  });
+  return rows;
 }
 
 function bindProductionMatrix(): void {
   query<HTMLInputElement>("#production-matrix")?.addEventListener("change", async (event) => {
     const file = (event.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
-    const raw = await file.text();
-    const lines = raw.replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim());
-    const split = (line: string) => line.split(line.includes("\t") ? "\t" : ",").map((cell) => cell.trim().replace(/^"|"$/g, ""));
-    const header = split(lines.shift() || "").map((cell) => cell.toLowerCase());
-    const at = (names: string[]) => Math.max(...names.map((name) => header.indexOf(name)));
-    const product = at(["producto", "product", "sku"]), image = at(["imagen", "image", "archivo", "file"]), headline = at(["titular", "headline", "copy"]), price = at(["precio", "price"]), cta = at(["cta", "llamado"]), formats = at(["formatos", "formats", "formato"]);
-    state.productionMatrix = lines.map(split).map((cells) => ({ product: cells[product] || "", image: cells[image] || "", headline: cells[headline] || "", price: cells[price] || "", cta: cells[cta] || "", formats: cells[formats] || "" })).filter((row) => Object.values(row).some(Boolean));
-    saveSession(); toast(String(state.productionMatrix.length) + " filas importadas en la matriz.", "success"); await renderGenerate();
+    try {
+      state.productionMatrix = parseProductionMatrix(await file.text());
+      state.productionMatrixFile = file;
+      saveSession();
+      toast(String(state.productionMatrix.length) + " filas importadas en la matriz.", "success");
+      await renderGenerate();
+    } catch (error) {
+      state.productionMatrix = [];
+      state.productionMatrixFile = null;
+      toast(errorMessage(error), "error");
+    }
   });
   query<HTMLInputElement>("#matrix-product-files")?.addEventListener("change", async (event) => {
     const files = Array.from((event.currentTarget as HTMLInputElement).files || []).filter((file) => /\.(png|jpe?g|webp|tiff?|avif)$/i.test(file.name));
@@ -3795,7 +4386,12 @@ function bindProductionMatrix(): void {
     for (const file of files) if (state.productionMatrix.some((row) => matrixFileMatches(row, file))) state.individualProducts.add(productKey(file));
     saveSession(); toast(String(files.length) + " imágenes añadidas a la tanda.", "success"); await renderGenerate();
   });
-  query("#clear-production-matrix")?.addEventListener("click", async () => { state.productionMatrix = []; saveSession(); await renderGenerate(); });
+  query("#clear-production-matrix")?.addEventListener("click", async () => {
+    state.productionMatrix = [];
+    state.productionMatrixFile = null;
+    saveSession();
+    await renderGenerate();
+  });
 }
 
 /** El nombre del motor tal como se lee en pantalla. */
@@ -3957,23 +4553,6 @@ function refreshGenerationTotals(): void {
   if (node) node.innerHTML = generationTotalsText();
 }
 
-function permissionsHtml(project: Project): string {
-  const layers = project.layers.filter((layer) => layer.category !== "background");
-  const rows = layers.map((layer) => [
-    '<tr><td><strong>', esc(layer.name), '</strong><br><span class="muted">', esc(CATEGORY_LABELS[layer.category] || layer.category), "</span></td>",
-    permissionCell("lock", layer, layer.locked), permissionCell("move", layer, layer.movable), permissionCell("resize", layer, layer.resizable),
-    permissionCell("reorder", layer, layer.reorderable), permissionCell("hide", layer, !layer.visible), "</tr>",
-  ].join("")).join("");
-  return [
-    '<section class="card"><div class="card-head"><div><h2>Permisos por capa</h2><p>Define exactamente qué puede cambiar el compositor</p></div></div>',
-    '<div class="inventory"><table><thead><tr><th>Capa</th><th>Bloqueada</th><th>Mover</th><th>Escalar</th><th>Reordenar</th><th>Ocultar</th></tr></thead><tbody>', rows, "</tbody></table></div></section>",
-  ].join("");
-}
-
-function permissionCell(kind: string, layer: Layer, value: boolean): string {
-  return '<td><input class="permission-' + attr(kind) + '" data-layer="' + attr(layer.id) + '" type="checkbox"' + checked(value) + "></td>";
-}
-
 function bindFormatSelector(): void {
   query<HTMLInputElement>("#auto-formats")?.addEventListener("change", (event) => {
     state.autoFormats = (event.currentTarget as HTMLInputElement).checked;
@@ -3984,7 +4563,7 @@ function bindFormatSelector(): void {
     button.addEventListener("click", async () => {
       state.formatPlatform = button.dataset.platform || "Todos";
       const section = button.closest("section");
-      if (section) section.outerHTML = formatSelectorHtml(true);
+      if (section) section.outerHTML = formatSelectorHtml(!state.campaignWorkspace);
       bindFormatSelector();
     });
   });
@@ -3994,7 +4573,8 @@ function bindFormatSelector(): void {
       else state.selectedFormats.delete(checkBox.value);
       const badge = query<HTMLElement>(".card .badge");
       if (badge && badge.textContent?.includes("ELEGIDOS")) badge.textContent = String(state.selectedFormats.size) + " ELEGIDOS";
-      refreshGenerationTotals();
+      if (state.campaignWorkspace) void renderGenerate();
+      else refreshGenerationTotals();
     });
   });
 }
@@ -4300,6 +4880,10 @@ function resultCard(project: Project, variant: Variant): string {
 }
 
 async function renderResults(): Promise<void> {
+  if (state.campaignWorkspace) {
+    await renderCampaignResults();
+    return;
+  }
   if (!state.campaign.length) {
     content().innerHTML = emptyState("▦", "No hay resultados", "Abre una campaña y genera sus primeras propuestas.", '<button class="button" id="go-generate">Ir a generar</button>');
     query("#go-generate")?.addEventListener("click", () => navigate("generate"));
@@ -4375,6 +4959,56 @@ async function renderResults(): Promise<void> {
   ].join("");
   bindStepBar();
   bindResults();
+}
+
+async function renderCampaignResults(): Promise<void> {
+  if (!state.activeClientId || !state.campaignWorkspace) return;
+  const batches = await listProductionBatches(
+    state.activeClientId,
+    state.campaignWorkspace.campaign_id,
+  ).catch(() => []);
+  if (batches.length) state.productionBatch = batches[0];
+  const batch = state.productionBatch;
+  if (!batch?.pieces.length) {
+    content().innerHTML = [
+      stepBar("results"),
+      pageHead("05 · ENTREGABLES", "Todavía no hay artes", "Carga una matriz y produce la primera tanda desde las plantillas aprobadas."),
+      emptyState("▦", "La galería está vacía", "Los productos entran en este paso, nunca dentro de la plantilla.", '<button class="button" id="go-generate">Ir a producción</button>'),
+    ].join("");
+    bindStepBar();
+    query("#go-generate")?.addEventListener("click", () => navigate("generate"));
+    return;
+  }
+  const cards = batch.pieces.map((piece) => [
+    '<article class="result-card campaign-result"><a class="result-image" href="', attr(piece.png_url || piece.preview_url), '" target="_blank" rel="noreferrer">',
+    '<img src="', attr(piece.preview_url), '" alt="', attr(piece.product + " · " + piece.format), '" loading="lazy" decoding="async"></a>',
+    '<div class="result-info"><span class="kicker">FILA ', String(piece.row_number), ' · PROPUESTA ', String(piece.proposal), '</span>',
+    '<h3>', esc(piece.product || "Arte sin nombre"), '</h3><p>', esc(piece.template_name), ' · ',
+    String(piece.width), '×', String(piece.height), ' · ', esc(piece.format), '</p>',
+    piece.warnings.length ? '<div class="notice warning compact">' + esc(piece.warnings.join(" · ")) + '</div>' : '',
+    '<div class="button-row"><a class="ghost-button" href="', attr(piece.png_url), '" download>PNG</a>',
+    '<a class="ghost-button" href="', attr(piece.jpg_url), '" download>JPG</a>',
+    '<a class="ghost-button" href="', attr(piece.psd_url), '" download>PSD por capas</a></div></div></article>',
+  ].join("")).join("");
+  content().innerHTML = [
+    stepBar("results"),
+    pageHead(
+      "05 · ENTREGABLES",
+      String(batch.total_pieces) + " artes listos para revisar",
+      "Cada salida conserva producto, plantilla, formato y propuesta. Descarga piezas sueltas o el paquete completo con CSV de estado.",
+      '<a class="button large" href="' + attr(batch.zip_url) + '" download>Descargar todo · ZIP</a>',
+    ),
+    '<div class="stat-row"><div class="stat"><strong>', String(batch.total_rows), '</strong><span>Filas de matriz</span></div>',
+    '<div class="stat"><strong>', String(batch.total_pieces), '</strong><span>Artes generados</span></div>',
+    '<div class="stat"><strong>', String(new Set(batch.pieces.map((item) => item.template_name)).size), '</strong><span>Plantillas elegidas</span></div>',
+    '<div class="stat"><strong>', String(new Set(batch.pieces.map((item) => item.format)).size), '</strong><span>Formatos</span></div></div>',
+    batch.warnings.length ? '<div class="notice warning" style="margin-top:16px">' + esc(batch.warnings.join(" · ")) + '</div>' : '',
+    '<div class="button-row" style="margin-top:18px"><a class="ghost-button" href="', attr(batch.manifest_url), '" download>CSV de estado</a>',
+    '<button class="ghost-button" id="new-production">Nueva tanda</button></div>',
+    '<div class="result-grid campaign-result-grid" style="margin-top:22px">', cards, '</div>',
+  ].join("");
+  bindStepBar();
+  query("#new-production")?.addEventListener("click", () => navigate("generate"));
 }
 
 /* ------------------------------------------------------------------ visor

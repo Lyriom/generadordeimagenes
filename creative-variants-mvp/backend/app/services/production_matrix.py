@@ -1,0 +1,416 @@
+"""Lectura y normalización de la matriz de producción.
+
+La hoja que entrega el cliente es una *orden de producción*, no una tabla
+interna del renderer. Por eso este módulo acepta cabeceras habituales en
+español/inglés y conserva una distinción importante:
+
+* una celda vacía permite que el brief/IA complete el campo;
+* ``no poner`` u ``omitir`` prohíbe que ese campo aparezca.
+
+Mantener esta lógica fuera del navegador evita que un CSV produzca una tanda
+distinta según quién lo abra y permite validarlo antes de gastar en imágenes.
+"""
+from __future__ import annotations
+
+import csv
+import io
+import re
+import unicodedata
+from collections.abc import Iterable, Mapping, Sequence
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+class MatrixParseError(ValueError):
+    """La matriz no se puede interpretar sin adivinar silenciosamente."""
+
+
+class MatrixRow(BaseModel):
+    """Una solicitud de arte normalizada, lista para planificar la tanda."""
+
+    row_number: int = Field(ge=2)
+    producto: str = ""
+    imagen: str | None = None
+    titular: str | None = None
+    subtitulo: str | None = None
+    precio_anterior: str | None = None
+    precio_actual: str | None = None
+    cuota: str | None = None
+    descuento: str | None = None
+    cta: str | None = None
+    legal: str | None = None
+    vigencia: str | None = None
+    formatos: list[str] = Field(default_factory=list)
+    cantidad_propuestas: int = Field(default=1, ge=1, le=6)
+    plantilla: str | None = None
+    # Campos que el usuario pidió excluir de forma explícita. Una lista (y no
+    # un set) mantiene JSON estable y facilita mostrarla en la revisión.
+    suppressed_fields: list[str] = Field(default_factory=list)
+
+
+def _key(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value or "")
+    value = "".join(ch for ch in value if not unicodedata.combining(ch))
+    return re.sub(r"[^a-z0-9]+", "_", value.casefold()).strip("_")
+
+
+ALIASES: dict[str, set[str]] = {
+    "producto": {"producto", "product", "nombre_producto", "nombre", "sku"},
+    "imagen": {"imagen", "image", "foto", "archivo", "file", "product_image"},
+    "titular": {"titular", "headline", "copy", "titulo"},
+    "subtitulo": {"subtitulo", "subtitle", "subheadline", "bajada"},
+    "precio_anterior": {
+        "precio_anterior",
+        "old_price",
+        "previous_price",
+        "precio_antes",
+        "pvp",
+    },
+    "precio_actual": {
+        "precio_actual",
+        "precio",
+        "price",
+        "current_price",
+        "precio_oferta",
+    },
+    "cuota": {"cuota", "cuotas", "installment", "installments"},
+    "descuento": {"descuento", "discount", "ahorro"},
+    "cta": {"cta", "llamado", "llamado_a_la_accion", "call_to_action"},
+    "legal": {"legal", "legales", "terminos", "terms"},
+    "vigencia": {"vigencia", "validity", "fecha", "fechas"},
+    "formatos": {"formatos", "formato", "formats", "format", "tamanos", "medidas"},
+    "cantidad_propuestas": {
+        "cantidad_propuestas",
+        "propuestas",
+        "cantidad",
+        "variantes",
+        "variants",
+        "proposals",
+        "count",
+    },
+    "plantilla": {"plantilla", "template"},
+}
+
+ALIAS_TO_FIELD = {
+    alias: field
+    for field, aliases in ALIASES.items()
+    for alias in aliases
+}
+
+SUPPRESS_TOKENS = {
+    "no_poner",
+    "no_mostrar",
+    "no_usar",
+    "omitir",
+    "suprimir",
+    "sin_contenido",
+}
+
+OPTIONAL_TEXT_FIELDS = (
+    "imagen",
+    "titular",
+    "subtitulo",
+    "precio_anterior",
+    "precio_actual",
+    "cuota",
+    "descuento",
+    "cta",
+    "legal",
+    "vigencia",
+    "plantilla",
+)
+
+
+def _decode(payload: bytes | str) -> str:
+    if isinstance(payload, str):
+        return payload.lstrip("\ufeff")
+    encodings = ("utf-16", "utf-8-sig", "cp1252") if payload.startswith((b"\xff\xfe", b"\xfe\xff")) else ("utf-8-sig", "cp1252")
+    for encoding in encodings:
+        try:
+            return payload.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise MatrixParseError("La matriz no usa una codificación de texto compatible.")
+
+
+def _header_score(text: str, delimiter: str) -> tuple[int, int, int]:
+    try:
+        rows = list(csv.reader(io.StringIO(text), delimiter=delimiter))[:6]
+    except csv.Error:
+        return (-1, -1, -1)
+    if not rows:
+        return (-1, -1, -1)
+    known = sum(1 for cell in rows[0] if _key(cell) in ALIAS_TO_FIELD)
+    width = len(rows[0])
+    consistent = sum(1 for row in rows[1:] if len(row) == width)
+    return known, consistent, width
+
+
+def _delimiter(text: str) -> str:
+    """Elige por cabeceras conocidas, no por signos dentro del contenido.
+
+    ``csv.Sniffer`` suele confundir el ``;`` de ``feed;story`` con el
+    delimitador de la hoja. Las cabeceras del contrato ofrecen una señal mucho
+    más fuerte y determinista.
+    """
+
+    candidates = (",", "\t", ";")
+    scores = {candidate: _header_score(text, candidate) for candidate in candidates}
+    best = max(candidates, key=lambda candidate: scores[candidate])
+    if scores[best][0] <= 0:
+        raise MatrixParseError(
+            "No se reconocen las cabeceras de la matriz. Incluye al menos "
+            "producto, imagen, titular, precio, formatos o cantidad_propuestas."
+        )
+    return best
+
+
+def _columns(header: Sequence[str]) -> dict[str, int]:
+    columns: dict[str, int] = {}
+    for index, raw in enumerate(header):
+        canonical = ALIAS_TO_FIELD.get(_key(raw))
+        if canonical is None:
+            continue
+        if canonical in columns:
+            raise MatrixParseError(f"La columna «{canonical}» aparece más de una vez.")
+        columns[canonical] = index
+    return columns
+
+
+def _cell(cells: Sequence[str], index: int | None) -> str:
+    if index is None or index >= len(cells):
+        return ""
+    return cells[index].strip()
+
+
+def _optional(value: str, field: str, suppressed: list[str]) -> str | None:
+    if not value:
+        return None
+    if _key(value) in SUPPRESS_TOKENS:
+        suppressed.append(field)
+        return None
+    return value
+
+
+def _formats(value: str, row_number: int) -> list[str]:
+    if not value:
+        return []
+    result: list[str] = []
+    seen: set[str] = set()
+    for raw in re.split(r"[|;]", value):
+        item = raw.strip()
+        if not item:
+            continue
+        marker = item.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(item)
+    if not result and value.strip():
+        raise MatrixParseError(f"Fila {row_number}: formatos no contiene ninguna medida válida.")
+    return result
+
+
+def _quantity(value: str, row_number: int) -> int:
+    if not value:
+        return 1
+    try:
+        quantity = int(value)
+    except ValueError as exc:
+        raise MatrixParseError(
+            f"Fila {row_number}: cantidad_propuestas debe ser un entero entre 1 y 6."
+        ) from exc
+    if not 1 <= quantity <= 6:
+        raise MatrixParseError(
+            f"Fila {row_number}: cantidad_propuestas debe estar entre 1 y 6."
+        )
+    return quantity
+
+
+def parse_csv(payload: bytes | str) -> list[MatrixRow]:
+    """Convierte CSV/TSV en filas canónicas sin completar contenido faltante."""
+
+    text = _decode(payload)
+    if not text.strip():
+        return []
+    delimiter = _delimiter(text)
+    try:
+        reader = csv.reader(io.StringIO(text), delimiter=delimiter)
+        header = next(reader, [])
+        columns = _columns(header)
+        result: list[MatrixRow] = []
+        for row_number, cells in enumerate(reader, start=2):
+            if not any(cell.strip() for cell in cells):
+                continue
+            suppressed: list[str] = []
+            optional = {
+                field: _optional(_cell(cells, columns.get(field)), field, suppressed)
+                for field in OPTIONAL_TEXT_FIELDS
+            }
+            producto = _cell(cells, columns.get("producto"))
+            if _key(producto) in SUPPRESS_TOKENS:
+                producto = ""
+                suppressed.append("producto")
+            row = MatrixRow(
+                row_number=row_number,
+                producto=producto,
+                **optional,
+                formatos=_formats(_cell(cells, columns.get("formatos")), row_number),
+                cantidad_propuestas=_quantity(
+                    _cell(cells, columns.get("cantidad_propuestas")), row_number
+                ),
+                suppressed_fields=suppressed,
+            )
+            # Una línea con notas en una columna desconocida no es una orden de
+            # arte. Se ignora, igual que una línea realmente vacía.
+            meaningful = row.producto or row.imagen or any(
+                getattr(row, field) is not None
+                for field in OPTIONAL_TEXT_FIELDS
+                if field not in {"imagen", "plantilla"}
+            )
+            if meaningful or row.formatos or row.suppressed_fields:
+                result.append(row)
+    except csv.Error as exc:
+        raise MatrixParseError(f"CSV inválido: {exc}.") from exc
+    return result
+
+
+def requested_piece_count(rows: Iterable[MatrixRow]) -> int:
+    """Total exacto: formatos por fila × propuestas pedidas por esa fila.
+
+    Una fila sin formatos todavía representa una salida en el formato que el
+    flujo elija como predeterminado.
+    """
+
+    return sum(max(1, len(row.formatos)) * row.cantidad_propuestas for row in rows)
+
+
+def _value(item: Any, key: str, default: Any = None) -> Any:
+    if isinstance(item, Mapping):
+        return item.get(key, default)
+    return getattr(item, key, default)
+
+
+def _template_slots(template: Any) -> list[Any]:
+    slots = _value(template, "slots", [])
+    return list(slots or [])
+
+
+def _slot_id(slot: Any) -> str:
+    # Las plantillas aprobadas usan ``id``; las propuestas previas a aprobación
+    # usan ``key``. El selector sirve en ambos lados de ese paso.
+    return _key(str(_value(slot, "id", _value(slot, "key", ""))))
+
+
+def product_count(row: MatrixRow) -> int:
+    # Una celda puede describir un combo como ``TV | Soundbar``. No se parte
+    # por ``+``: forma parte de muchos nombres comerciales y SKU.
+    product_parts = [
+        part.strip() for part in re.split(r"[|;]", row.producto) if part.strip()
+    ]
+    image_parts = [
+        part.strip() for part in re.split(r"[|;]", row.imagen or "") if part.strip()
+    ]
+    if not product_parts and not image_parts:
+        return 0
+    return max(1, len(product_parts), len(image_parts))
+
+
+def score_template(row: MatrixRow, template: Any) -> float:
+    """Puntúa compatibilidad entre una fila y una plantilla/candidata.
+
+    Es deliberadamente explicable: premia slots para los campos presentes,
+    penaliza campos requeridos ausentes y descarta plantillas con menos huecos
+    de producto que el combo. El selector visual/IA puede sumar señales después,
+    pero nunca debería ignorar estas restricciones estructurales.
+    """
+
+    template_name = str(_value(template, "name", _value(template, "title", "")) or "")
+    template_id = str(
+        _value(template, "template_id", _value(template, "candidate_id", "")) or ""
+    )
+    if row.plantilla:
+        forced = row.plantilla.casefold()
+        if forced not in {template_name.casefold(), template_id.casefold()}:
+            return float("-inf")
+
+    slots = _template_slots(template)
+    slot_ids = {_slot_id(slot) for slot in slots}
+    product_slots = sum(
+        1
+        for slot in slots
+        if _slot_id(slot).startswith("producto")
+        or _key(str(_value(slot, "category", ""))) == "product"
+    )
+    # Una candidata de combo suele expresar «productos» como un único slot
+    # repetible y declarar su capacidad (2–4) en el rango. Contarlo como un solo
+    # hueco hacía que el selector rechazara precisamente la plantilla de combo.
+    product_range = _value(template, "supported_product_count", {}) or {}
+    range_max = int(
+        _value(product_range, "maximum", _value(product_range, "max", product_slots))
+        or product_slots
+    )
+    if any(bool(_value(slot, "repeatable", False)) for slot in slots):
+        product_slots = max(product_slots, range_max)
+    products = product_count(row)
+    range_min = int(
+        _value(product_range, "minimum", _value(product_range, "min", 1)) or 0
+    )
+    if products < range_min or products > range_max or product_slots < products:
+        return float("-inf")
+
+    score = 20.0 if products and product_slots == products else 0.0
+    for field in (
+        "titular",
+        "subtitulo",
+        "precio_anterior",
+        "precio_actual",
+        "cuota",
+        "descuento",
+        "cta",
+        "legal",
+        "vigencia",
+    ):
+        value = getattr(row, field)
+        aliases = {field}
+        if field == "precio_actual":
+            aliases.add("precio")
+        if value is not None:
+            score += 3.0 if aliases & slot_ids else -4.0
+        elif field in row.suppressed_fields and aliases & slot_ids:
+            # No invalida: un slot opcional debe poder desaparecer, pero una
+            # plantilla que no depende de él necesita menos reflow.
+            score -= 0.25
+
+    for slot in slots:
+        slot_id = _slot_id(slot)
+        if not bool(_value(slot, "required", False)) or slot_id.startswith("producto"):
+            continue
+        row_field = "precio_actual" if slot_id == "precio" else slot_id
+        if not hasattr(row, row_field) or getattr(row, row_field) in (None, ""):
+            score -= 25.0
+    return score
+
+
+def select_template(row: MatrixRow, templates: Sequence[Any]) -> Any | None:
+    """Devuelve la plantilla compatible mejor puntuada, estable ante empates."""
+
+    if not templates:
+        return None
+    ranked = [(score_template(row, template), index, template) for index, template in enumerate(templates)]
+    compatible = [item for item in ranked if item[0] != float("-inf")]
+    if not compatible:
+        return None
+    return max(compatible, key=lambda item: (item[0], -item[1]))[2]
+
+
+__all__ = [
+    "MatrixParseError",
+    "MatrixRow",
+    "parse_csv",
+    "product_count",
+    "requested_piece_count",
+    "score_template",
+    "select_template",
+]
