@@ -187,6 +187,7 @@ def update_campaign(
         campaign_store.save_knowledge(knowledge)
     if changed_context:
         campaign.brief = None
+        campaign.brief_reviewed_at = None
         campaign.template_candidates = []
         campaign.analysis_engine = "none"
         campaign.status = "ready_for_brief"
@@ -296,6 +297,7 @@ async def upload_sources(
     if added:
         campaign.status = "ready_for_brief"
         campaign.brief = None
+        campaign.brief_reviewed_at = None
         campaign.analysis_engine = "none"
         if campaign.template_candidates:
             warnings.append(
@@ -355,6 +357,12 @@ def generate_brief(
             "La campana necesita al menos un archivo, una red social o un objetivo.",
         )
     knowledge = campaign_store.load_knowledge(client_id)
+    if not request.preserve_review:
+        campaign.brief_reviewed_at = None
+        for previous in campaign.template_candidates:
+            previous.status = "proposed"
+            previous.approved = False
+            previous.approved_at = None
     brief, candidates, engine, warnings = campaign_analysis.generate(
         campaign, brand, knowledge, use_ai=request.use_ai
     )
@@ -414,9 +422,18 @@ def revise_brief(
         overrides = {}
     overrides.update(values)
     campaign.meta["brief_overrides"] = overrides
+    campaign.brief_reviewed_at = utcnow()
+    campaign.template_candidates = []
+    campaign.status = "ready_for_brief"
     campaign_store.save_campaign(campaign)
 
     knowledge = campaign_store.load_knowledge(client_id)
+    # Una plantilla aprobada contra la versión anterior del brief deja de ser
+    # una aprobación vigente. Sus reglas aprendidas permanecen, pero la nueva
+    # candidata necesita otra revisión humana.
+    knowledge.approved_candidates = [
+        item for item in knowledge.approved_candidates if item.campaign_id != campaign_id
+    ]
     if feedback:
         learned = f"Correccion de brief en {campaign.name}: {feedback}"[:1000]
     else:
@@ -441,6 +458,11 @@ def _decide_candidate(
     approve: bool,
 ) -> CandidateDecisionResponse:
     campaign = _campaign_or_404(client_id, campaign_id)
+    if not campaign.brief_reviewed_at:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Revisa y guarda el brief antes de aprobar una plantilla.",
+        )
     candidate = next(
         (item for item in campaign.template_candidates if item.candidate_id == candidate_id), None
     )
@@ -527,12 +549,91 @@ def reject_candidate(
     )
 
 
+@router.post(
+    "/{client_id}/campaigns/{campaign_id}/template-candidates/{candidate_id}/revise",
+    response_model=GenerateBriefResponse,
+)
+def revise_candidate(
+    client_id: str,
+    campaign_id: str,
+    candidate_id: str,
+    request: CandidateDecisionRequest,
+) -> GenerateBriefResponse:
+    """Regenera propuestas usando una corrección visible antes de aprobar."""
+
+    brand = _brand_or_404(client_id)
+    campaign = _campaign_or_404(client_id, campaign_id)
+    if campaign.brief is None or not campaign.brief_reviewed_at:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Revisa y guarda el brief antes de corregir las plantillas.",
+        )
+    note = request.notes.strip()
+    if not note:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Escribe la correccion que debe aplicar la IA.",
+        )
+    current = next(
+        (item for item in campaign.template_candidates if item.candidate_id == candidate_id),
+        None,
+    )
+    if current is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa propuesta.")
+    feedback = campaign.meta.get("template_feedback", {})
+    if not isinstance(feedback, dict):
+        feedback = {}
+    feedback[current.category] = note[:1000]
+    campaign.meta["template_feedback"] = feedback
+    # La propuesta corregida y cualquier salida materialmente distinta vuelven
+    # a estado propuesto. `_finalise_candidates` solo conserva decisiones cuya
+    # firma sea exactamente igual.
+    current.status = "proposed"
+    current.approved = False
+    current.approved_at = None
+    knowledge = campaign_store.load_knowledge(client_id)
+    knowledge.approved_candidates = [
+        item
+        for item in knowledge.approved_candidates
+        if not (item.campaign_id == campaign_id and item.category == current.category)
+    ]
+    learned = f"Correccion solicitada para {current.category}: {note}"[:1000]
+    if learned not in knowledge.learned_rules:
+        knowledge.learned_rules.append(learned)
+        knowledge.learned_rules = knowledge.learned_rules[-80:]
+    campaign_store.save_knowledge(knowledge)
+
+    brief, candidates, engine, warnings = campaign_analysis.generate(
+        campaign, brand, knowledge, use_ai=True
+    )
+    campaign.brief = brief
+    campaign.template_candidates = candidates
+    try:
+        campaign_creative.render_candidate_previews(campaign, brand.name, candidates)
+    except Exception:  # noqa: BLE001
+        warnings.append("La correccion se guardo, pero no se pudieron redibujar los previews.")
+    campaign.analysis_engine = engine
+    campaign.status = "templates_proposed"
+    campaign.warnings = list(dict.fromkeys([*campaign.warnings, *warnings]))
+    campaign_store.save_campaign(campaign)
+    return GenerateBriefResponse(
+        campaign_id=campaign_id,
+        brief=brief,
+        template_candidates=candidates,
+        engine=engine,
+        warnings=warnings,
+    )
+
+
 @router.get(
     "/{client_id}/campaigns/{campaign_id}/template-candidates/{candidate_id}/preview",
     response_class=FileResponse,
 )
 def candidate_preview(
-    client_id: str, campaign_id: str, candidate_id: str
+    client_id: str,
+    campaign_id: str,
+    candidate_id: str,
+    aspect: str = "portrait",
 ) -> FileResponse:
     campaign = _campaign_or_404(client_id, campaign_id)
     candidate = next(
@@ -541,8 +642,16 @@ def candidate_preview(
     )
     if candidate is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa propuesta.")
+    sizes = {"portrait", "square", "story", "landscape"}
+    if aspect not in sizes:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "aspect debe ser portrait, square, story o landscape.",
+        )
     target = campaign_store.campaign_path(
-        client_id, campaign_id, f"analysis/templates/{candidate_id}.png"
+        client_id,
+        campaign_id,
+        f"analysis/templates/{candidate_id}-{aspect}.png",
     )
     if not target.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "La vista previa no esta disponible.")
@@ -566,8 +675,17 @@ async def _temporary_products(
     if len(uploads) > 200:
         raise FileValidationError("Sube como maximo 200 imagenes de producto por tanda.")
     stored: dict[str, Path] = {}
+    seen_names: set[str] = set()
+    total_bytes = 0
     for index, upload in enumerate(uploads):
         filename = (upload.filename or f"producto-{index + 1}.png")[:240]
+        filename_key = filename.casefold()
+        if filename_key in seen_names:
+            await upload.close()
+            raise FileValidationError(
+                f"La imagen de producto '{filename}' aparece mas de una vez en la tanda."
+            )
+        seen_names.add(filename_key)
         suffix = Path(filename).suffix.lower()
         if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".avif"}:
             await upload.close()
@@ -576,6 +694,12 @@ async def _temporary_products(
         await upload.close()
         if len(payload) > min(settings.max_upload_bytes, 100 * 1024 * 1024):
             raise FileValidationError(f"'{filename}' supera el limite de imagen de producto.")
+        total_bytes += len(payload)
+        if total_bytes > settings.campaign_max_product_batch_bytes:
+            raise FileValidationError(
+                "Las imagenes de producto superan el limite conjunto de "
+                f"{settings.campaign_max_product_batch_mb} MB por tanda."
+            )
         try:
             with Image.open(io.BytesIO(payload)) as probe:
                 probe.verify()
@@ -608,6 +732,11 @@ async def produce_campaign(
 ) -> ProductionBatch:
     brand = _brand_or_404(client_id)
     campaign = _campaign_or_404(client_id, campaign_id)
+    if not campaign.brief_reviewed_at:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Revisa y guarda el brief antes de producir.",
+        )
     matrix_name, payload = await _matrix_payload(matrix)
     try:
         rows = production_matrix.parse_csv(payload)

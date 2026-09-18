@@ -7,12 +7,13 @@ KV activos.
 from __future__ import annotations
 
 import io
+import posixpath
 import re
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
 
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from ..config import settings
 from ..models.campaign import (
@@ -53,6 +54,38 @@ _TEXT_LIMIT = 60_000
 _PREVIEW_LIMIT = 16
 _PDF_TEXT_PAGE_LIMIT = 500
 _EMBEDDED_IMAGE_LIMIT = 50 * 1024 * 1024
+
+
+def _representative_indices(total: int, limit: int) -> list[int]:
+    """Reparte las vistas previas por todo el documento.
+
+    Los manuales y toolkits suelen abrir con estrategia y dejar el sistema
+    visual, logos y cierres para el final. Guardar simplemente las primeras 16
+    paginas hacia que la IA nunca viera esa evidencia. La muestra incluye
+    siempre la primera y la ultima pagina y distribuye el resto de forma
+    uniforme, sin duplicar indices por redondeo.
+    """
+
+    if total <= 0 or limit <= 0:
+        return []
+    if total <= limit:
+        return list(range(total))
+    if limit == 1:
+        return [0]
+    selected = {
+        round(position * (total - 1) / (limit - 1))
+        for position in range(limit)
+    }
+    # ``round`` puede colisionar con combinaciones pequenas; completar desde
+    # los huecos mas alejados mantiene el contrato de exactamente ``limit``.
+    while len(selected) < limit:
+        remaining = [index for index in range(total) if index not in selected]
+        candidate = max(
+            remaining,
+            key=lambda index: min(abs(index - chosen) for chosen in selected),
+        )
+        selected.add(candidate)
+    return sorted(selected)
 
 
 def source_kind(extension: str) -> CampaignSourceKind:
@@ -169,6 +202,8 @@ def _extract_pdf(
     text_parts: list[str] = []
     text_chars = 0
     previewed = 0
+    preview_indices = set(_representative_indices(source.page_count, _PREVIEW_LIMIT))
+    previewed_pages: list[int] = []
     oversized_previews = 0
     folder = _source_folder(client_id, campaign_id, source) / "previews"
     try:
@@ -182,7 +217,7 @@ def _extract_pdf(
                     excerpt = f"[Pagina {index + 1}]\n{page_text}"[:remaining]
                     text_parts.append(excerpt)
                     text_chars += len(excerpt)
-            if index >= _PREVIEW_LIMIT:
+            if index not in preview_indices:
                 continue
             # 1.25x basta para comprender jerarquia y color sin guardar otro PDF.
             estimated_width = max(1, int(page.rect.width * 1.25))
@@ -196,6 +231,7 @@ def _extract_pdf(
                 _save_thumbnail(rendered, target)
             source.preview_files.append(_relative(client_id, campaign_id, target))
             previewed += 1
+            previewed_pages.append(index + 1)
     except FileValidationError:
         raise
     except Exception as exc:  # noqa: BLE001 - un PDF roto debe responder 400, no 500
@@ -203,7 +239,13 @@ def _extract_pdf(
     finally:
         document.close()
     source.extracted_text = _clean_text("\n\n".join(text_parts))
-    source.meta.update({"previewed_pages": previewed, "pages_with_text": len(text_parts)})
+    source.meta.update(
+        {
+            "previewed_pages": previewed,
+            "previewed_page_numbers": previewed_pages,
+            "pages_with_text": len(text_parts),
+        }
+    )
     if source.page_count > _PDF_TEXT_PAGE_LIMIT:
         source.warnings.append(
             f"El PDF tiene {source.page_count} paginas; se analizaron las primeras "
@@ -216,7 +258,7 @@ def _extract_pdf(
     if source.page_count > previewed:
         source.warnings.append(
             f"Se analizaron textos de {source.page_count} paginas y se guardaron "
-            f"vistas previas de las primeras {previewed}."
+            f"{previewed} vistas previas representativas, incluyendo inicio y cierre."
         )
 
 
@@ -270,6 +312,8 @@ def _copy_zip_images(
     client_id: str,
     campaign_id: str,
     source: CampaignSource,
+    *,
+    add_previews: bool = True,
 ) -> None:
     asset_folder = _source_folder(client_id, campaign_id, source) / "assets"
     preview_folder = _source_folder(client_id, campaign_id, source) / "previews"
@@ -298,12 +342,252 @@ def _copy_zip_images(
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(payload)
                 source.asset_files.append(_relative(client_id, campaign_id, target))
-                if len(source.preview_files) < _PREVIEW_LIMIT:
+                if add_previews and len(source.preview_files) < _PREVIEW_LIMIT:
                     preview = preview_folder / f"asset-{index + 1:03d}.jpg"
                     _save_thumbnail(image, preview)
                     source.preview_files.append(_relative(client_id, campaign_id, preview))
         except Exception:  # noqa: BLE001 - un recurso malo no invalida el documento
             source.warnings.append(f"El recurso incrustado {Path(name).name} no era una imagen valida.")
+
+
+_PPTX_NS = {
+    "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
+    "p": "http://schemas.openxmlformats.org/presentationml/2006/main",
+    "r": "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "rel": "http://schemas.openxmlformats.org/package/2006/relationships",
+}
+
+
+def _pptx_theme(archive: zipfile.ZipFile) -> dict[str, str]:
+    defaults = {
+        "dk1": "1A1A1A", "lt1": "FFFFFF", "dk2": "333333", "lt2": "F2F2F2",
+        "accent1": "4472C4", "accent2": "ED7D31", "accent3": "A5A5A5",
+        "accent4": "FFC000", "accent5": "5B9BD5", "accent6": "70AD47",
+    }
+    try:
+        root = ElementTree.fromstring(archive.read("ppt/theme/theme1.xml"))
+    except (KeyError, ElementTree.ParseError):
+        return defaults
+    scheme = root.find(".//a:clrScheme", _PPTX_NS)
+    if scheme is None:
+        return defaults
+    for item in scheme:
+        key = item.tag.rsplit("}", 1)[-1]
+        colour = next(iter(item), None)
+        if colour is None:
+            continue
+        value = colour.attrib.get("val") or colour.attrib.get("lastClr")
+        if value and re.fullmatch(r"[0-9A-Fa-f]{6}", value):
+            defaults[key] = value.upper()
+    return defaults
+
+
+def _pptx_colour(
+    parent: ElementTree.Element | None,
+    theme: dict[str, str],
+    fallback: tuple[int, int, int, int],
+) -> tuple[int, int, int, int]:
+    if parent is None:
+        return fallback
+    solid = parent.find(".//a:solidFill", _PPTX_NS)
+    if solid is None:
+        return fallback
+    direct = solid.find("a:srgbClr", _PPTX_NS)
+    value = direct.attrib.get("val", "") if direct is not None else ""
+    if not value:
+        scheme = solid.find("a:schemeClr", _PPTX_NS)
+        value = theme.get(scheme.attrib.get("val", ""), "") if scheme is not None else ""
+    if not re.fullmatch(r"[0-9A-Fa-f]{6}", value or ""):
+        return fallback
+    return tuple(int(value[index:index + 2], 16) for index in (0, 2, 4)) + (fallback[3],)
+
+
+def _pptx_size(archive: zipfile.ZipFile) -> tuple[int, int]:
+    default = (13_333_333, 7_500_000)
+    try:
+        root = ElementTree.fromstring(archive.read("ppt/presentation.xml"))
+        size = root.find(".//p:sldSz", _PPTX_NS)
+        if size is None:
+            return default
+        return max(1, int(size.attrib.get("cx", default[0]))), max(
+            1, int(size.attrib.get("cy", default[1]))
+        )
+    except (KeyError, ValueError, ElementTree.ParseError):
+        return default
+
+
+def _pptx_box(
+    element: ElementTree.Element,
+    slide_size: tuple[int, int],
+    canvas: tuple[int, int],
+    fallback_index: int,
+) -> tuple[int, int, int, int]:
+    transform = element.find(".//a:xfrm", _PPTX_NS)
+    if transform is not None:
+        offset = transform.find("a:off", _PPTX_NS)
+        extent = transform.find("a:ext", _PPTX_NS)
+        if offset is not None and extent is not None:
+            try:
+                sx, sy = canvas[0] / slide_size[0], canvas[1] / slide_size[1]
+                return (
+                    round(int(offset.attrib.get("x", 0)) * sx),
+                    round(int(offset.attrib.get("y", 0)) * sy),
+                    max(1, round(int(extent.attrib.get("cx", slide_size[0])) * sx)),
+                    max(1, round(int(extent.attrib.get("cy", slide_size[1])) * sy)),
+                )
+            except ValueError:
+                pass
+    # Los PPTX mínimos de pruebas o exportadores poco ortodoxos pueden omitir
+    # xfrm. Todavía se conserva el texto en una franja legible.
+    margin = round(min(canvas) * .055)
+    height = max(80, round(canvas[1] * .16))
+    return margin, margin + fallback_index * (height + margin // 2), canvas[0] - margin * 2, height
+
+
+def _pptx_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    configured = settings.default_font_bold if bold else settings.default_font
+    paths = [
+        configured,
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Bold.ttf" if bold else "/System/Library/Fonts/Supplemental/Arial.ttf",
+    ]
+    for path in paths:
+        if path and Path(path).exists():
+            try:
+                return ImageFont.truetype(path, max(10, size))
+            except OSError:
+                continue
+    return ImageFont.load_default()
+
+
+def _pptx_text(
+    canvas: Image.Image,
+    element: ElementTree.Element,
+    box: tuple[int, int, int, int],
+    theme: dict[str, str],
+) -> None:
+    paragraphs: list[str] = []
+    for paragraph in element.findall(".//a:p", _PPTX_NS):
+        value = "".join(node.text or "" for node in paragraph.findall(".//a:t", _PPTX_NS)).strip()
+        if value:
+            paragraphs.append(value)
+    if not paragraphs:
+        return
+    text = "\n".join(paragraphs)
+    x, y, width, height = box
+    run = element.find(".//a:rPr", _PPTX_NS) or element.find(".//a:defRPr", _PPTX_NS)
+    raw_size = run.attrib.get("sz", "") if run is not None else ""
+    try:
+        points = int(raw_size) / 100 if raw_size else 24
+    except ValueError:
+        points = 24
+    font_size = max(11, min(round(points * canvas.width / 960 * 1.15), max(12, round(height * .44))))
+    bold = bool(run is not None and run.attrib.get("b") in {"1", "true"})
+    font = _pptx_font(font_size, bold)
+    colour = _pptx_colour(run, theme, (30, 30, 35, 255))
+    paragraph_props = element.find(".//a:pPr", _PPTX_NS)
+    alignment = paragraph_props.attrib.get("algn", "l") if paragraph_props is not None else "l"
+    align = "center" if alignment == "ctr" else "right" if alignment == "r" else "left"
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    words = text.replace("\n", " \n ").split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        if word == "\n":
+            if current:
+                lines.append(current)
+                current = ""
+            continue
+        trial = (current + " " + word).strip()
+        if current and draw.textbbox((0, 0), trial, font=font)[2] > width:
+            lines.append(current)
+            current = word
+        else:
+            current = trial
+    if current:
+        lines.append(current)
+    line_height = max(font_size + 3, round(font_size * 1.18))
+    lines = lines[: max(1, height // line_height)]
+    for index, line in enumerate(lines):
+        measured = draw.textbbox((0, 0), line, font=font)[2]
+        tx = x if align == "left" else x + (width - measured) // 2 if align == "center" else x + width - measured
+        draw.text((tx, y + index * line_height), line, font=font, fill=colour)
+
+
+def _pptx_relationships(
+    archive: zipfile.ZipFile, slide_name: str
+) -> dict[str, str]:
+    folder, filename = posixpath.split(slide_name)
+    rel_name = posixpath.join(folder, "_rels", filename + ".rels")
+    try:
+        root = ElementTree.fromstring(archive.read(rel_name))
+    except (KeyError, ElementTree.ParseError):
+        return {}
+    result: dict[str, str] = {}
+    for relation in root.findall("rel:Relationship", _PPTX_NS):
+        target = relation.attrib.get("Target", "")
+        if not target or relation.attrib.get("TargetMode") == "External":
+            continue
+        result[relation.attrib.get("Id", "")] = posixpath.normpath(
+            posixpath.join(folder, target)
+        )
+    return result
+
+
+def _render_pptx_slide(
+    archive: zipfile.ZipFile,
+    slide_name: str,
+    slide_size: tuple[int, int],
+    theme: dict[str, str],
+) -> Image.Image:
+    root = ElementTree.fromstring(archive.read(slide_name))
+    ratio = slide_size[0] / max(1, slide_size[1])
+    width = 1600
+    height = max(600, round(width / ratio))
+    background = _pptx_colour(
+        root.find(".//p:bg", _PPTX_NS), theme, (255, 255, 255, 255)
+    )
+    canvas = Image.new("RGBA", (width, height), background)
+    relations = _pptx_relationships(archive, slide_name)
+    tree = root.find(".//p:spTree", _PPTX_NS)
+    if tree is None:
+        return canvas
+    fallback_index = 0
+    for element in tree.iter():
+        kind = element.tag.rsplit("}", 1)[-1]
+        if kind not in {"sp", "pic", "graphicFrame"}:
+            continue
+        box = _pptx_box(element, slide_size, canvas.size, fallback_index)
+        fallback_index += 1
+        x, y, item_width, item_height = box
+        if kind in {"sp", "graphicFrame"}:
+            properties = element.find("p:spPr", _PPTX_NS)
+            fill = _pptx_colour(properties, theme, (255, 255, 255, 0))
+            if fill[3]:
+                ImageDraw.Draw(canvas, "RGBA").rounded_rectangle(
+                    (x, y, x + item_width, y + item_height),
+                    radius=max(0, round(min(item_width, item_height) * .025)),
+                    fill=fill,
+                )
+            _pptx_text(canvas, element, box, theme)
+            continue
+        blip = element.find(".//a:blip", _PPTX_NS)
+        rel_id = blip.attrib.get(f"{{{_PPTX_NS['r']}}}embed", "") if blip is not None else ""
+        media_name = relations.get(rel_id, "")
+        if not media_name:
+            continue
+        try:
+            with Image.open(io.BytesIO(archive.read(media_name))) as picture:
+                fitted = ImageOps.fit(
+                    picture.convert("RGBA"),
+                    (item_width, item_height),
+                    method=Image.Resampling.LANCZOS,
+                )
+            canvas.alpha_composite(fitted, (x, y))
+            fitted.close()
+        except Exception:  # noqa: BLE001 - una imagen rota no anula la diapositiva
+            continue
+    return canvas
 
 
 def _extract_pptx(
@@ -329,13 +613,43 @@ def _extract_pptx(
             for item in archive.infolist()
             if item.filename.startswith("ppt/media/") and not item.is_dir()
         )
-        _copy_zip_images(archive, media, client_id, campaign_id, source)
+        _copy_zip_images(
+            archive,
+            media,
+            client_id,
+            campaign_id,
+            source,
+            add_previews=False,
+        )
+        slide_size = _pptx_size(archive)
+        theme = _pptx_theme(archive)
+        preview_indices = _representative_indices(len(slide_names), _PREVIEW_LIMIT)
+        rendered_slides: list[int] = []
+        preview_folder = _source_folder(client_id, campaign_id, source) / "previews"
+        for index in preview_indices:
+            try:
+                rendered = _render_pptx_slide(
+                    archive, slide_names[index], slide_size, theme
+                )
+                target = preview_folder / f"slide-{index + 1:03d}.jpg"
+                _save_thumbnail(rendered, target, max_side=1400)
+                rendered.close()
+                source.preview_files.append(_relative(client_id, campaign_id, target))
+                rendered_slides.append(index + 1)
+            except Exception:  # noqa: BLE001 - conservar texto/assets si una slide esta rota
+                source.warnings.append(
+                    f"No se pudo reconstruir la vista de la diapositiva {index + 1}."
+                )
     source.meta.update(
-        {"slides_with_text": sum(bool(item.strip()) for item in texts), "embedded_media": len(media)}
+        {
+            "slides_with_text": sum(bool(item.strip()) for item in texts),
+            "embedded_media": len(media),
+            "previewed_slides": rendered_slides,
+        }
     )
     if not source.preview_files:
         source.warnings.append(
-            "Se extrajo el texto de la presentacion, pero no tenia imagenes incrustadas utilizables."
+            "Se extrajo el texto y los recursos de la presentacion, pero no se pudo reconstruir ninguna diapositiva."
         )
 
 

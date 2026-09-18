@@ -16,8 +16,11 @@ import csv
 import io
 import re
 import unicodedata
+import zipfile
 from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +47,7 @@ class MatrixRow(BaseModel):
     formatos: list[str] = Field(default_factory=list)
     cantidad_propuestas: int = Field(default=1, ge=1, le=6)
     plantilla: str | None = None
+    notas: str | None = None
     # Campos que el usuario pidió excluir de forma explícita. Una lista (y no
     # un set) mantiene JSON estable y facilita mostrarla en la revisión.
     suppressed_fields: list[str] = Field(default_factory=list)
@@ -77,7 +81,7 @@ ALIASES: dict[str, set[str]] = {
     "cuota": {"cuota", "cuotas", "installment", "installments"},
     "descuento": {"descuento", "discount", "ahorro"},
     "cta": {"cta", "llamado", "llamado_a_la_accion", "call_to_action"},
-    "legal": {"legal", "legales", "terminos", "terms"},
+    "legal": {"legal", "legales", "terminos", "terms", "restricciones"},
     "vigencia": {"vigencia", "validity", "fecha", "fechas"},
     "formatos": {"formatos", "formato", "formats", "format", "tamanos", "medidas"},
     "cantidad_propuestas": {
@@ -90,6 +94,7 @@ ALIASES: dict[str, set[str]] = {
         "count",
     },
     "plantilla": {"plantilla", "template"},
+    "notas": {"notas", "notes", "instrucciones", "instruction"},
 }
 
 ALIAS_TO_FIELD = {
@@ -119,6 +124,7 @@ OPTIONAL_TEXT_FIELDS = (
     "legal",
     "vigencia",
     "plantilla",
+    "notas",
 )
 
 
@@ -276,6 +282,125 @@ def parse_csv(payload: bytes | str) -> list[MatrixRow]:
     return result
 
 
+_SHEET_NS = {
+    "main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+}
+
+
+def _excel_column(reference: str) -> int:
+    letters = re.match(r"[A-Za-z]+", reference or "")
+    if not letters:
+        return 0
+    result = 0
+    for char in letters.group(0).upper():
+        result = result * 26 + ord(char) - ord("A") + 1
+    return max(0, result - 1)
+
+
+def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    try:
+        root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+    except ElementTree.ParseError as exc:
+        raise MatrixParseError("El XLSX tiene sharedStrings.xml invalido.") from exc
+    return [
+        "".join(node.text or "" for node in item.findall(".//main:t", _SHEET_NS))
+        for item in root.findall("main:si", _SHEET_NS)
+    ]
+
+
+def _xlsx_table(
+    archive: zipfile.ZipFile, name: str, shared: list[str]
+) -> list[list[str]]:
+    try:
+        root = ElementTree.fromstring(archive.read(name))
+    except (KeyError, ElementTree.ParseError) as exc:
+        raise MatrixParseError(f"No se pudo leer {Path(name).name} del XLSX.") from exc
+    table: list[list[str]] = []
+    for row in root.findall(".//main:sheetData/main:row", _SHEET_NS)[:20_001]:
+        cells: dict[int, str] = {}
+        for cell in row.findall("main:c", _SHEET_NS):
+            column = _excel_column(cell.attrib.get("r", ""))
+            kind = cell.attrib.get("t", "")
+            if kind == "inlineStr":
+                value = "".join(
+                    node.text or "" for node in cell.findall(".//main:t", _SHEET_NS)
+                )
+            else:
+                node = cell.find("main:v", _SHEET_NS)
+                value = node.text or "" if node is not None else ""
+                if kind == "s" and value:
+                    try:
+                        value = shared[int(value)]
+                    except (ValueError, IndexError) as exc:
+                        raise MatrixParseError(
+                            "El XLSX referencia un texto compartido inexistente."
+                        ) from exc
+            cells[column] = value.strip()
+        if not cells:
+            continue
+        width = max(cells) + 1
+        table.append([cells.get(index, "") for index in range(width)])
+    return table
+
+
+def parse_xlsx(payload: bytes) -> list[MatrixRow]:
+    """Lee la hoja que tenga más cabeceras reconocibles, sin depender de Excel."""
+
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(payload))
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise MatrixParseError("El archivo XLSX no es un ZIP de Office valido.") from exc
+    with archive:
+        members = archive.infolist()
+        if len(members) > 2_000 or sum(max(0, item.file_size) for item in members) > 60 * 1024 * 1024:
+            raise MatrixParseError("El XLSX declara demasiado contenido interno.")
+        sheets = sorted(
+            item.filename
+            for item in members
+            if re.fullmatch(r"xl/worksheets/sheet\d+\.xml", item.filename)
+        )
+        if not sheets:
+            raise MatrixParseError("El XLSX no contiene hojas de calculo.")
+        shared = _xlsx_shared_strings(archive)
+        best: tuple[int, list[list[str]]] | None = None
+        for name in sheets:
+            table = _xlsx_table(archive, name, shared)
+            if not table:
+                continue
+            header_index = next(
+                (
+                    index
+                    for index, row in enumerate(table[:20])
+                    if any(_key(cell) in ALIAS_TO_FIELD for cell in row)
+                ),
+                0,
+            )
+            table = table[header_index:]
+            score = sum(1 for cell in table[0] if _key(cell) in ALIAS_TO_FIELD)
+            if best is None or score > best[0]:
+                best = score, table
+        if best is None or best[0] <= 0:
+            raise MatrixParseError(
+                "No se reconocen cabeceras de matriz en ninguna hoja del XLSX."
+            )
+        output = io.StringIO()
+        csv.writer(output).writerows(best[1])
+        return parse_csv(output.getvalue())
+
+
+def parse_matrix(payload: bytes | str, filename: str = "matriz.csv") -> list[MatrixRow]:
+    extension = Path(filename or "").suffix.casefold()
+    if extension == ".xlsx":
+        if isinstance(payload, str):
+            raise MatrixParseError("El XLSX debe enviarse como archivo binario.")
+        return parse_xlsx(payload)
+    if extension not in {"", ".csv", ".tsv", ".txt"}:
+        raise MatrixParseError("La matriz debe ser CSV, TSV o XLSX.")
+    return parse_csv(payload)
+
+
 def requested_piece_count(rows: Iterable[MatrixRow]) -> int:
     """Total exacto: formatos por fila × propuestas pedidas por esa fila.
 
@@ -409,6 +534,8 @@ __all__ = [
     "MatrixParseError",
     "MatrixRow",
     "parse_csv",
+    "parse_matrix",
+    "parse_xlsx",
     "product_count",
     "requested_piece_count",
     "score_template",

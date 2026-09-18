@@ -131,6 +131,46 @@ class TemplateSlotProposal(BaseModel):
     layout_role: str = Field(default="", max_length=240)
 
 
+class NormalizedPlacement(BaseModel):
+    """Caja de un elemento dentro del area segura, en coordenadas 0..1."""
+
+    x: float = Field(ge=0.0, le=1.0)
+    y: float = Field(ge=0.0, le=1.0)
+    width: float = Field(gt=0.0, le=1.0)
+    height: float = Field(gt=0.0, le=1.0)
+
+    @field_validator("width")
+    @classmethod
+    def _width_is_finite(cls, value: float) -> float:
+        return round(float(value), 4)
+
+    @field_validator("height")
+    @classmethod
+    def _height_is_finite(cls, value: float) -> float:
+        return round(float(value), 4)
+
+
+class TemplateBlueprint(BaseModel):
+    """Sistema visual ejecutable que la IA puede inferir y el renderer consume.
+
+    ``placements`` usa las familias ``square``, ``portrait``, ``story`` y
+    ``landscape``. No es una descripción decorativa: al aprobar una candidata
+    esta geometría queda congelada en la memoria del cliente y vuelve a usarse
+    en producción.
+    """
+
+    version: int = Field(default=1, ge=1, le=10)
+    archetype: Literal[
+        "hero_center", "split_left", "split_right", "price_focus", "product_grid", "editorial"
+    ] = "hero_center"
+    text_alignment: Literal["left", "center", "right"] = "left"
+    background_style: Literal["campaign", "gradient", "solid", "light"] = "campaign"
+    accent_style: Literal["orbs", "diagonal", "cards", "frame", "minimal"] = "frame"
+    density: Literal["airy", "balanced", "compact"] = "balanced"
+    mirror_variants: bool = True
+    placements: dict[str, dict[str, NormalizedPlacement]] = Field(default_factory=dict)
+
+
 class TemplateCandidate(BaseModel):
     """Propuesta persistente y aprobable, sin productos reales dentro."""
 
@@ -152,12 +192,15 @@ class TemplateCandidate(BaseModel):
         default_factory=lambda: ["1:1", "4:5", "9:16", "landscape", "custom"]
     )
     adaptation_rules: list[str] = Field(default_factory=list)
+    blueprint: TemplateBlueprint = Field(default_factory=TemplateBlueprint)
+    revision_hash: str = Field(default="", max_length=64)
     status: Literal["proposed", "approved", "rejected"] = "proposed"
     approved: bool = False
     approved_at: str | None = None
     decision_notes: str = ""
     source_project_id: str | None = None
     preview_url: str | None = None
+    preview_urls: dict[str, str] = Field(default_factory=dict)
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -174,6 +217,7 @@ class Campaign(BaseModel):
     ] = "collecting"
     sources: list[CampaignSource] = Field(default_factory=list)
     brief: CampaignBrief | None = None
+    brief_reviewed_at: str | None = None
     template_candidates: list[TemplateCandidate] = Field(default_factory=list)
     analysis_engine: Literal["none", "deterministic", "openai"] = "none"
     warnings: list[str] = Field(default_factory=list)
@@ -251,6 +295,7 @@ class CampaignSourcesResponse(BaseModel):
 
 class GenerateBriefRequest(BaseModel):
     use_ai: bool = True
+    preserve_review: bool = False
 
 
 class CampaignBriefPatchRequest(BaseModel):

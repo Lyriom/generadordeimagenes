@@ -80,6 +80,15 @@ export function normaliseCampaign(raw: any, clientId = ""): CampaignWorkspace {
     objective: raw?.objective ? String(raw.objective) : "",
     social_urls: strings(raw?.social_urls),
     status: raw?.status ? String(raw.status) : undefined,
+    brief_reviewed_at: raw?.brief_reviewed_at ? String(raw.brief_reviewed_at) : null,
+    social_evidence: list(raw?.meta?.social_evidence).map((item: any) => ({
+      url: String(item?.url || ""),
+      title: item?.title ? String(item.title) : undefined,
+      description: item?.description ? String(item.description) : undefined,
+      posts: strings(item?.posts),
+      accessible: item?.accessible !== false,
+      blocked_reason: item?.blocked_reason ? String(item.blocked_reason) : undefined,
+    })).filter((item) => item.url),
     created_at: raw?.created_at ? String(raw.created_at) : undefined,
     updated_at: raw?.updated_at ? String(raw.updated_at) : undefined,
   };
@@ -209,6 +218,12 @@ function normaliseFields(value: unknown): TemplateCandidateField[] {
 export function normaliseCandidate(raw: any, index = 0): TemplateCandidate {
   const range = raw?.supported_product_count || raw?.product_count || {};
   const status = ["approved", "rejected"].includes(raw?.status) ? raw.status : "proposed";
+  const previewUrls = Object.fromEntries(
+    Object.entries(raw?.preview_urls || {}).map(([key, value]) => [
+      String(key),
+      String(value).startsWith("/api/") ? String(value) : downloadUrl(String(value)),
+    ]),
+  );
   return {
     candidate_id: String(raw?.candidate_id || raw?.template_id || raw?.id || "candidate-" + String(index + 1)),
     name: String(raw?.name || raw?.title || "Plantilla " + String(index + 1)),
@@ -225,10 +240,21 @@ export function normaliseCandidate(raw: any, index = 0): TemplateCandidate {
     preview_url: raw?.preview_url
       ? (String(raw.preview_url).startsWith("/api/") ? String(raw.preview_url) : downloadUrl(String(raw.preview_url)))
       : null,
+    preview_urls: previewUrls,
     source_project_id: raw?.source_project_id || null,
     warnings: strings(raw?.warnings),
     approved_at: raw?.approved_at || null,
     decision_notes: raw?.decision_notes || null,
+    revision_hash: raw?.revision_hash ? String(raw.revision_hash) : "",
+    blueprint: raw?.blueprint && typeof raw.blueprint === "object"
+      ? {
+          archetype: raw.blueprint.archetype ? String(raw.blueprint.archetype) : undefined,
+          text_alignment: raw.blueprint.text_alignment ? String(raw.blueprint.text_alignment) : undefined,
+          background_style: raw.blueprint.background_style ? String(raw.blueprint.background_style) : undefined,
+          accent_style: raw.blueprint.accent_style ? String(raw.blueprint.accent_style) : undefined,
+          density: raw.blueprint.density ? String(raw.blueprint.density) : undefined,
+        }
+      : undefined,
   };
 }
 
@@ -267,12 +293,13 @@ function normaliseBrief(raw: any, engine?: string, warnings: string[] = []): Cam
 export async function generateCampaignBrief(
   clientId: string,
   campaignId: string,
+  preserveReview = false,
 ): Promise<CampaignBriefResult | null> {
   try {
     const payload: any = await post(
       "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
         encodeURIComponent(campaignId) + "/brief/generate",
-      { use_ai: true },
+      { use_ai: true, preserve_review: preserveReview },
     );
     const warnings = strings(payload?.warnings);
     return {
@@ -296,6 +323,12 @@ export async function reviseCampaignBrief(
     audience?: string;
     primary_message?: string;
     creative_concept?: string;
+    tone?: string[];
+    visual_rules?: string[];
+    product_treatment?: string[];
+    required_elements?: string[];
+    optional_elements?: string[];
+    forbidden_elements?: string[];
     feedback?: string;
   },
 ): Promise<CampaignIntelligence> {
@@ -305,6 +338,28 @@ export async function reviseCampaignBrief(
     changes,
   );
   return normaliseBrief(payload);
+}
+
+export async function reviseTemplateCandidate(
+  clientId: string,
+  campaignId: string,
+  candidateId: string,
+  notes: string,
+): Promise<CampaignBriefResult> {
+  const payload: any = await post(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/template-candidates/" +
+      encodeURIComponent(candidateId) + "/revise",
+    { notes },
+  );
+  const warnings = strings(payload?.warnings);
+  return {
+    campaign_id: String(payload?.campaign_id || campaignId),
+    brief: normaliseBrief(payload?.brief || {}, payload?.engine, warnings),
+    template_candidates: list(payload?.template_candidates).map(normaliseCandidate),
+    engine: payload?.engine ? String(payload.engine) : undefined,
+    warnings,
+  };
 }
 
 export async function decideTemplateCandidate(

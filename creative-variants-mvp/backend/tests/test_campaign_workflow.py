@@ -68,6 +68,37 @@ def _pdf_two_pages() -> bytes:
     return payload
 
 
+def _pdf_many_pages(count: int) -> bytes:
+    document = fitz.open()
+    for index in range(count):
+        page = document.new_page()
+        page.draw_rect(
+            fitz.Rect(0, 0, page.rect.width, page.rect.height),
+            color=None,
+            fill=((index % 5) / 5, .15, .55),
+        )
+        page.insert_text((72, 72), f"Pagina visual {index + 1}", color=(1, 1, 1))
+    payload = document.tobytes()
+    document.close()
+    return payload
+
+
+def _review_and_regenerate(
+    client: TestClient, profile: dict, campaign: dict, generated: dict
+) -> dict:
+    reviewed = client.put(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief",
+        json={"objective": generated["brief"]["objective"]},
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    regenerated = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
+        json={"use_ai": False, "preserve_review": True},
+    )
+    assert regenerated.status_code == 200, regenerated.text
+    return regenerated.json()
+
+
 def test_documentos_son_fuentes_de_una_campana_y_no_multiples_kv(
     client: TestClient, artwork_png: bytes
 ):
@@ -96,6 +127,10 @@ def test_documentos_son_fuentes_de_una_campana_y_no_multiples_kv(
     assert presentation["page_count"] == 2
     assert "Concepto creativo" in presentation["extracted_text"]
     assert len(presentation["asset_files"]) == 1
+    assert [item.rsplit("/", 1)[-1] for item in presentation["preview_files"]] == [
+        "slide-001.jpg",
+        "slide-002.jpg",
+    ]
 
     projects_after = {item["project_id"] for item in client.get("/projects").json()}
     assert projects_after == projects_before
@@ -126,6 +161,23 @@ def test_pdf_de_varias_paginas_sigue_siendo_una_sola_fuente(client: TestClient):
     assert source["page_count"] == 2
     assert len(source["preview_files"]) == 2
     assert len(client.get("/projects").json()) == before
+
+
+def test_pdf_largo_muestrea_inicio_medio_y_cierre(client: TestClient):
+    profile, campaign = _client_and_campaign(client)
+    response = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources",
+        files=[("files", ("toolkit.pdf", _pdf_many_pages(25), "application/pdf"))],
+    )
+
+    assert response.status_code == 201, response.text
+    source = response.json()["sources"][0]
+    assert len(source["preview_files"]) == 16
+    pages = source["meta"]["previewed_page_numbers"]
+    assert pages[0] == 1
+    assert pages[-1] == 25
+    assert any(page > 16 for page in pages)
+    assert source["preview_files"][-1].endswith("page-025.jpg")
 
 
 def test_brief_offline_propone_tres_a_cinco_plantillas_sin_productos_reales(
@@ -198,6 +250,7 @@ def test_aprobacion_se_persiste_en_la_campana_y_en_la_memoria_del_cliente(
         f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
         json={"use_ai": False},
     ).json()
+    generated = _review_and_regenerate(client, profile, campaign, generated)
     candidate = generated["template_candidates"][0]
 
     approved = client.post(
@@ -225,6 +278,60 @@ def test_aprobacion_se_persiste_en_la_campana_y_en_la_memoria_del_cliente(
     assert client_again.json()["approved_candidates"] >= 1
 
 
+def test_no_se_puede_aprobar_una_plantilla_sin_revisar_el_brief(
+    client: TestClient,
+):
+    profile, campaign = _client_and_campaign(client)
+    generated = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
+        json={"use_ai": False},
+    )
+    assert generated.status_code == 200, generated.text
+    candidate = generated.json()["template_candidates"][0]
+
+    approval = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"
+        f"/template-candidates/{candidate['candidate_id']}/approve",
+        json={"notes": "Todavia no revise el brief"},
+    )
+
+    assert approval.status_code == 409
+    assert "brief" in approval.json()["detail"].lower()
+
+
+def test_corregir_plantilla_redibuja_blueprint_y_exige_aprobacion_nueva(
+    client: TestClient,
+):
+    profile, campaign = _client_and_campaign(client)
+    generated = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
+        json={"use_ai": False},
+    ).json()
+    generated = _review_and_regenerate(client, profile, campaign, generated)
+    candidate = generated["template_candidates"][0]
+    approved = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"
+        f"/template-candidates/{candidate['candidate_id']}/approve",
+        json={"notes": "Base aprobada"},
+    )
+    assert approved.status_code == 200, approved.text
+
+    corrected = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"
+        f"/template-candidates/{candidate['candidate_id']}/revise",
+        json={"notes": "Quiero un diseño más limpio, minimal y con más aire"},
+    )
+
+    assert corrected.status_code == 200, corrected.text
+    candidates = corrected.json()["template_candidates"]
+    changed = next(item for item in candidates if item["category"] == candidate["category"])
+    assert changed["status"] == "proposed"
+    assert changed["approved"] is False
+    assert changed["revision_hash"] != candidate["revision_hash"]
+    assert changed["blueprint"]["accent_style"] == "minimal"
+    assert changed["blueprint"]["density"] == "airy"
+
+
 def test_material_nuevo_exige_reanalisis_y_una_aprobacion_nueva(
     client: TestClient,
 ):
@@ -238,6 +345,7 @@ def test_material_nuevo_exige_reanalisis_y_una_aprobacion_nueva(
         f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
         json={"use_ai": False},
     ).json()
+    analysis = _review_and_regenerate(client, profile, campaign, analysis)
     candidate = analysis["template_candidates"][0]
     approved = client.post(
         f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"

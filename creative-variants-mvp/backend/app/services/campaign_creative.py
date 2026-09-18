@@ -36,6 +36,22 @@ class CampaignProductionError(ValueError):
     pass
 
 
+def _representative_paths(paths: list[str], limit: int) -> list[str]:
+    """Evita que un documento largo aporte siempre solo sus primeras paginas."""
+
+    if limit <= 0 or not paths:
+        return []
+    if len(paths) <= limit:
+        return list(paths)
+    if limit == 1:
+        return [paths[0]]
+    indices = {
+        round(position * (len(paths) - 1) / (limit - 1))
+        for position in range(limit)
+    }
+    return [paths[index] for index in sorted(indices)]
+
+
 FORMAT_ALIASES = {
     "feed": "meta_feed_4_5",
     "feed_vertical": "meta_feed_4_5",
@@ -170,7 +186,7 @@ def _reference_texture(
             {"background", "key_visual", "visual_reference", "final_art"}
         ):
             continue
-        for relative in source.preview_files[:4]:
+        for relative in _representative_paths(source.preview_files, 4):
             try:
                 path = campaign_store.campaign_path(
                     campaign.client_id, campaign.campaign_id, relative
@@ -207,21 +223,74 @@ def _reference_texture(
         return None
 
 
-def _decorations(width: int, height: int, colours: list[tuple[int, int, int]], seed: int) -> Image.Image:
+def _decorations(
+    width: int,
+    height: int,
+    colours: list[tuple[int, int, int]],
+    seed: int,
+    style: str = "frame",
+) -> Image.Image:
     layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     draw = ImageDraw.Draw(layer, "RGBA")
     scale = min(width, height)
     accent = colours[(seed + 2) % len(colours)]
-    for index in range(3):
-        radius = int(scale * (.11 + index * .08))
-        x = int(width * (.78 + .08 * math.sin(seed + index)))
-        y = int(height * (.10 + .29 * index))
-        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*accent, 22 + index * 7))
-    draw.rounded_rectangle(
-        (int(width * .025), int(height * .025), int(width * .975), int(height * .975)),
-        radius=max(12, int(scale * .025)), outline=(255, 255, 255, 35), width=max(2, int(scale * .003)),
-    )
+    if style == "orbs":
+        for index in range(3):
+            radius = int(scale * (.11 + index * .08))
+            x = int(width * (.78 + .08 * math.sin(seed + index)))
+            y = int(height * (.10 + .29 * index))
+            draw.ellipse(
+                (x - radius, y - radius, x + radius, y + radius),
+                fill=(*accent, 22 + index * 7),
+            )
+    elif style == "diagonal":
+        draw.polygon(
+            [
+                (int(width * .56), 0), (width, 0),
+                (width, int(height * .78)), (int(width * .34), height),
+            ],
+            fill=(*accent, 38),
+        )
+        draw.line(
+            (int(width * .42), 0, int(width * .18), height),
+            fill=(255, 255, 255, 32),
+            width=max(2, int(scale * .006)),
+        )
+    elif style == "cards":
+        margin = int(scale * .035)
+        draw.rounded_rectangle(
+            (margin, int(height * .42), int(width * .55), int(height * .88)),
+            radius=max(14, int(scale * .035)),
+            fill=(8, 8, 24, 38),
+            outline=(255, 255, 255, 28),
+            width=max(2, int(scale * .003)),
+        )
+    if style in {"frame", "orbs", "cards"}:
+        draw.rounded_rectangle(
+            (int(width * .025), int(height * .025), int(width * .975), int(height * .975)),
+            radius=max(12, int(scale * .025)),
+            outline=(255, 255, 255, 35),
+            width=max(2, int(scale * .003)),
+        )
     return layer
+
+
+def _background(
+    width: int,
+    height: int,
+    colours: list[tuple[int, int, int]],
+    seed: int,
+    style: str,
+) -> Image.Image:
+    if style == "solid":
+        return Image.new("RGBA", (width, height), (*colours[seed % len(colours)], 255))
+    if style == "light":
+        light = [
+            tuple(min(255, round(channel * .22 + 255 * .78)) for channel in colour)
+            for colour in colours
+        ]
+        return _gradient(width, height, light, seed)
+    return _gradient(width, height, colours, seed)
 
 
 def _box(width: int, height: int, values: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
@@ -242,7 +311,29 @@ def _layout(
     usable_w, usable_h = 1 - left - right, 1 - top - bottom
     portrait = height / width > 1.2
     landscape = width / height > 1.35
-    mirror = proposal % 2 == 0
+    blueprint = candidate.blueprint
+    mirror = blueprint.mirror_variants and proposal % 2 == 0
+    archetype = blueprint.archetype
+    if (
+        not candidate.revision_hash
+        and candidate.category != "single_product"
+        and archetype == "hero_center"
+        and not blueprint.placements
+    ):
+        archetype = {
+            "price_promotion": "price_focus",
+            "combo": "product_grid",
+            "product_benefit": "split_right",
+            "institutional": "editorial",
+        }.get(candidate.category, archetype)
+    layout_category = {
+        "hero_center": "single_product",
+        "price_focus": "price_promotion",
+        "product_grid": "combo",
+        "split_left": "product_benefit",
+        "split_right": "product_benefit",
+        "editorial": "institutional",
+    }.get(archetype, candidate.category)
 
     # Coordenadas relativas al area segura. Cada familia tiene una reticula
     # distinta; antes todas las propuestas terminaban siendo el mismo layout
@@ -262,7 +353,7 @@ def _layout(
             "validity": (.42, .91, .52, .04),
             "legal": (0, .965, 1, .032),
         }
-        if candidate.category == "price_promotion":
+        if layout_category == "price_promotion":
             regions.update({
                 "product": (.17, .27, .78, .37),
                 "product_name": (0, .655, .55, .045),
@@ -271,7 +362,7 @@ def _layout(
                 "installment": (.60, .78, .32, .045),
                 "discount": (.70, .57, .26, .075),
             })
-        elif candidate.category == "combo":
+        elif layout_category == "combo":
             regions.update({
                 "product": (.01, .27, .98, .42),
                 "product_name": (0, .71, .60, .05),
@@ -281,7 +372,7 @@ def _layout(
                 "discount": (.73, .63, .24, .07),
                 "cta": (0, .89, .38, .055),
             })
-        elif candidate.category == "product_benefit":
+        elif layout_category == "product_benefit":
             # Editorial partido: argumento a la izquierda y producto alto a la
             # derecha. No es la misma tarjeta apilada del producto simple.
             regions.update({
@@ -291,7 +382,7 @@ def _layout(
                 "product_name": (0, .54, .41, .075),
                 "cta": (0, .65, .35, .065),
             })
-        elif candidate.category == "institutional":
+        elif layout_category == "institutional":
             # Composición tipo portada: mensaje ancho, producto centrado y una
             # franja inferior limpia para nombre/CTA/legal.
             regions.update({
@@ -318,13 +409,13 @@ def _layout(
             "validity": (copy_x + .27, .86, .18, .05),
             "legal": (0, .955, 1, .04),
         }
-        if candidate.category == "price_promotion":
+        if layout_category == "price_promotion":
             regions.update({"product": (product_x, .04, .52, .84), "product_name": (copy_x, .49, .40, .055), "price": (copy_x, .56, .39, .18), "previous_price": (copy_x + .29, .58, .14, .055), "discount": (product_x + .34, .05, .17, .14)})
-        elif candidate.category == "combo":
+        elif layout_category == "combo":
             combo_x = .40 if not mirror else 0
             combo_copy = 0 if not mirror else .62
             regions.update({"product": (combo_x, .06, .60, .82), "headline": (combo_copy, .16, .36, .20), "subheadline": (combo_copy, .38, .34, .11), "product_name": (combo_copy, .52, .35, .08)})
-        elif candidate.category == "product_benefit":
+        elif layout_category == "product_benefit":
             benefit_product_x = .55 if not mirror else 0
             benefit_copy_x = 0 if not mirror else .53
             regions.update({
@@ -334,7 +425,7 @@ def _layout(
                 "product_name": (benefit_copy_x, .64, .40, .07),
                 "cta": (benefit_copy_x, .79, .27, .09),
             })
-        elif candidate.category == "institutional":
+        elif layout_category == "institutional":
             regions.update({
                 "headline": (copy_x, .20, .40, .24),
                 "subheadline": (copy_x, .48, .36, .13),
@@ -358,13 +449,13 @@ def _layout(
             "validity": (copy_x + .35 if not mirror else .18, .84, .42, .05),
             "legal": (0, .94, 1, .045),
         }
-        if candidate.category == "price_promotion":
+        if layout_category == "price_promotion":
             regions.update({"product": (product_x + .05, .23, .57, .56), "price": (copy_x, .46, .40, .16), "discount": (product_x + .39, .22, .21, .10)})
-        elif candidate.category == "combo":
+        elif layout_category == "combo":
             combo_x = .31 if not mirror else 0
             combo_copy = 0 if not mirror else .69
             regions.update({"product": (combo_x, .25, .69, .57), "headline": (combo_copy, .12, .29, .18), "subheadline": (combo_copy, .32, .28, .10), "product_name": (combo_copy, .45, .28, .065), "price": (combo_copy, .53, .29, .12)})
-        elif candidate.category == "product_benefit":
+        elif layout_category == "product_benefit":
             benefit_product_x = .53 if not mirror else 0
             benefit_copy_x = 0 if not mirror else .56
             regions.update({
@@ -374,7 +465,7 @@ def _layout(
                 "product_name": (benefit_copy_x, .54, .41, .07),
                 "cta": (benefit_copy_x, .70, .29, .075),
             })
-        elif candidate.category == "institutional":
+        elif layout_category == "institutional":
             regions.update({
                 "headline": (.10, .15, .80, .19),
                 "subheadline": (.20, .36, .60, .10),
@@ -382,6 +473,26 @@ def _layout(
                 "product_name": (.22, .83, .56, .06),
                 "cta": (.34, .89, .32, .05),
             })
+
+    aspect = "story" if height / width >= 1.62 else "portrait" if portrait else "landscape" if landscape else "square"
+    explicit = blueprint.placements.get(aspect, {})
+    for name, placement in explicit.items():
+        if name not in regions:
+            continue
+        x = min(float(placement.x), .99)
+        y = min(float(placement.y), .99)
+        region_width = min(float(placement.width), 1 - x)
+        region_height = min(float(placement.height), 1 - y)
+        if region_width > 0 and region_height > 0:
+            regions[name] = (x, y, region_width, region_height)
+
+    # Una corrección humana como “producto a la izquierda” debe verse en el
+    # preview aunque el modelo no haya devuelto coordenadas detalladas.
+    if blueprint.archetype == "split_left" and not explicit:
+        regions = {
+            name: (1 - x - region_width, y, region_width, region_height)
+            for name, (x, y, region_width, region_height) in regions.items()
+        }
 
     visible = visible_fields or set(regions)
     product_x, product_y, product_w, product_h = regions["product"]
@@ -714,12 +825,30 @@ def _render(
     }
     regions = _layout(candidate, width, height, safe, proposal, visible)
 
-    background = _gradient(width, height, colours, proposal + len(candidate.name))
+    blueprint = candidate.blueprint
+    background = _background(
+        width,
+        height,
+        colours,
+        proposal + len(candidate.name),
+        blueprint.background_style,
+    )
     layers.append(("00 · Fondo", background))
-    texture = _reference_texture(campaign, candidate, width, height, proposal)
+    texture = (
+        _reference_texture(campaign, candidate, width, height, proposal)
+        if blueprint.background_style == "campaign"
+        else None
+    )
     if texture is not None:
         layers.append(("01 · Atmósfera de campaña", texture))
-    layers.append(("02 · Sistema visual", _decorations(width, height, colours, proposal)))
+    layers.append(
+        (
+            "02 · Sistema visual",
+            _decorations(
+                width, height, colours, proposal, blueprint.accent_style
+            ),
+        )
+    )
     layers.extend(_product_layers(canvas, regions["product"], products or []))
 
     text_specs = [
@@ -741,7 +870,8 @@ def _render(
         colour = (255, 255, 255, 245)
         layer = _text_layer(
             canvas, regions[value_key], value, font_path, colour=colour,
-            bold=is_bold, max_lines=lines, badge=badge, strike=strike,
+            bold=is_bold, max_lines=lines, align=blueprint.text_alignment,
+            badge=badge, strike=strike,
         )
         layers.append((label, layer))
 
@@ -769,20 +899,37 @@ def render_candidate_previews(
 ) -> None:
     folder = campaign_store.ensure_campaign_dirs(campaign.client_id, campaign.campaign_id) / "analysis" / "templates"
     folder.mkdir(parents=True, exist_ok=True)
+    formats = {
+        "portrait": (720, 900),
+        "square": (720, 720),
+        "story": (540, 960),
+        "landscape": (960, 503),
+    }
     for index, candidate in enumerate(candidates, 1):
-        image, layers = _render(
-            campaign, brand_name, candidate, width=720, height=900,
-            safe=dict(DEFAULT_SAFE_AREA), proposal=index,
-        )
-        target = folder / f"{candidate.candidate_id}.png"
-        image.convert("RGB").save(target, format="PNG", optimize=True)
+        candidate.preview_urls = {}
+        for aspect, (width, height) in formats.items():
+            image, layers = _render(
+                campaign,
+                brand_name,
+                candidate,
+                width=width,
+                height=height,
+                safe=dict(DEFAULT_SAFE_AREA),
+                proposal=index,
+            )
+            target = folder / f"{candidate.candidate_id}-{aspect}.png"
+            image.convert("RGB").save(target, format="PNG", optimize=True)
+            candidate.preview_urls[aspect] = (
+                f"/clients/{campaign.client_id}/campaigns/{campaign.campaign_id}/"
+                f"template-candidates/{candidate.candidate_id}/preview?aspect={aspect}"
+            )
+            image.close()
+            for _name, layer in layers:
+                layer.close()
         candidate.preview_url = (
             f"/clients/{campaign.client_id}/campaigns/{campaign.campaign_id}/"
             f"template-candidates/{candidate.candidate_id}/preview"
         )
-        image.close()
-        for _name, layer in layers:
-            layer.close()
 
 
 def _product_tokens(row: MatrixRow) -> list[str]:
@@ -792,23 +939,33 @@ def _product_tokens(row: MatrixRow) -> list[str]:
 
 
 def match_product_paths(row: MatrixRow, products: dict[str, Path]) -> list[Path]:
-    by_key: dict[str, Path] = {}
+    by_key: dict[str, list[Path]] = {}
     for filename, path in products.items():
-        by_key[_normalise(filename)] = path
-        by_key[_normalise(Path(filename).stem)] = path
+        for marker in {_normalise(filename), _normalise(Path(filename).stem)}:
+            if path not in by_key.setdefault(marker, []):
+                by_key[marker].append(path)
     matches: list[Path] = []
     for token in _product_tokens(row):
         key, stem = _normalise(token), _normalise(Path(token).stem)
-        found = by_key.get(key) or by_key.get(stem)
-        if found is None:
+        candidates = list(dict.fromkeys([*by_key.get(key, []), *by_key.get(stem, [])]))
+        if not candidates:
             # Nombre de producto contra nombre de archivo: exige coincidencia
-            # sustancial, no el primer archivo arbitrario.
-            found = next(
-                (path for marker, path in by_key.items() if len(key) >= 3 and (key in marker or marker in key)),
-                None,
+            # sustancial. Si hay dos coincidencias no se adivina silenciosamente.
+            candidates = list(
+                dict.fromkeys(
+                    path
+                    for marker, paths in by_key.items()
+                    if len(key) >= 3 and (key in marker or marker in key)
+                    for path in paths
+                )
             )
-        if found is not None and found not in matches:
-            matches.append(found)
+        if len(candidates) > 1:
+            raise CampaignProductionError(
+                f"Fila {row.row_number}: '{token}' coincide con varias imagenes. "
+                "Escribe el nombre de archivo exacto en la columna imagen."
+            )
+        if candidates and candidates[0] not in matches:
+            matches.append(candidates[0])
     if not matches and len(products) == 1:
         matches = [next(iter(products.values()))]
     return matches
@@ -833,7 +990,15 @@ def complete_copy_once(campaign: Campaign, rows: list[MatrixRow]) -> list[str]:
     if not settings.openai_api_key:
         return ["OpenAI no esta configurado; el copy vacio uso el brief como respaldo."]
     pending = [
-        {"row_number": row.row_number, "product": row.producto, "headline": row.titular, "subtitle": row.subtitulo, "cta": row.cta, "suppressed": row.suppressed_fields}
+        {
+            "row_number": row.row_number,
+            "product": row.producto,
+            "headline": row.titular,
+            "subtitle": row.subtitulo,
+            "cta": row.cta,
+            "instruction": row.notas,
+            "suppressed": row.suppressed_fields,
+        }
         for row in rows
         if any(
             value is None and field not in set(row.suppressed_fields)

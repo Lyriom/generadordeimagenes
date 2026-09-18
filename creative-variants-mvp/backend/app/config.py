@@ -206,6 +206,9 @@ class Settings:
         # el único contenedor de API.
         self.campaign_max_source_mb: int = _env_int("CAMPAIGN_MAX_SOURCE_MB", 500)
         self.campaign_max_request_mb: int = _env_int("CAMPAIGN_MAX_REQUEST_MB", 1500)
+        self.campaign_max_product_batch_mb: int = _env_int(
+            "CAMPAIGN_MAX_PRODUCT_BATCH_MB", 500
+        )
         self.campaign_max_source_megapixels: int = _env_int(
             "CAMPAIGN_MAX_SOURCE_MEGAPIXELS", 80
         )
@@ -238,6 +241,10 @@ class Settings:
     @property
     def campaign_max_request_bytes(self) -> int:
         return self.campaign_max_request_mb * 1024 * 1024
+
+    @property
+    def campaign_max_product_batch_bytes(self) -> int:
+        return self.campaign_max_product_batch_mb * 1024 * 1024
 
     @property
     def campaign_max_source_pixels(self) -> int:

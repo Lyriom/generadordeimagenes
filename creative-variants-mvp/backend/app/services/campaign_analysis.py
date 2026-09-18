@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -20,6 +21,7 @@ from ..models.campaign import (
     CampaignBrief,
     CampaignSourceRole,
     ClientKnowledge,
+    TemplateBlueprint,
     ProductCountRange,
     TemplateCandidate,
     TemplateSlotProposal,
@@ -29,6 +31,156 @@ from . import campaign_store
 from .public_references import PublicReferenceError, inspect_public_url
 
 logger = logging.getLogger(__name__)
+
+_AI_SOURCE_PREVIEW_LIMIT = 8
+_AI_SOCIAL_PREVIEW_LIMIT = 4
+
+
+def _default_blueprint(category: str) -> TemplateBlueprint:
+    """Retícula ejecutable de respaldo; OpenAI puede afinar sus placements."""
+
+    presets = {
+        "single_product": dict(
+            archetype="hero_center", background_style="campaign", accent_style="frame",
+            density="airy", text_alignment="left",
+        ),
+        "price_promotion": dict(
+            archetype="price_focus", background_style="campaign", accent_style="cards",
+            density="compact", text_alignment="left",
+        ),
+        "combo": dict(
+            archetype="product_grid", background_style="gradient", accent_style="diagonal",
+            density="balanced", text_alignment="left",
+        ),
+        "product_benefit": dict(
+            archetype="split_right", background_style="campaign", accent_style="orbs",
+            density="airy", text_alignment="left",
+        ),
+        "institutional": dict(
+            archetype="editorial", background_style="campaign", accent_style="minimal",
+            density="airy", text_alignment="center",
+        ),
+    }
+    return TemplateBlueprint.model_validate(presets.get(category, presets["single_product"]))
+
+
+def _candidate_feedback(campaign: Campaign, category: str) -> str:
+    raw = campaign.meta.get("template_feedback", {})
+    if not isinstance(raw, dict):
+        return ""
+    return str(raw.get(category) or "").strip()[:1000]
+
+
+def _apply_candidate_feedback(
+    campaign: Campaign, candidates: list[TemplateCandidate]
+) -> list[TemplateCandidate]:
+    """Hace ejecutable la corrección incluso si OpenAI no está disponible."""
+
+    for candidate in candidates:
+        note = _candidate_feedback(campaign, candidate.category)
+        if not note:
+            continue
+        candidate.meta["human_feedback"] = note
+        lowered = note.casefold()
+        if any(token in lowered for token in ("minimal", "limpio", "menos elemento", "mas aire", "más aire")):
+            candidate.blueprint.accent_style = "minimal"
+            candidate.blueprint.density = "airy"
+        if any(token in lowered for token in ("precio grande", "precio protagonista", "destacar precio")):
+            candidate.blueprint.archetype = "price_focus"
+            candidate.blueprint.density = "compact"
+        if any(token in lowered for token in ("producto a la izquierda", "producto izquierda")):
+            candidate.blueprint.archetype = "split_left"
+        if any(token in lowered for token in ("producto a la derecha", "producto derecha")):
+            candidate.blueprint.archetype = "split_right"
+        if "centr" in lowered:
+            candidate.blueprint.text_alignment = "center"
+        elif "alineado a la derecha" in lowered:
+            candidate.blueprint.text_alignment = "right"
+    return candidates
+
+
+def _candidate_revision(
+    campaign: Campaign, brief: CampaignBrief, candidate: TemplateCandidate
+) -> str:
+    """Firma lo que una persona ve y aprueba, sin ids ni fechas volátiles."""
+
+    candidate_payload = candidate.model_dump(
+        mode="json",
+        exclude={
+            "candidate_id", "status", "approved", "approved_at", "decision_notes",
+            "preview_url", "revision_hash",
+            "preview_urls",
+        },
+    )
+    brief_payload = brief.model_dump(mode="json", exclude={"generated_at"})
+    social = [
+        {
+            key: item.get(key)
+            for key in ("url", "title", "description", "posts")
+        }
+        for item in campaign.meta.get("social_evidence", [])
+        if isinstance(item, dict)
+    ]
+    payload = {
+        "brief": brief_payload,
+        "candidate": candidate_payload,
+        "sources": [
+            {"source_id": source.source_id, "sha256": source.sha256}
+            for source in campaign.sources
+        ],
+        "social_urls": campaign.social_urls,
+        "social_evidence": social,
+        "feedback": _candidate_feedback(campaign, candidate.category),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _finalise_candidates(
+    campaign: Campaign,
+    brief: CampaignBrief,
+    candidates: list[TemplateCandidate],
+) -> list[TemplateCandidate]:
+    candidates = _apply_candidate_feedback(campaign, candidates)
+    for candidate in candidates:
+        candidate.revision_hash = _candidate_revision(campaign, brief, candidate)
+    return _preserve_decisions(candidates, campaign)
+
+
+def _representative_items(items: list[str], limit: int) -> list[str]:
+    """Muestra estable que cubre principio, centro y final de una secuencia."""
+
+    if limit <= 0 or not items:
+        return []
+    if len(items) <= limit:
+        return list(items)
+    if limit == 1:
+        return [items[0]]
+    indices = {
+        round(position * (len(items) - 1) / (limit - 1))
+        for position in range(limit)
+    }
+    return [items[index] for index in sorted(indices)]
+
+
+def _source_preview_selection(campaign: Campaign, limit: int) -> list[tuple[object, str]]:
+    """Asigna cupos entre fuentes y dentro de cada una de forma uniforme."""
+
+    sources = [source for source in campaign.sources if source.preview_files]
+    if not sources or limit <= 0:
+        return []
+    if len(sources) > limit:
+        positions = _representative_items(
+            [str(index) for index in range(len(sources))], limit
+        )
+        sources = [sources[int(position)] for position in positions]
+    base, extra = divmod(limit, len(sources))
+    selected: list[tuple[object, str]] = []
+    for index, source in enumerate(sources):
+        quota = base + (1 if index < extra else 0)
+        for relative in _representative_items(source.preview_files, quota):
+            selected.append((source, relative))
+    return selected[:limit]
 
 
 def generate(
@@ -49,14 +201,14 @@ def generate(
     if not use_ai:
         return (
             fallback_brief,
-            _preserve_decisions(fallback_candidates, campaign),
+            _finalise_candidates(campaign, fallback_brief, fallback_candidates),
             "deterministic",
             social_warnings,
         )
     if not settings.openai_api_key:
         return (
             fallback_brief,
-            _preserve_decisions(fallback_candidates, campaign),
+            _finalise_candidates(campaign, fallback_brief, fallback_candidates),
             "deterministic",
             [*social_warnings, "OpenAI no esta configurado; se uso el analisis local determinista."],
         )
@@ -65,7 +217,7 @@ def generate(
             campaign, brand, knowledge, fallback_brief, fallback_candidates
         )
         brief = _apply_brief_overrides(brief, campaign)
-        return brief, _preserve_decisions(candidates, campaign), "openai", social_warnings
+        return brief, _finalise_candidates(campaign, brief, candidates), "openai", social_warnings
     except Exception as exc:  # noqa: BLE001 - la campana debe poder seguir offline
         logger.info("Analisis de campana con OpenAI no disponible (%s)", type(exc).__name__)
         if isinstance(exc, httpx.HTTPStatusError):
@@ -78,7 +230,7 @@ def generate(
             reason = "respuesta no valida"
         return (
             fallback_brief,
-            _preserve_decisions(fallback_candidates, campaign),
+            _finalise_candidates(campaign, fallback_brief, fallback_candidates),
             "deterministic",
             [*social_warnings, f"OpenAI no completo el analisis ({reason}); se uso el analisis local."],
         )
@@ -104,7 +256,11 @@ def _collect_social_evidence(campaign: Campaign) -> list[str]:
     cached = {
         str(item.get("url")): item
         for item in campaign.meta.get("social_evidence", [])
-        if isinstance(item, dict) and item.get("url")
+        if (
+            isinstance(item, dict)
+            and item.get("url")
+            and item.get("accessible", True) is not False
+        )
     }
     pending = [url for url in urls if url not in cached]
     warnings: list[str] = []
@@ -116,7 +272,18 @@ def _collect_social_evidence(campaign: Campaign) -> list[str]:
             for future in as_completed(futures):
                 url = futures[future]
                 try:
-                    cached[url] = future.result()
+                    result = future.result()
+                    if result.get("accessible", True) is False:
+                        warnings.append(
+                            f"{url}: la red mostro una pantalla de acceso y no entrego posts. "
+                            "Añade capturas o enlaces publicos a publicaciones."
+                        )
+                        continue
+                    cached[url] = result
+                    if not result.get("posts"):
+                        warnings.append(
+                            f"{url}: se leyo el sitio, pero no expuso imagenes publicas de posts."
+                        )
                 except PublicReferenceError:
                     warnings.append(
                         f"{url}: la red no dejo leer sus posts; usa capturas si son importantes."
@@ -131,6 +298,8 @@ def _combined_text(campaign: Campaign) -> str:
     parts = [source.extracted_text for source in campaign.sources if source.extracted_text]
     for item in campaign.meta.get("social_evidence", []):
         if not isinstance(item, dict):
+            continue
+        if item.get("accessible", True) is False:
             continue
         parts.append(
             "Referencia publica: "
@@ -153,10 +322,7 @@ def _labelled_value(text: str, labels: tuple[str, ...], limit: int = 500) -> str
 def _palette_from_previews(campaign: Campaign) -> list[str]:
     colours: Counter[tuple[int, int, int]] = Counter()
     seen = 0
-    for source in campaign.sources:
-        for relative in source.preview_files:
-            if seen >= 6:
-                break
+    for source, relative in _source_preview_selection(campaign, 8):
             try:
                 path = campaign_store.campaign_path(
                     campaign.client_id, campaign.campaign_id, relative
@@ -169,8 +335,6 @@ def _palette_from_previews(campaign: Campaign) -> list[str]:
                 seen += 1
             except Exception:  # noqa: BLE001 - una miniatura rota no anula las demas
                 continue
-        if seen >= 6:
-            break
     result: list[str] = []
     for (red, green, blue), _ in colours.most_common(50):
         spread = max(red, green, blue) - min(red, green, blue)
@@ -544,7 +708,10 @@ def deterministic_candidates(
                 adaptation_rules=common_rules,
             )
         )
-    return candidates[:count]
+    result = candidates[:count]
+    for candidate in result:
+        candidate.blueprint = _default_blueprint(candidate.category)
+    return result
 
 
 def _apply_client_memory(
@@ -569,6 +736,7 @@ def _apply_client_memory(
         candidate.adaptation_rules = learned.adaptation_rules or candidate.adaptation_rules
         candidate.slots = learned.slots or candidate.slots
         candidate.supported_product_count = learned.supported_product_count
+        candidate.blueprint = learned.blueprint
         candidate.rationale = (
             "Sistema aprendido de una plantilla aprobada del cliente. "
             + (candidate.rationale or learned.rationale)
@@ -582,38 +750,47 @@ def _apply_client_memory(
 
 def _preview_content(campaign: Campaign) -> list[dict]:
     content: list[dict] = []
-    used = 0
-    for source in campaign.sources:
-        for relative in source.preview_files:
-            if used >= 6:
-                return content
-            try:
-                path = campaign_store.campaign_path(
-                    campaign.client_id, campaign.campaign_id, relative
-                )
-                with Image.open(path) as image:
-                    sample = image.convert("RGB")
-                    sample.thumbnail((768, 768), Image.Resampling.LANCZOS)
-                    buffer = io.BytesIO()
-                    sample.save(buffer, format="JPEG", quality=80)
-                url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
-                content.append(
-                    {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
-                )
-                used += 1
-            except Exception:  # noqa: BLE001
-                continue
-    for evidence in campaign.meta.get("social_evidence", []):
-        if used >= 6 or not isinstance(evidence, dict):
-            break
-        for url in evidence.get("posts", []):
-            if used >= 6:
-                break
-            if isinstance(url, str) and url.startswith(("http://", "https://")):
-                content.append(
-                    {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
-                )
-                used += 1
+    for source, relative in _source_preview_selection(
+        campaign, _AI_SOURCE_PREVIEW_LIMIT
+    ):
+        try:
+            path = campaign_store.campaign_path(
+                campaign.client_id, campaign.campaign_id, relative
+            )
+            with Image.open(path) as image:
+                sample = image.convert("RGB")
+                sample.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                buffer = io.BytesIO()
+                sample.save(buffer, format="JPEG", quality=82)
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Vista representativa de {source.filename}: "
+                        f"{Path(relative).name}"
+                    ),
+                }
+            )
+            url = "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+            content.append(
+                {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
+            )
+        except Exception:  # noqa: BLE001
+            continue
+    social_posts = [
+        url
+        for evidence in campaign.meta.get("social_evidence", [])
+        if isinstance(evidence, dict)
+        for url in evidence.get("posts", [])
+        if isinstance(url, str) and url.startswith(("http://", "https://"))
+    ]
+    for url in _representative_items(social_posts, _AI_SOCIAL_PREVIEW_LIMIT):
+        content.append(
+            {"type": "text", "text": "Post publico de referencia del cliente:"}
+        )
+        content.append(
+            {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
+        )
     return content
 
 
@@ -643,7 +820,12 @@ def _openai_analysis(
         "Las plantillas no deben incluir productos reales: deben reservar slots adaptables. "
         "Propone entre 3 y 5 plantillas estaticas segun la evidencia. Todos los campos que "
         "puedan faltar deben llevar required=false y hide_when_empty=true. No inventes ofertas, "
-        "precios, legales ni reglas de marca. Usa unicamente source_ids de la lista.\n\n"
+        "precios, legales ni reglas de marca. Usa unicamente source_ids de la lista. "
+        "Cada candidata debe traer un blueprint ejecutable: elige archetype, alineacion, fondo, "
+        "acentos y, cuando la evidencia permita inferirlos, placements normalizados para "
+        "square, portrait, story y landscape. Las cajas x/y/width/height viven dentro de 0..1, "
+        "no deben solaparse de forma ilegible y producto/copy deben conservar zonas separadas. "
+        "Respeta literalmente template_feedback si existe.\n\n"
         "Forma exacta: {\"brief\": <objeto CampaignBrief>, \"template_candidates\": "
         "[<TemplateCandidate>]}. Conserva todas las claves de estos ejemplos y sustituye el "
         "contenido, sin incluir approved/status/candidate_id: "
@@ -678,6 +860,7 @@ def _openai_analysis(
                     }
                     for item in knowledge.approved_candidates[-8:]
                 ],
+                "template_feedback": campaign.meta.get("template_feedback", {}),
                 "sources": source_manifest,
                 "valid_source_ids": valid_sources,
             },
@@ -701,9 +884,12 @@ def _openai_analysis(
     raw = body["choices"][0]["message"]["content"]
     parsed = json.loads(raw)
     brief = CampaignBrief.model_validate(parsed["brief"])
-    candidates = [
-        TemplateCandidate.model_validate(item) for item in parsed["template_candidates"][:5]
-    ]
+    candidates = []
+    for item in parsed["template_candidates"][:5]:
+        candidate = TemplateCandidate.model_validate(item)
+        if not isinstance(item, dict) or not item.get("blueprint"):
+            candidate.blueprint = _default_blueprint(candidate.category)
+        candidates.append(candidate)
     if len(candidates) < 3:
         existing = {candidate.category for candidate in candidates}
         candidates.extend(
@@ -757,7 +943,12 @@ def _preserve_decisions(
     result: list[TemplateCandidate] = []
     for candidate in candidates:
         old = previous.get(candidate.category)
-        if old is not None and old.status != "proposed":
+        if (
+            old is not None
+            and old.status != "proposed"
+            and bool(old.revision_hash)
+            and old.revision_hash == candidate.revision_hash
+        ):
             candidate.candidate_id = old.candidate_id
             candidate.status = old.status
             candidate.approved = old.approved

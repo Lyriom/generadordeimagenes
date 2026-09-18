@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from app.models.campaign import TemplateCandidate
+from app.models.campaign import NormalizedPlacement, TemplateBlueprint, TemplateCandidate
 from app.models.formats import DEFAULT_SAFE_AREA
 from app.services.campaign_creative import CampaignProductionError, _layout, resolve_format
 
@@ -30,7 +30,17 @@ def _ready_campaign(client: TestClient, artwork_png: bytes) -> tuple[str, str, l
         json={"use_ai": False},
     )
     assert analysis.status_code == 200, analysis.text
-    candidates = analysis.json()["template_candidates"]
+    reviewed = client.put(
+        f"/clients/{client_id}/campaigns/{campaign_id}/brief",
+        json={"objective": analysis.json()["brief"]["objective"]},
+    )
+    assert reviewed.status_code == 200, reviewed.text
+    regenerated = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/brief/generate",
+        json={"use_ai": False, "preserve_review": True},
+    )
+    assert regenerated.status_code == 200, regenerated.text
+    candidates = regenerated.json()["template_candidates"]
     for candidate in candidates:
         approved = client.post(
             f"/clients/{client_id}/campaigns/{campaign_id}/template-candidates/"
@@ -55,6 +65,20 @@ def test_candidatas_tienen_preview_real_sin_crear_proyectos(
     assert preview.headers["content-type"].startswith("image/png")
     with Image.open(io.BytesIO(preview.content)) as image:
         assert image.size == (720, 900)
+    expected = {
+        "portrait": (720, 900),
+        "square": (720, 720),
+        "story": (540, 960),
+        "landscape": (960, 503),
+    }
+    for aspect, size in expected.items():
+        adapted = client.get(
+            f"/clients/{client_id}/campaigns/{campaign_id}/template-candidates/"
+            f"{candidates[0]['candidate_id']}/preview?aspect={aspect}"
+        )
+        assert adapted.status_code == 200, adapted.text
+        with Image.open(io.BytesIO(adapted.content)) as image:
+            assert image.size == size
     assert len(client.get("/projects").json()) == before
 
 
@@ -219,3 +243,37 @@ def test_familias_de_plantilla_tienen_reticulas_distintas_y_dentro_del_lienzo():
                     assert x + region_width <= width
                     assert y + region_height <= height
     assert len(product_regions) == 5
+
+
+def test_layout_usa_placements_inferidos_en_el_blueprint():
+    candidate = TemplateCandidate(
+        name="Inferida desde la campaña",
+        category="single_product",
+        revision_hash="a" * 64,
+        blueprint=TemplateBlueprint(
+            placements={
+                "square": {
+                    "product": NormalizedPlacement(
+                        x=.08, y=.12, width=.44, height=.66
+                    ),
+                    "headline": NormalizedPlacement(
+                        x=.58, y=.18, width=.34, height=.18
+                    ),
+                }
+            }
+        ),
+    )
+
+    regions = _layout(
+        candidate,
+        1000,
+        1000,
+        dict(DEFAULT_SAFE_AREA),
+        proposal=1,
+        visible_fields={"product", "headline", "logo"},
+    )
+
+    product = regions["product"]
+    headline = regions["headline"]
+    assert product[0] < headline[0]
+    assert product[2] > headline[2]

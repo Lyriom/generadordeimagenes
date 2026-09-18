@@ -244,6 +244,15 @@ export interface CampaignWorkspace {
   objective?: string;
   social_urls: string[];
   status?: string;
+  brief_reviewed_at?: string | null;
+  social_evidence?: Array<{
+    url: string;
+    title?: string;
+    description?: string;
+    posts?: string[];
+    accessible?: boolean;
+    blocked_reason?: string;
+  }>;
   created_at?: string;
   updated_at?: string;
 }
@@ -301,10 +310,19 @@ export interface TemplateCandidate {
   supported_product_count?: { min: number; max: number };
   preview?: string | null;
   preview_url?: string | null;
+  preview_urls?: Record<string, string>;
   source_project_id?: string | null;
   warnings: string[];
   approved_at?: string | null;
   decision_notes?: string | null;
+  revision_hash?: string;
+  blueprint?: {
+    archetype?: string;
+    text_alignment?: string;
+    background_style?: string;
+    accent_style?: string;
+    density?: string;
+  };
 }
 
 export interface CampaignBriefResult {

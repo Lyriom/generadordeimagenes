@@ -88,6 +88,16 @@ def test_aliases_de_excel_llegan_al_mismo_contrato():
     assert row.plantilla == "Precio grande"
 
 
+def test_notas_y_restricciones_tienen_el_mismo_contrato_que_el_frontend():
+    [row] = parse_csv(
+        "producto,imagen,restricciones,instrucciones\n"
+        "TV,tv.png,Aplican términos,Producto grande y precio abajo\n"
+    )
+
+    assert row.legal == "Aplican términos"
+    assert row.notas == "Producto grande y precio abajo"
+
+
 def test_selector_prefiere_slots_compatibles_y_soporta_combos():
     [row] = parse_csv(
         "producto,imagen,precio,cta\n"
