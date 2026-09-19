@@ -1,15 +1,65 @@
 """Contrato de la matriz: una fila decide contenido, formatos y propuestas."""
 from __future__ import annotations
 
+import io
+import zipfile
+
 import pytest
 
 from app.services.production_matrix import (
     MatrixParseError,
     parse_csv,
+    parse_matrix,
     requested_piece_count,
     score_template,
     select_template,
 )
+
+
+def _xlsx(rows: list[list[str]]) -> bytes:
+    strings = [cell for row in rows for cell in row]
+    indexes = iter(range(len(strings)))
+    xml_rows = []
+    for row_number, row in enumerate(rows, 1):
+        cells = []
+        for column, _value in enumerate(row, 1):
+            letters = ""
+            number = column
+            while number:
+                number, remainder = divmod(number - 1, 26)
+                letters = chr(65 + remainder) + letters
+            cells.append(
+                f'<c r="{letters}{row_number}" t="s"><v>{next(indexes)}</v></c>'
+            )
+        xml_rows.append(f'<row r="{row_number}">{"".join(cells)}</row>')
+    shared = "".join(f"<si><t>{value}</t></si>" for value in strings)
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"{shared}</sst>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f'<sheetData>{"".join(xml_rows)}</sheetData></worksheet>',
+        )
+    return buffer.getvalue()
+
+
+def test_xlsx_usa_el_mismo_contrato_normalizado_que_csv():
+    rows = parse_matrix(
+        _xlsx([
+            ["producto", "imagen", "precio", "formatos", "propuestas"],
+            ["Televisor", "tv.png", "499", "feed|story", "2"],
+        ]),
+        "pedido.xlsx",
+    )
+
+    assert rows[0].producto == "Televisor"
+    assert rows[0].formatos == ["feed", "story"]
+    assert requested_piece_count(rows) == 4
 
 
 def test_csv_respeta_comas_entre_comillas_y_columnas_en_espanol():

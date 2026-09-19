@@ -51,6 +51,55 @@ def _ready_campaign(client: TestClient, artwork_png: bytes) -> tuple[str, str, l
     return client_id, campaign_id, candidates
 
 
+def _matrix_xlsx() -> bytes:
+    values = [
+        "producto", "imagen", "precio", "formatos", "propuestas",
+        "Televisor", "tv.png", "499", "300x300|320x400", "1",
+    ]
+    shared = "".join(f"<si><t>{value}</t></si>" for value in values)
+    cells = []
+    for row_number, offset in ((1, 0), (2, 5)):
+        row = "".join(
+            f'<c r="{letter}{row_number}" t="s"><v>{offset + index}</v></c>'
+            for index, letter in enumerate("ABCDE")
+        )
+        cells.append(f'<row r="{row_number}">{row}</row>')
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(
+            "xl/sharedStrings.xml",
+            '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f"{shared}</sst>",
+        )
+        archive.writestr(
+            "xl/worksheets/sheet1.xml",
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+            f'<sheetData>{"".join(cells)}</sheetData></worksheet>',
+        )
+    return buffer.getvalue()
+
+
+def test_vista_previa_xlsx_usa_el_contrato_real_de_produccion(
+    client: TestClient, artwork_png: bytes
+):
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+    response = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/preview",
+        files=[(
+            "matrix",
+            (
+                "pedido.xlsx",
+                _matrix_xlsx(),
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            ),
+        )],
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["requested_pieces"] == 2
+    assert response.json()["rows"][0]["producto"] == "Televisor"
+
+
 def test_candidatas_tienen_preview_real_sin_crear_proyectos(
     client: TestClient, artwork_png: bytes
 ):

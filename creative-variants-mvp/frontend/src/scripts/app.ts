@@ -19,6 +19,7 @@ import {
   listClients,
   listProductionBatches,
   loadCampaignState,
+  previewCampaignMatrix,
   produceCampaign,
   reviseCampaignBrief,
   reviseTemplateCandidate,
@@ -4436,7 +4437,7 @@ function productionMatrixHtml(): string {
   const preview = rows.slice(0, 6).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline || "IA / vacío") + '</td><td>' + esc(row.price || "—") + '</td><td>' + esc(row.formats || "Por defecto") + '</td><td>' + String(row.proposals) + '</td></tr>').join("");
   return [
     '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Una fila puede pedir uno o varios productos, formatos y propuestas. “No poner” elimina ese campo.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
-    '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV o TSV</strong><span>producto, imagen, titular, precio, CTA, formatos, propuestas</span></label>',
+    '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,.xlsx,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV, TSV o XLSX</strong><span>producto, imagen, titular, precio, CTA, formatos, propuestas</span></label>',
     '<label class="dropzone compact"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"><span class="drop-icon">⇧</span><strong>2. Subir imágenes de producto</strong><span>Se cruzan con “imagen” o “producto” de cada fila</span></label></div>',
     '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' imágenes vinculadas</span><small>',
     state.productionMatrixFile ? esc(state.productionMatrixFile.name) : "Todavía no has subido la matriz.", '</small></div>',
@@ -4445,97 +4446,43 @@ function productionMatrixHtml(): string {
   ].join("");
 }
 
-const MATRIX_ALIASES: Record<string, keyof MatrixRow> = {
-  producto: "product", product: "product", sku: "product", nombre: "product", nombre_producto: "product",
-  imagen: "image", image: "image", foto: "image", archivo: "image", file: "image", product_image: "image",
-  titular: "headline", headline: "headline", copy: "headline", titulo: "headline",
-  subtitulo: "subtitle", subtitle: "subtitle", subheadline: "subtitle", bajada: "subtitle",
-  precio: "price", precio_actual: "price", precio_oferta: "price", price: "price", current_price: "price",
-  precio_anterior: "previousPrice", precio_antes: "previousPrice", pvp: "previousPrice", old_price: "previousPrice", previous_price: "previousPrice",
-  cuota: "installment", cuotas: "installment", installment: "installment", installments: "installment",
-  descuento: "discount", discount: "discount", ahorro: "discount",
-  cta: "cta", llamado: "cta", llamado_a_la_accion: "cta", call_to_action: "cta",
-  legal: "legal", legales: "legal", terms: "legal", terminos: "legal", restricciones: "legal",
-  vigencia: "validity", validity: "validity", fecha: "validity", fechas: "validity",
-  formatos: "formats", formato: "formats", formats: "formats", format: "formats", tamanos: "formats", medidas: "formats",
-  propuestas: "proposals", cantidad: "proposals", cantidad_propuestas: "proposals", variantes: "proposals", variants: "proposals", proposals: "proposals", count: "proposals",
-  notas: "notes", notes: "notes", instrucciones: "notes",
-  plantilla: "template", template: "template",
-};
-
 function matrixKey(value: string): string {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase()
     .replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
-}
-
-function parseDelimited(text: string, delimiter: string): string[][] {
-  const rows: string[][] = [];
-  let row: string[] = [], cell = "", quoted = false;
-  const source = text.replace(/^\uFEFF/, "");
-  for (let index = 0; index < source.length; index += 1) {
-    const char = source[index];
-    if (char === '"') {
-      if (quoted && source[index + 1] === '"') { cell += '"'; index += 1; }
-      else quoted = !quoted;
-    } else if (char === delimiter && !quoted) {
-      row.push(cell.trim()); cell = "";
-    } else if ((char === "\n" || char === "\r") && !quoted) {
-      if (char === "\r" && source[index + 1] === "\n") index += 1;
-      row.push(cell.trim());
-      if (row.some(Boolean)) rows.push(row);
-      row = []; cell = "";
-    } else cell += char;
-  }
-  row.push(cell.trim());
-  if (row.some(Boolean)) rows.push(row);
-  if (quoted) throw new Error("La matriz tiene una comilla abierta sin cerrar.");
-  return rows;
-}
-
-function parseProductionMatrix(raw: string): MatrixRow[] {
-  const choices = [",", "\t", ";"].map((delimiter) => {
-    const table = parseDelimited(raw, delimiter);
-    const known = (table[0] || []).filter((cell) => MATRIX_ALIASES[matrixKey(cell)]).length;
-    return { delimiter, table, known };
-  }).sort((a, b) => b.known - a.known || b.table[0]?.length - a.table[0]?.length);
-  const best = choices[0];
-  if (!best?.known) throw new Error("No reconozco las cabeceras. Incluye producto, imagen, formatos o precio.");
-  const header = best.table[0].map((cell) => MATRIX_ALIASES[matrixKey(cell)] || null);
-  const suppress = new Set(["no_poner", "no_mostrar", "no_usar", "omitir", "suprimir", "sin_contenido"]);
-  const rows: MatrixRow[] = [];
-  best.table.slice(1).forEach((cells, offset) => {
-    const data: MatrixRow = {
-      product: "", image: "", headline: "", subtitle: "", price: "", previousPrice: "",
-      installment: "", discount: "", cta: "", legal: "", validity: "", formats: "",
-      proposals: 1, notes: "", template: "", omit: [],
-    };
-    header.forEach((field, index) => {
-      if (!field) return;
-      const value = (cells[index] || "").trim();
-      if (field === "proposals") {
-        const amount = value ? Number(value) : 1;
-        if (!Number.isInteger(amount) || amount < 1 || amount > 6) {
-          throw new Error("Fila " + String(offset + 2) + ": propuestas debe estar entre 1 y 6.");
-        }
-        data.proposals = amount;
-      } else if (suppress.has(matrixKey(value))) {
-        data.omit.push(String(field));
-        (data as any)[field] = "";
-      } else {
-        (data as any)[field] = value;
-      }
-    });
-    if (Object.entries(data).some(([key, value]) => key !== "proposals" && key !== "omit" && Boolean(value)) || data.omit.length) rows.push(data);
-  });
-  return rows;
 }
 
 function bindProductionMatrix(): void {
   query<HTMLInputElement>("#production-matrix")?.addEventListener("change", async (event) => {
     const file = (event.currentTarget as HTMLInputElement).files?.[0];
     if (!file) return;
+    if (!state.activeClientId || !state.campaignWorkspace) {
+      toast("Primero abre una campaña para validar la matriz.", "error");
+      return;
+    }
     try {
-      state.productionMatrix = parseProductionMatrix(await file.text());
+      const rows = await previewCampaignMatrix(
+        state.activeClientId,
+        state.campaignWorkspace.campaign_id,
+        file,
+      );
+      state.productionMatrix = rows.map((row: any) => ({
+        product: String(row?.producto || ""),
+        image: String(row?.imagen || ""),
+        headline: String(row?.titular || ""),
+        subtitle: String(row?.subtitulo || ""),
+        price: String(row?.precio_actual || ""),
+        previousPrice: String(row?.precio_anterior || ""),
+        installment: String(row?.cuota || ""),
+        discount: String(row?.descuento || ""),
+        cta: String(row?.cta || ""),
+        legal: String(row?.legal || ""),
+        validity: String(row?.vigencia || ""),
+        formats: Array.isArray(row?.formatos) ? row.formatos.join("|") : "",
+        proposals: Number(row?.cantidad_propuestas || 1),
+        notes: String(row?.notas || ""),
+        template: String(row?.plantilla || ""),
+        omit: Array.isArray(row?.suppressed_fields) ? row.suppressed_fields.map(String) : [],
+      }));
       state.productionMatrixFile = file;
       saveSession();
       toast(String(state.productionMatrix.length) + " filas importadas en la matriz.", "success");

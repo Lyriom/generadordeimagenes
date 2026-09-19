@@ -718,6 +718,32 @@ async def _temporary_products(
 
 
 @router.post(
+    "/{client_id}/campaigns/{campaign_id}/production/preview",
+)
+async def preview_production_matrix(
+    client_id: str,
+    campaign_id: str,
+    matrix: UploadFile = File(...),
+) -> dict[str, object]:
+    """Parsea la matriz con el mismo contrato que usara produccion.
+
+    La UI no mantiene un segundo parser: CSV, TSV y XLSX se validan aqui para
+    que la revision que ve el usuario sea exactamente la tanda que se generara.
+    """
+    _campaign_or_404(client_id, campaign_id)
+    matrix_name, payload = await _matrix_payload(matrix)
+    try:
+        rows = production_matrix.parse_matrix(payload, matrix_name)
+    except production_matrix.MatrixParseError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return {
+        "rows": [row.model_dump(mode="json") for row in rows],
+        "total_rows": len(rows),
+        "requested_pieces": production_matrix.requested_piece_count(rows),
+    }
+
+
+@router.post(
     "/{client_id}/campaigns/{campaign_id}/production",
     response_model=ProductionBatch,
     status_code=status.HTTP_201_CREATED,
@@ -739,7 +765,7 @@ async def produce_campaign(
         )
     matrix_name, payload = await _matrix_payload(matrix)
     try:
-        rows = production_matrix.parse_csv(payload)
+        rows = production_matrix.parse_matrix(payload, matrix_name)
     except production_matrix.MatrixParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     try:

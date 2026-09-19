@@ -449,6 +449,21 @@ export async function produceCampaign(
   return normaliseProductionBatch(payload);
 }
 
+export async function previewCampaignMatrix(
+  clientId: string,
+  campaignId: string,
+  matrix: File,
+): Promise<any[]> {
+  const form = new FormData();
+  form.append("matrix", matrix);
+  const payload: any = await upload(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/production/preview",
+    form,
+  );
+  return list(payload?.rows);
+}
+
 export async function listProductionBatches(
   clientId: string,
   campaignId: string,
