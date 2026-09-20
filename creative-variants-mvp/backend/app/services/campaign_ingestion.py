@@ -34,6 +34,8 @@ SUPPORTED_CAMPAIGN_EXTENSIONS = {
     ".jpg",
     ".jpeg",
     ".webp",
+    ".bmp",
+    ".gif",
     ".tif",
     ".tiff",
     ".avif",
@@ -48,7 +50,9 @@ SUPPORTED_CAMPAIGN_EXTENSIONS = {
     ".otf",
 }
 
-_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".avif"}
+_IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"
+}
 _ZIP_MAX_MEMBERS = 5000
 _TEXT_LIMIT = 60_000
 _PREVIEW_LIMIT = 16

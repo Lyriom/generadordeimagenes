@@ -1,4 +1,4 @@
-import { ApiError, downloadUrl, get, post, put, upload } from "./api";
+import { ApiError, del, downloadUrl, get, post, put, upload } from "./api";
 import type {
   CampaignBriefResult,
   CampaignIntelligence,
@@ -73,9 +73,11 @@ export async function createClient(name: string, socialUrls: string[]): Promise<
 }
 
 export function normaliseCampaign(raw: any, clientId = ""): CampaignWorkspace {
+  const normalizedClientId = String(raw?.client_id || clientId);
+  const campaignId = String(raw?.campaign_id || raw?.id || "");
   return {
-    campaign_id: String(raw?.campaign_id || raw?.id || ""),
-    client_id: String(raw?.client_id || clientId),
+    campaign_id: campaignId,
+    client_id: normalizedClientId,
     name: String(raw?.name || "Campaña sin nombre"),
     objective: raw?.objective ? String(raw.objective) : "",
     social_urls: strings(raw?.social_urls),
@@ -89,9 +91,35 @@ export function normaliseCampaign(raw: any, clientId = ""): CampaignWorkspace {
       accessible: item?.accessible !== false,
       blocked_reason: item?.blocked_reason ? String(item.blocked_reason) : undefined,
     })).filter((item) => item.url),
+    production_assets: list(raw?.production_assets).map((item: any) => ({
+      asset_id: String(item?.asset_id || ""),
+      filename: String(item?.filename || "Imagen sin nombre"),
+      media_type: String(item?.media_type || "application/octet-stream"),
+      extension: String(item?.extension || ""),
+      size_bytes: Number(item?.size_bytes || 0),
+      width: Number(item?.width || 0),
+      height: Number(item?.height || 0),
+      preview_url: downloadUrl(
+        "/clients/" + encodeURIComponent(normalizedClientId) + "/campaigns/" +
+        encodeURIComponent(campaignId) + "/production/assets/" +
+        encodeURIComponent(String(item?.asset_id || "")) + "/file",
+      ),
+    })).filter((item) => item.asset_id),
     created_at: raw?.created_at ? String(raw.created_at) : undefined,
     updated_at: raw?.updated_at ? String(raw.updated_at) : undefined,
   };
+}
+
+function normaliseProductionAssets(
+  raw: any,
+  clientId: string,
+  campaignId: string,
+): CampaignWorkspace["production_assets"] {
+  return normaliseCampaign({
+    client_id: clientId,
+    campaign_id: campaignId,
+    production_assets: raw,
+  }, clientId).production_assets;
 }
 
 export async function listCampaigns(clientId: string): Promise<CampaignWorkspace[]> {
@@ -429,6 +457,7 @@ export async function produceCampaign(
   campaignId: string,
   matrix: File,
   productFiles: File[],
+  productAssetIds: string[],
   defaultFormats: string[],
   useAiCopy: boolean,
   onProgress?: (sent: number, total: number) => void,
@@ -437,6 +466,7 @@ export async function produceCampaign(
   const form = new FormData();
   form.append("matrix", matrix);
   productFiles.forEach((file) => form.append("product_files", file));
+  form.append("product_asset_ids", JSON.stringify(productAssetIds));
   form.append("default_formats", JSON.stringify(defaultFormats));
   form.append("use_ai_copy", String(useAiCopy));
   const payload: any = await upload(
@@ -462,6 +492,37 @@ export async function previewCampaignMatrix(
     form,
   );
   return list(payload?.rows);
+}
+
+export async function uploadCampaignProductAssets(
+  clientId: string,
+  campaignId: string,
+  files: File[],
+  onProgress?: (sent: number, total: number) => void,
+): Promise<{ assets: NonNullable<CampaignWorkspace["production_assets"]>; warnings: string[] }> {
+  const form = new FormData();
+  files.forEach((file) => form.append("files", file));
+  const payload: any = await upload(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/production/assets",
+    form,
+    onProgress,
+  );
+  return {
+    assets: normaliseProductionAssets(payload?.assets, clientId, campaignId) || [],
+    warnings: strings(payload?.warnings),
+  };
+}
+
+export async function deleteCampaignProductAsset(
+  clientId: string,
+  campaignId: string,
+  assetId: string,
+): Promise<void> {
+  await del(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/production/assets/" + encodeURIComponent(assetId),
+  );
 }
 
 export async function listProductionBatches(

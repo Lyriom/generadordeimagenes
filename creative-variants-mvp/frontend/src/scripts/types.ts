@@ -245,6 +245,7 @@ export interface CampaignWorkspace {
   social_urls: string[];
   status?: string;
   brief_reviewed_at?: string | null;
+  production_assets?: CampaignProductionAsset[];
   social_evidence?: Array<{
     url: string;
     title?: string;
@@ -255,6 +256,17 @@ export interface CampaignWorkspace {
   }>;
   created_at?: string;
   updated_at?: string;
+}
+
+export interface CampaignProductionAsset {
+  asset_id: string;
+  filename: string;
+  media_type: string;
+  extension: string;
+  size_bytes: number;
+  width: number;
+  height: number;
+  preview_url: string;
 }
 
 export interface BriefSection {

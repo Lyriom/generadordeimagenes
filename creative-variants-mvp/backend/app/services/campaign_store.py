@@ -133,6 +133,16 @@ def production_root(client_id: str, campaign_id: str) -> Path:
     return root
 
 
+def production_asset_dir(client_id: str, campaign_id: str, asset_id: str) -> Path:
+    """Carpeta privada de una foto de producto antes de generar la tanda."""
+
+    target = production_root(client_id, campaign_id) / "assets" / validate_uuid(
+        asset_id, "asset_id"
+    )
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
 def batch_dir(client_id: str, campaign_id: str, batch_id: str) -> Path:
     target = production_root(client_id, campaign_id) / validate_uuid(batch_id, "batch_id")
     target.mkdir(parents=True, exist_ok=True)

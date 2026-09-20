@@ -13,6 +13,7 @@ import {
 import {
   createCampaign,
   createClient,
+  deleteCampaignProductAsset,
   decideTemplateCandidate,
   generateCampaignBrief,
   listCampaigns,
@@ -24,6 +25,7 @@ import {
   reviseCampaignBrief,
   reviseTemplateCandidate,
   updateCampaignContext,
+  uploadCampaignProductAssets,
   uploadCampaignSources,
 } from "./campaign-api";
 import type {
@@ -42,6 +44,7 @@ import type {
   Variant,
   ViewName,
   CampaignIntelligence,
+  CampaignProductionAsset,
   CampaignSource,
   CampaignWorkspace,
   ClientProfile,
@@ -905,7 +908,7 @@ function campaignBriefHtml(compact: boolean): string {
     '<p>PDF, PPTX, PSD, artes, manuales, logos, textos y tipografías se analizan como contexto. Un PDF sigue siendo un documento; sus páginas no se convierten en campañas ni KV separados.</p></div></div>',
     '<div class="form-grid"><label class="field"><span>Nombre de campaña</span><input id="campaign-name" value="', attr(brief.name), '" placeholder="Ej. Credifest 2026"', intakeDisabled, '></label>',
     '<label class="field"><span>Objetivo conocido · opcional</span><input id="campaign-objective" value="', attr(brief.objective), '" placeholder="La IA lo completará si está vacío"', intakeDisabled, '></label></div>',
-    '<label class="dropzone source-drop" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif,.ttf,.otf"', intakeDisabled, '>',
+    '<label class="dropzone source-drop" id="artwork-drop"><input id="artwork-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,.ttf,.otf"', intakeDisabled, '>',
     '<span class="drop-icon" id="drop-icon">⇧</span><strong class="drop-title" id="drop-title">Arrastra todo el material aquí</strong>',
     '<span class="drop-hint" id="drop-hint">Documentos, presentaciones, PSD, imágenes, logos, textos y tipografías</span></label>',
     '<div id="upload-summary" class="queue-summary" hidden></div><div id="upload-file-list" class="queue-list"></div>',
@@ -1046,7 +1049,7 @@ function activeCampaignHtml(): string {
     '<div class="stat"><strong>', state.campaignIntelligence ? "✓" : "—", '</strong><span>brief IA</span></div>',
     '<div class="stat"><strong>', String(approved), '/', String(state.templateCandidates.length), '</strong><span>plantillas aprobadas</span></div></div>',
     '<div class="campaign-active-grid"><section class="card"><div class="card-head"><div><h2>Material de campaña</h2>',
-    '<p>Cada archivo conserva su función como fuente de conocimiento.</p></div><label class="ghost-button file-button">Añadir material<input id="add-source-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.tif,.tiff,.avif,.ttf,.otf"></label></div>',
+    '<p>Cada archivo conserva su función como fuente de conocimiento.</p></div><label class="ghost-button file-button">Añadir material<input id="add-source-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,.ttf,.otf"></label></div>',
     '<div class="source-list">', sources || '<div class="notice">No hay fuentes guardadas todavía.</div>', '</div></section>',
     '<section class="card"><div class="card-head"><div><h2>Contexto conectado</h2><p>Perfiles que completan el lenguaje visual.</p></div></div>',
     social.length ? '<div class="social-url-list">' + social.map((url) => '<a href="' + attr(url) + '" target="_blank" rel="noreferrer"><i>↗</i><span>' + esc(url.replace(/^https?:\/\//, "")) + '</span></a>').join("") + '</div>' : '<div class="notice">No se añadieron redes; el análisis usa solo los archivos.</div>',
@@ -1369,7 +1372,9 @@ function bindProjectCards(): void {
   });
 }
 
-const ARTWORK_EXTENSIONS = /\.(psd|psb|pdf|pptx|docx|xlsx|csv|tsv|txt|rtf|md|png|jpe?g|webp|tiff?|avif|ttf|otf)$/i;
+const ARTWORK_EXTENSIONS = /\.(psd|psb|pdf|pptx|docx|xlsx|csv|tsv|txt|rtf|md|png|jpe?g|webp|bmp|gif|tiff?|avif|ttf|otf)$/i;
+const PRODUCT_IMAGE_EXTENSIONS = /\.(png|jpe?g|webp|bmp|gif|tiff?|avif)$/i;
+const HEIC_EXTENSIONS = /\.(heic|heif)$/i;
 
 /** Tamaño legible. En MB con un decimal un PNG de 40 KB sale como "0.0 MB",
  *  que es peor que no poner nada: parece que el archivo está vacío. */
@@ -3917,11 +3922,7 @@ function matrixTextOverrides(project: Project, file: File): Array<Record<string,
 }
 
 function matrixFileMatches(row: MatrixRow, file: File): boolean {
-  const base = file.name.replace(/\.[^.]+$/, "").toLowerCase();
-  const targets = (row.image || row.product).split(/[|;]/).map((item) =>
-    item.trim().replace(/\.[^.]+$/, "").toLowerCase()
-  ).filter(Boolean);
-  return targets.some((target) => target === base || base.includes(target) || target.includes(base));
+  return matrixFilenameMatches(row, file.name);
 }
 
 function matrixProductFile(row: MatrixRow): File | undefined {
@@ -4297,6 +4298,30 @@ function matrixFormats(row: MatrixRow): string[] {
   return formats.filter((item, index) => formats.indexOf(item) === index);
 }
 
+/** Misma normalización que el motor: acentos, guiones y mayúsculas no pueden
+ * hacer que una foto correctamente cargada parezca ausente en la interfaz. */
+function productMatchKey(value: string): string {
+  return value.normalize("NFKD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function matrixProductTokens(row: MatrixRow): string[] {
+  return (row.image || row.product || "").split(/[|;]/)
+    .map((item) => item.trim()).filter(Boolean);
+}
+
+function matrixFilenameMatches(row: MatrixRow, filename: string): boolean {
+  return matrixProductTokens(row).some((token) => matrixTokenMatchesFilename(token, filename));
+}
+
+function matrixTokenMatchesFilename(token: string, filename: string): boolean {
+  const full = productMatchKey(filename);
+  const stem = productMatchKey(filename.replace(/\.[^.]+$/, ""));
+  const key = productMatchKey(token);
+  return key === full || key === stem ||
+    (key.length >= 3 && (full.includes(key) || key.includes(full) || stem.includes(key) || key.includes(stem)));
+}
+
 function matrixRequestedPieces(): number {
   const defaultFormatCount = Math.max(1, state.selectedFormats.size);
   return state.productionMatrix.reduce(
@@ -4305,14 +4330,23 @@ function matrixRequestedPieces(): number {
   );
 }
 
-function matrixMatchedFiles(row: MatrixRow): File[] {
-  const targets = (row.image || row.product).split(/[|;]/).map((item) =>
-    item.trim().replace(/\.[^.]+$/, "").toLowerCase(),
-  ).filter(Boolean);
-  return state.products.filter((file) => {
-    const base = file.name.replace(/\.[^.]+$/, "").toLowerCase();
-    return targets.some((target) => target === base || base.includes(target) || target.includes(base));
-  });
+function campaignProductAssets(): CampaignProductionAsset[] {
+  return state.campaignWorkspace?.production_assets || [];
+}
+
+function matrixMatchedAssets(row: MatrixRow): CampaignProductionAsset[] {
+  return campaignProductAssets().filter((asset) => matrixFilenameMatches(row, asset.filename));
+}
+
+function matrixAmbiguousTokens(row: MatrixRow): string[] {
+  return matrixProductTokens(row).filter((token) =>
+    campaignProductAssets().filter((asset) => matrixTokenMatchesFilename(token, asset.filename)).length > 1,
+  );
+}
+
+function matrixRowReady(row: MatrixRow): boolean {
+  return matrixMatchedAssets(row).length >= matrixExpectedProductCount(row) &&
+    matrixAmbiguousTokens(row).length === 0;
 }
 
 function matrixExpectedProductCount(row: MatrixRow): number {
@@ -4321,10 +4355,33 @@ function matrixExpectedProductCount(row: MatrixRow): number {
   return Math.max(1, products.length, images.length);
 }
 
+function matrixProductCard(file: File | CampaignProductionAsset): string {
+  const asset = "asset_id" in file;
+  const filename = asset ? file.filename : file.name;
+  const linked = state.productionMatrix.filter((row) => matrixFilenameMatches(row, filename));
+  const label = linked.length
+    ? "Vinculada a " + linked.slice(0, 2).map((row) => row.product || row.image).join(" · ") +
+      (linked.length > 2 ? " y " + String(linked.length - 2) + " más" : "")
+    : state.productionMatrix.length
+      ? "No coincide con una fila todavía"
+      : "Esperando la matriz para vincularse";
+  return [
+    '<article class="matrix-product-card"><img src="', attr(asset ? file.preview_url : productUrl(file)), '" alt="', attr(filename), '">',
+    '<div><strong>', esc(filename), '</strong><span class="', linked.length ? 'is-linked' : 'is-unlinked', '">',
+    esc(label), '</span><small>', asset
+      ? readableSize(file.size_bytes) + " · " + String(file.width) + "×" + String(file.height)
+      : readableSize(file.size), '</small></div>',
+    '<button type="button" class="matrix-product-remove" ', asset
+      ? 'data-asset-id="' + attr(file.asset_id) + '"'
+      : 'data-product-key="' + attr(productKey(file)) + '"',
+    ' aria-label="Quitar ', attr(filename), '" title="Quitar imagen">×</button></article>',
+  ].join("");
+}
+
 function renderCampaignProduction(): void {
   const rows = state.productionMatrix;
   const matched = rows.filter(
-    (row) => matrixMatchedFiles(row).length >= matrixExpectedProductCount(row),
+    (row) => matrixRowReady(row),
   ).length;
   const approved = state.templateCandidates.filter((item) => item.status === "approved");
   const exact = matrixRequestedPieces();
@@ -4369,10 +4426,15 @@ function renderCampaignProduction(): void {
 
 async function runCampaignProduction(): Promise<void> {
   if (!state.activeClientId || !state.campaignWorkspace || !state.productionMatrixFile) return;
-  if (state.productionMatrix.some(
-    (row) => matrixMatchedFiles(row).length < matrixExpectedProductCount(row)
-  )) {
-    toast("Falta una imagen por cada producto indicado en la matriz, incluidos los combos.", "error");
+  const incomplete = state.productionMatrix.filter((row) => !matrixRowReady(row));
+  if (incomplete.length) {
+    const ambiguous = incomplete.flatMap(matrixAmbiguousTokens);
+    toast(
+      ambiguous.length
+        ? "Hay nombres ambiguos: " + Array.from(new Set(ambiguous)).join(", ") + ". Escribe el archivo exacto en la columna imagen."
+        : "Falta una imagen por cada producto indicado en la matriz, incluidos los combos.",
+      "error",
+    );
     return;
   }
   const useAi = query<HTMLInputElement>("#campaign-ai-copy")?.checked !== false;
@@ -4382,7 +4444,8 @@ async function runCampaignProduction(): Promise<void> {
       state.activeClientId,
       state.campaignWorkspace.campaign_id,
       state.productionMatrixFile,
-      state.products,
+      [],
+      campaignProductAssets().map((asset) => asset.asset_id),
       Array.from(state.selectedFormats),
       useAi,
       (sent, total) => busyProgress(
@@ -4430,17 +4493,38 @@ async function renderGenerate(): Promise<void> {
 
 function productionMatrixHtml(): string {
   const rows = state.productionMatrix;
+  const isCampaign = Boolean(state.campaignWorkspace);
+  const productFiles: Array<File | CampaignProductionAsset> = isCampaign
+    ? campaignProductAssets()
+    : state.products;
   const matched = rows.filter((row) => state.campaignWorkspace
-    ? matrixMatchedFiles(row).length >= matrixExpectedProductCount(row)
+    ? matrixRowReady(row)
     : matrixProductFile(row)
   ).length;
   const preview = rows.slice(0, 6).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline || "IA / vacío") + '</td><td>' + esc(row.price || "—") + '</td><td>' + esc(row.formats || "Por defecto") + '</td><td>' + String(row.proposals) + '</td></tr>').join("");
+  const matchWarnings = state.campaignWorkspace ? rows.flatMap((row) => {
+    const ambiguous = matrixAmbiguousTokens(row);
+    if (ambiguous.length) return [
+      'La fila “' + esc(row.product || row.image || "sin nombre") + '” coincide con varias imágenes para: ' +
+      esc(ambiguous.join(", ")) + ". Especifica el archivo exacto en “imagen”.",
+    ];
+    if (matrixMatchedAssets(row).length < matrixExpectedProductCount(row)) return [
+      'Falta una imagen para la fila “' + esc(row.product || row.image || "sin nombre") + '”.',
+    ];
+    return [];
+  }) : [];
   return [
     '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Una fila puede pedir uno o varios productos, formatos y propuestas. “No poner” elimina ese campo.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
     '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,.xlsx,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV, TSV o XLSX</strong><span>producto, imagen, titular, precio, CTA, formatos, propuestas</span></label>',
-    '<label class="dropzone compact"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.tif,.tiff,.avif"><span class="drop-icon">⇧</span><strong>2. Subir imágenes de producto</strong><span>Se cruzan con “imagen” o “producto” de cada fila</span></label></div>',
+    '<label class="dropzone compact" id="matrix-product-drop"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/tiff,image/avif"><span class="drop-icon">⇧</span><strong>2. Añadir imágenes de producto</strong><span>PNG, JPG, WEBP, BMP, GIF, TIFF o AVIF · también puedes arrastrarlas aquí</span></label></div>',
     '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' imágenes vinculadas</span><small>',
     state.productionMatrixFile ? esc(state.productionMatrixFile.name) : "Todavía no has subido la matriz.", '</small></div>',
+    '<section class="matrix-product-inventory"><div><strong>Imágenes cargadas para esta tanda</strong><span>', String(productFiles.length), productFiles.length === 1 ? ' imagen' : ' imágenes', '</span></div>',
+    productFiles.length
+      ? '<div class="matrix-product-list">' + productFiles.map(matrixProductCard).join("") + '</div>'
+      : '<p class="muted tiny">Aquí aparecerán con miniatura y estado de vínculo. Quedan guardadas dentro de esta campaña y puedes volver después sin cargarlas otra vez.</p>',
+    '</section>',
+    matchWarnings.length ? '<div class="notice warning compact matrix-match-warnings"><strong>Revisa las imágenes:</strong><ul>' + matchWarnings.map((warning) => '<li>' + warning + '</li>').join("") + '</ul></div>' : '',
     rows.length ? '<div class="inventory matrix-preview"><table><thead><tr><th>Producto</th><th>Imagen</th><th>Titular</th><th>Precio</th><th>Formatos</th><th>Propuestas</th></tr></thead><tbody>' + preview + '</tbody></table></div><div class="button-row" style="margin-top:12px"><button class="ghost-button" id="clear-production-matrix">Quitar matriz</button><span class="muted tiny">Vacío = la IA puede completar si corresponde · “no poner” = se omite.</span></div>' : '',
     '</section>',
   ].join("");
@@ -4493,11 +4577,117 @@ function bindProductionMatrix(): void {
       toast(errorMessage(error), "error");
     }
   });
+  const addProductImages = async (incoming: File[]): Promise<void> => {
+    const accepted = incoming.filter((file) => PRODUCT_IMAGE_EXTENSIONS.test(file.name));
+    const unsupported = incoming.filter((file) => !PRODUCT_IMAGE_EXTENSIONS.test(file.name));
+    if (unsupported.length) {
+      const iphone = unsupported.filter((file) => HEIC_EXTENSIONS.test(file.name));
+      const remaining = unsupported.filter((file) => !HEIC_EXTENSIONS.test(file.name));
+      if (iphone.length) {
+        toast("HEIC/HEIF aún no puede procesarse aquí. Exporta esas fotos como JPG o PNG y vuelve a añadirlas.", "error");
+      }
+      if (remaining.length) {
+        toast("No se admiten: " + remaining.map((file) => file.name).join(", ") + ". Usa PNG, JPG, WEBP, BMP, GIF, TIFF o AVIF.", "error");
+      }
+    }
+    if (!accepted.length) return;
+    if (state.activeClientId && state.campaignWorkspace) {
+      const previous = new Set(campaignProductAssets().map((asset) => asset.asset_id));
+      busy("Guardando imágenes de producto", "Subiendo para esta campaña…", 12);
+      try {
+        const uploaded = await uploadCampaignProductAssets(
+          state.activeClientId,
+          state.campaignWorkspace.campaign_id,
+          accepted,
+          (sent, total) => busyProgress(
+            total ? Math.max(12, Math.round(sent / total * 88)) : 45,
+            total ? "Subiendo " + readableSize(sent) + " de " + readableSize(total) : "Subiendo imágenes…",
+          ),
+        );
+        state.campaignWorkspace = {
+          ...state.campaignWorkspace,
+          production_assets: uploaded.assets,
+        };
+        const added = uploaded.assets.filter((asset) => !previous.has(asset.asset_id));
+        uploaded.warnings.forEach((warning) => toast(warning, "info"));
+        toast(
+          added.length
+            ? String(added.length) + (added.length === 1 ? " imagen guardada en la campaña." : " imágenes guardadas en la campaña.")
+            : "Esas imágenes ya estaban guardadas en esta campaña.",
+          added.length ? "success" : "info",
+        );
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        idle();
+      }
+    } else {
+      const before = new Set(state.products.map(productKey));
+      state.products = mergeUniqueFiles(state.products, accepted);
+      const added = accepted.filter((file) => !before.has(productKey(file)));
+      for (const file of added) {
+        if (state.productionMatrix.some((row) => matrixFileMatches(row, file))) {
+          state.individualProducts.add(productKey(file));
+        }
+      }
+      toast(String(added.length) + (added.length === 1 ? " imagen añadida." : " imágenes añadidas."), "success");
+    }
+    saveSession();
+    await renderGenerate();
+  };
   query<HTMLInputElement>("#matrix-product-files")?.addEventListener("change", async (event) => {
-    const files = Array.from((event.currentTarget as HTMLInputElement).files || []).filter((file) => /\.(png|jpe?g|webp|tiff?|avif)$/i.test(file.name));
-    state.products = mergeUniqueFiles(state.products, files);
-    for (const file of files) if (state.productionMatrix.some((row) => matrixFileMatches(row, file))) state.individualProducts.add(productKey(file));
-    saveSession(); toast(String(files.length) + " imágenes añadidas a la tanda.", "success"); await renderGenerate();
+    const input = event.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files || []);
+    // Permite seleccionar el mismo archivo otra vez después de quitarlo.
+    input.value = "";
+    await addProductImages(files);
+  });
+  const productDrop = query<HTMLElement>("#matrix-product-drop");
+  if (productDrop) {
+    ["dragenter", "dragover"].forEach((name) => productDrop.addEventListener(name, (event) => {
+      event.preventDefault();
+      productDrop.classList.add("is-dragging");
+    }));
+    ["dragleave", "dragend"].forEach((name) => productDrop.addEventListener(name, () => productDrop.classList.remove("is-dragging")));
+    productDrop.addEventListener("drop", (event) => {
+      event.preventDefault();
+      productDrop.classList.remove("is-dragging");
+      void addProductImages(Array.from((event as DragEvent).dataTransfer?.files || []));
+    });
+  }
+  queryAll<HTMLButtonElement>(".matrix-product-remove").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const assetId = button.dataset.assetId || "";
+      if (assetId && state.activeClientId && state.campaignWorkspace) {
+        busy("Quitando imagen", "Actualizando los activos de producción…", 35);
+        try {
+          await deleteCampaignProductAsset(
+            state.activeClientId,
+            state.campaignWorkspace.campaign_id,
+            assetId,
+          );
+          state.campaignWorkspace = {
+            ...state.campaignWorkspace,
+            production_assets: campaignProductAssets().filter((asset) => asset.asset_id !== assetId),
+          };
+          toast("Imagen quitada de la campaña.", "success");
+          saveSession();
+          await renderGenerate();
+        } catch (error) {
+          toast(errorMessage(error), "error");
+        } finally {
+          idle();
+        }
+        return;
+      }
+      const key = button.dataset.productKey || "";
+      const removed = state.products.find((file) => productKey(file) === key);
+      state.products = state.products.filter((file) => productKey(file) !== key);
+      state.individualProducts.delete(key);
+      if (removed) productUrls.delete(removed);
+      saveSession();
+      await renderGenerate();
+    });
   });
   query("#clear-production-matrix")?.addEventListener("click", async () => {
     state.productionMatrix = [];

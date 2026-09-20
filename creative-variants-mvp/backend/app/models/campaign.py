@@ -62,6 +62,26 @@ class CampaignSource(BaseModel):
     created_at: str = Field(default_factory=utcnow)
 
 
+class ProductionAsset(BaseModel):
+    """Foto de producto persistida para una tanda, separada del brief.
+
+    No es una fuente de conocimiento: subirla no reanaliza la campaña ni
+    cambia las plantillas. Solo queda disponible para las filas de matriz y
+    sobrevive a una actualización del navegador.
+    """
+
+    asset_id: str = Field(default_factory=new_id)
+    filename: str = Field(min_length=1, max_length=240)
+    media_type: str = Field(default="application/octet-stream", max_length=160)
+    extension: str = Field(min_length=2, max_length=12)
+    size_bytes: int = Field(ge=1)
+    sha256: str = Field(min_length=64, max_length=64)
+    stored_path: str
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    created_at: str = Field(default_factory=utcnow)
+
+
 class BriefField(BaseModel):
     """Campo que una plantilla puede reservar u omitir."""
 
@@ -216,6 +236,7 @@ class Campaign(BaseModel):
         "collecting", "ready_for_brief", "templates_proposed", "templates_approved"
     ] = "collecting"
     sources: list[CampaignSource] = Field(default_factory=list)
+    production_assets: list[ProductionAsset] = Field(default_factory=list)
     brief: CampaignBrief | None = None
     brief_reviewed_at: str | None = None
     template_candidates: list[TemplateCandidate] = Field(default_factory=list)
@@ -290,6 +311,12 @@ class CampaignUpdateRequest(BaseModel):
 class CampaignSourcesResponse(BaseModel):
     campaign_id: str
     sources: list[CampaignSource] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class ProductionAssetsResponse(BaseModel):
+    campaign_id: str
+    assets: list[ProductionAsset] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
 

@@ -256,6 +256,66 @@ def test_rechaza_un_lienzo_que_podria_agotar_la_memoria_del_servidor():
         resolve_format("8000x8000")
 
 
+def test_producto_bmp_se_acepta_como_imagen_de_produccion(
+    client: TestClient, artwork_png: bytes
+):
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+    with Image.open(io.BytesIO(artwork_png)) as source:
+        bmp = io.BytesIO()
+        source.convert("RGB").save(bmp, format="BMP")
+    response = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production",
+        files=[
+            ("matrix", ("matriz.csv", b"producto,imagen,formatos\nTV,tv.bmp,feed\n", "text/csv")),
+            ("product_files", ("tv.bmp", bmp.getvalue(), "image/bmp")),
+        ],
+        data={"default_formats": "[]", "use_ai_copy": "false"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert response.json()["total_pieces"] == 1
+
+
+def test_imagen_de_producto_persistida_sobrevive_y_se_usa_sin_reenviarla(
+    client: TestClient, artwork_png: bytes
+):
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+    uploaded = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/assets",
+        files=[("files", ("televisor.png", artwork_png, "image/png"))],
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    [asset] = uploaded.json()["assets"]
+
+    restored = client.get(f"/clients/{client_id}/campaigns/{campaign_id}")
+    assert restored.status_code == 200
+    assert restored.json()["production_assets"][0]["asset_id"] == asset["asset_id"]
+    file_response = client.get(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/assets/"
+        f"{asset['asset_id']}/file"
+    )
+    assert file_response.status_code == 200
+    assert file_response.content == artwork_png
+
+    response = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production",
+        files=[("matrix", ("matriz.csv", b"producto,imagen,formatos\nTV,televisor.png,feed\n", "text/csv"))],
+        data={
+            "product_asset_ids": f'["{asset["asset_id"]}"]',
+            "default_formats": "[]",
+            "use_ai_copy": "false",
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["total_pieces"] == 1
+
+    deleted = client.delete(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/assets/{asset['asset_id']}"
+    )
+    assert deleted.status_code == 204
+    assert client.get(f"/clients/{client_id}/campaigns/{campaign_id}").json()["production_assets"] == []
+
+
 def test_familias_de_plantilla_tienen_reticulas_distintas_y_dentro_del_lienzo():
     product_regions: set[tuple[int, int, int, int]] = set()
     categories = (

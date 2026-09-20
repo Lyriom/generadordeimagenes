@@ -30,6 +30,8 @@ from ..models.campaign import (
     ClientProfile,
     GenerateBriefRequest,
     GenerateBriefResponse,
+    ProductionAsset,
+    ProductionAssetsResponse,
 )
 from ..models.campaign_production import ProductionBatch, ProductionBatchList
 from ..models.project import new_id, utcnow
@@ -53,6 +55,9 @@ router = APIRouter(
 
 CHUNK = 1024 * 1024
 MAX_FILES_PER_REQUEST = 50
+PRODUCT_IMAGE_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"
+}
 
 
 def _brand_or_404(client_id: str) -> Brand:
@@ -669,52 +674,207 @@ async def _matrix_payload(upload: UploadFile) -> tuple[str, bytes]:
     return name, payload
 
 
-async def _temporary_products(
-    uploads: list[UploadFile], root: Path
-) -> dict[str, Path]:
+async def _read_product_upload(
+    upload: UploadFile, index: int
+) -> tuple[str, str, str, bytes, int, int]:
+    """Lee una foto una vez y la valida antes de guardarla en cualquier sitio."""
+
+    filename = (upload.filename or f"producto-{index + 1}.png")[:240]
+    suffix = Path(filename).suffix.lower()
+    if suffix not in PRODUCT_IMAGE_EXTENSIONS:
+        await upload.close()
+        raise FileValidationError(
+            f"'{filename}' no es una imagen compatible. Usa PNG, JPG, WEBP, BMP, GIF, TIFF o AVIF."
+        )
+    payload = await upload.read(min(settings.max_upload_bytes, 100 * 1024 * 1024) + 1)
+    await upload.close()
+    if len(payload) > min(settings.max_upload_bytes, 100 * 1024 * 1024):
+        raise FileValidationError(f"'{filename}' supera el limite de imagen de producto.")
+    try:
+        with Image.open(io.BytesIO(payload)) as probe:
+            probe.verify()
+        with Image.open(io.BytesIO(payload)) as probe:
+            width, height = probe.size
+            if width * height > settings.campaign_max_product_pixels:
+                raise FileValidationError(f"'{filename}' declara demasiados pixeles.")
+    except FileValidationError:
+        raise
+    except (UnidentifiedImageError, OSError) as exc:
+        raise FileValidationError(f"'{filename}' no se puede decodificar.") from exc
+    media_type = (upload.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream")[:160]
+    return filename, suffix, media_type, payload, width, height
+
+
+async def _temporary_products(uploads: list[UploadFile], root: Path) -> dict[str, Path]:
     if len(uploads) > 200:
         raise FileValidationError("Sube como maximo 200 imagenes de producto por tanda.")
     stored: dict[str, Path] = {}
     seen_names: set[str] = set()
     total_bytes = 0
     for index, upload in enumerate(uploads):
-        filename = (upload.filename or f"producto-{index + 1}.png")[:240]
+        filename, suffix, _media_type, payload, _width, _height = await _read_product_upload(
+            upload, index
+        )
         filename_key = filename.casefold()
         if filename_key in seen_names:
-            await upload.close()
             raise FileValidationError(
                 f"La imagen de producto '{filename}' aparece mas de una vez en la tanda."
             )
         seen_names.add(filename_key)
-        suffix = Path(filename).suffix.lower()
-        if suffix not in {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".avif"}:
-            await upload.close()
-            raise FileValidationError(f"'{filename}' no es una imagen de producto compatible.")
-        payload = await upload.read(min(settings.max_upload_bytes, 100 * 1024 * 1024) + 1)
-        await upload.close()
-        if len(payload) > min(settings.max_upload_bytes, 100 * 1024 * 1024):
-            raise FileValidationError(f"'{filename}' supera el limite de imagen de producto.")
         total_bytes += len(payload)
         if total_bytes > settings.campaign_max_product_batch_bytes:
             raise FileValidationError(
                 "Las imagenes de producto superan el limite conjunto de "
                 f"{settings.campaign_max_product_batch_mb} MB por tanda."
             )
-        try:
-            with Image.open(io.BytesIO(payload)) as probe:
-                probe.verify()
-            with Image.open(io.BytesIO(payload)) as probe:
-                width, height = probe.size
-                if width * height > settings.campaign_max_product_pixels:
-                    raise FileValidationError(f"'{filename}' declara demasiados pixeles.")
-        except FileValidationError:
-            raise
-        except (UnidentifiedImageError, OSError) as exc:
-            raise FileValidationError(f"'{filename}' no se puede decodificar.") from exc
         target = root / f"{index:03d}{suffix}"
         target.write_bytes(payload)
         stored[filename] = target
     return stored
+
+
+async def _store_production_assets(
+    campaign: Campaign, uploads: list[UploadFile]
+) -> tuple[list[ProductionAsset], list[str]]:
+    """Persiste fotos para producción sin convertirlas en fuentes del brief."""
+
+    if not uploads:
+        return campaign.production_assets, []
+    if len(uploads) > 200:
+        raise FileValidationError("Sube como maximo 200 imagenes de producto por tanda.")
+    known_names = {asset.filename.casefold(): asset for asset in campaign.production_assets}
+    total_bytes = sum(asset.size_bytes for asset in campaign.production_assets)
+    created: list[ProductionAsset] = []
+    created_folders: list[Path] = []
+    warnings: list[str] = []
+    try:
+        for index, upload in enumerate(uploads):
+            filename, suffix, media_type, payload, width, height = await _read_product_upload(
+                upload, index
+            )
+            digest = hashlib.sha256(payload).hexdigest()
+            existing = known_names.get(filename.casefold())
+            if existing is not None:
+                if existing.sha256 == digest:
+                    warnings.append(f"'{filename}' ya estaba cargada y se conservara esa imagen.")
+                    continue
+                raise FileValidationError(
+                    f"Ya existe una imagen llamada '{filename}'. Renombra una de las dos para evitar cruces ambiguos."
+                )
+            total_bytes += len(payload)
+            if total_bytes > settings.campaign_max_product_batch_bytes:
+                raise FileValidationError(
+                    "Las imagenes de producto superan el limite conjunto de "
+                    f"{settings.campaign_max_product_batch_mb} MB por campaña."
+                )
+            asset = ProductionAsset(
+                filename=filename,
+                media_type=media_type,
+                extension=suffix,
+                size_bytes=len(payload),
+                sha256=digest,
+                stored_path="",
+                width=width,
+                height=height,
+            )
+            folder = campaign_store.production_asset_dir(
+                campaign.client_id, campaign.campaign_id, asset.asset_id
+            )
+            created_folders.append(folder)
+            target = folder / f"original{suffix}"
+            target.write_bytes(payload)
+            asset.stored_path = campaign_store.relative_path(
+                campaign.client_id, campaign.campaign_id, target
+            )
+            created.append(asset)
+            known_names[filename.casefold()] = asset
+    except Exception:
+        for folder in created_folders:
+            shutil.rmtree(folder, ignore_errors=True)
+        raise
+    if created:
+        campaign.production_assets.extend(created)
+        campaign_store.save_campaign(campaign)
+    return campaign.production_assets, warnings
+
+
+def _stored_product_assets(campaign: Campaign, asset_ids: list[str]) -> dict[str, Path]:
+    """Resuelve únicamente activos declarados por el cliente, sin rutas libres."""
+
+    selected = list(dict.fromkeys(item.strip() for item in asset_ids if item.strip()))
+    available = {asset.asset_id: asset for asset in campaign.production_assets}
+    products: dict[str, Path] = {}
+    for asset_id in selected:
+        asset = available.get(asset_id)
+        if asset is None:
+            raise FileValidationError("Una imagen seleccionada ya no existe en esta campaña. Vuelve a cargarla.")
+        target = campaign_store.campaign_path(
+            campaign.client_id, campaign.campaign_id, asset.stored_path
+        )
+        if not target.exists() or not target.is_file():
+            raise FileValidationError(
+                f"La imagen '{asset.filename}' ya no está disponible. Vuelve a cargarla."
+            )
+        if asset.filename.casefold() in {name.casefold() for name in products}:
+            raise FileValidationError(
+                f"Hay dos imágenes llamadas '{asset.filename}'. Elimina o renombra una antes de producir."
+            )
+        products[asset.filename] = target
+    return products
+
+
+@router.post(
+    "/{client_id}/campaigns/{campaign_id}/production/assets",
+    response_model=ProductionAssetsResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def upload_production_assets(
+    client_id: str,
+    campaign_id: str,
+    files: list[UploadFile] = File(...),
+) -> ProductionAssetsResponse:
+    campaign = _campaign_or_404(client_id, campaign_id)
+    if not files:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Sube al menos una imagen.")
+    assets, warnings = await _store_production_assets(campaign, files)
+    return ProductionAssetsResponse(
+        campaign_id=campaign_id,
+        assets=assets,
+        warnings=warnings,
+    )
+
+
+@router.get(
+    "/{client_id}/campaigns/{campaign_id}/production/assets/{asset_id}/file",
+    response_class=FileResponse,
+)
+def production_asset_file(client_id: str, campaign_id: str, asset_id: str) -> FileResponse:
+    campaign = _campaign_or_404(client_id, campaign_id)
+    asset = next((item for item in campaign.production_assets if item.asset_id == asset_id), None)
+    if asset is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa imagen de producto.")
+    target = campaign_store.campaign_path(client_id, campaign_id, asset.stored_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "La imagen ya no esta disponible.")
+    # Es una URL de vista previa dentro de la interfaz, no una descarga: con
+    # Content-Disposition attachment algunos navegadores no muestran la foto
+    # en el inventario aunque el archivo sí se hubiera guardado.
+    return FileResponse(target, media_type=asset.media_type)
+
+
+@router.delete(
+    "/{client_id}/campaigns/{campaign_id}/production/assets/{asset_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_production_asset(client_id: str, campaign_id: str, asset_id: str) -> None:
+    campaign = _campaign_or_404(client_id, campaign_id)
+    asset = next((item for item in campaign.production_assets if item.asset_id == asset_id), None)
+    if asset is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa imagen de producto.")
+    target = campaign_store.campaign_path(client_id, campaign_id, asset.stored_path)
+    campaign.production_assets = [item for item in campaign.production_assets if item.asset_id != asset_id]
+    campaign_store.save_campaign(campaign)
+    shutil.rmtree(target.parent, ignore_errors=True)
 
 
 @router.post(
@@ -753,6 +913,7 @@ async def produce_campaign(
     campaign_id: str,
     matrix: UploadFile = File(...),
     product_files: list[UploadFile] = File(default=[]),
+    product_asset_ids: str = Form("[]"),
     default_formats: str = Form("[]"),
     use_ai_copy: bool = Form(True),
 ) -> ProductionBatch:
@@ -778,8 +939,34 @@ async def produce_campaign(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "default_formats debe ser una lista JSON.",
         ) from exc
+    try:
+        decoded_asset_ids = json.loads(product_asset_ids or "[]")
+        if not isinstance(decoded_asset_ids, list) or not all(
+            isinstance(item, str) for item in decoded_asset_ids
+        ):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "product_asset_ids debe ser una lista JSON.",
+        ) from exc
     with tempfile.TemporaryDirectory(prefix="creative-products-") as temporary:
-        products = await _temporary_products(product_files, Path(temporary))
+        staged = _stored_product_assets(campaign, decoded_asset_ids)
+        uploaded = await _temporary_products(product_files, Path(temporary))
+        collision = next(
+            (
+                name
+                for name in uploaded
+                if name.casefold() in {item.casefold() for item in staged}
+            ),
+            None,
+        )
+        if collision:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"La imagen '{collision}' esta repetida entre las ya cargadas y las nuevas.",
+            )
+        products = {**staged, **uploaded}
         try:
             return await run_in_threadpool(
                 campaign_creative.produce_batch,
