@@ -285,6 +285,8 @@ export interface CampaignIntelligence {
   concept: string;
   palette: string[];
   typography: string[];
+  headline_style: string;
+  cta_style: string;
   visual_rules: string[];
   product_treatment: string[];
   required_elements: string[];
@@ -324,6 +326,8 @@ export interface TemplateCandidate {
   preview_url?: string | null;
   preview_urls?: Record<string, string>;
   source_project_id?: string | null;
+  /** Fuentes de campaña que sustentaron esta propuesta; no son productos. */
+  source_ids?: string[];
   warnings: string[];
   approved_at?: string | null;
   decision_notes?: string | null;
@@ -374,4 +378,46 @@ export interface ProductionBatch {
   zip_url: string;
   manifest_url: string;
   pieces: ProductionPiece[];
+}
+
+/** Resultado de compatibilidad de una fila de matriz antes de crear una tanda.
+ *
+ * El servidor decide la plantilla compatible con el brief y sus campos. La UI
+ * conserva este plan junto con la matriz para que una recarga no esconda una
+ * incompatibilidad ni haga creer que se puede producir a ciegas. */
+export type MatrixProductionPlanStatus = "ready" | "needs_approval" | "incompatible";
+
+export interface MatrixProductionPlanTemplate {
+  candidate_id: string;
+  name: string;
+}
+
+export interface MatrixProductionPlan {
+  row_number: number;
+  product_count: number;
+  status: MatrixProductionPlanStatus;
+  template: MatrixProductionPlanTemplate | null;
+  required_fields: string[];
+  ai_fillable_fields: string[];
+  message: string;
+}
+
+export interface CampaignMatrixPreview {
+  rows: Record<string, unknown>[];
+  plans: MatrixProductionPlan[];
+  matrixDraftId: string | null;
+}
+
+/** Orden persistente mientras el worker prepara una tanda de campaña. */
+export interface CampaignProductionTask {
+  task_id: string;
+  state: "PENDING" | "STARTED" | "PROGRESS" | "COMPLETED" | "FAILED";
+  result: ProductionBatch | null;
+  error: string | null;
+  meta: {
+    progress?: number;
+    status?: string;
+    planned_pieces?: number;
+    batch_id?: string | null;
+  };
 }

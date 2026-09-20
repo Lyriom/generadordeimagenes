@@ -243,3 +243,26 @@ def test_una_plantilla_combo_no_se_elige_para_un_solo_producto():
 
     assert score_template(row, combo) == float("-inf")
     assert select_template(row, [combo]) is None
+
+
+def test_selector_no_descarta_en_silencio_un_campo_que_llego_en_la_matriz():
+    [row] = parse_csv("titular,precio,cta\nLanzamiento,$49,Reservar\n")
+    institutional = {
+        "candidate_id": "institucional",
+        "name": "Mensaje de campaña",
+        "supported_product_count": {"minimum": 0, "maximum": 0},
+        "slots": [{"id": "titular", "category": "headline"}],
+    }
+    price = {
+        "candidate_id": "precio",
+        "name": "Precio de evento",
+        "supported_product_count": {"minimum": 0, "maximum": 0},
+        "slots": [
+            {"id": "titular", "category": "headline"},
+            {"id": "precio", "category": "price"},
+            {"id": "cta", "category": "cta"},
+        ],
+    }
+
+    assert score_template(row, institutional) == float("-inf")
+    assert select_template(row, [institutional, price]) is price

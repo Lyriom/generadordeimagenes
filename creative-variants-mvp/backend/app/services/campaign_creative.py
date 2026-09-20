@@ -14,7 +14,9 @@ import math
 import re
 import shutil
 import unicodedata
+import warnings
 import zipfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Iterable
 
@@ -28,7 +30,7 @@ from ..models.campaign import Campaign, CampaignBrief, TemplateCandidate
 from ..models.campaign_production import ProductionBatch, ProductionPiece
 from ..models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS, SUPPORTED_FORMATS
 from . import campaign_store
-from .production_matrix import MatrixRow, product_count, select_template
+from .production_matrix import MatrixRow, ai_fillable_fields, product_count, select_template
 from .security import slugify
 
 
@@ -645,7 +647,10 @@ def _remove_simple_background(image: Image.Image) -> Image.Image:
 
 def _fit_product(image: Image.Image, box: tuple[int, int, int, int]) -> Image.Image:
     x, y, w, h = box
-    product = _remove_simple_background(ImageOps.exif_transpose(image))
+    # Las fotos de produccion ya se orientan y reducen al abrirse. Evitar otra
+    # transposicion aqui es importante: una foto con EXIF puede duplicar su
+    # buffer completo justo antes del recorte de fondo.
+    product = _remove_simple_background(image)
     bbox = product.getchannel("A").getbbox()
     if bbox:
         product = product.crop(bbox)
@@ -707,6 +712,9 @@ def _candidate_keys(candidate: TemplateCandidate) -> set[str]:
     return {slot.key for slot in candidate.slots}
 
 
+_COPY_FIELDS = frozenset({"titular", "subtitulo", "cta"})
+
+
 def _values(row: MatrixRow, campaign: Campaign, candidate: TemplateCandidate) -> dict[str, str]:
     brief = campaign.brief or CampaignBrief(objective=campaign.objective)
     values = {
@@ -729,13 +737,26 @@ def _values(row: MatrixRow, campaign: Campaign, candidate: TemplateCandidate) ->
     allowed = _candidate_keys(candidate)
     # Solo los slots marcados para autocompletar reciben un fallback. Precio,
     # descuento, vigencia y legales nunca se inventan.
-    generatable = {slot.key for slot in candidate.slots if slot.generate_if_missing}
+    generatable = ai_fillable_fields(candidate)
     if not values["headline"] and "titular" in generatable and "headline" not in suppressed:
         values["headline"] = brief.primary_message or brief.objective or campaign.objective
     if not values["subheadline"] and "subtitulo" in generatable and "subheadline" not in suppressed:
         values["subheadline"] = brief.creative_concept
-    if not values["cta"] and "cta" in generatable and "cta" not in suppressed:
-        values["cta"] = "Conoce mas"
+    # Los legales sí pueden venir del brief aprobado: no se inventan ni se
+    # completan con una frase genérica. La advertencia local que solo pide
+    # "conservar los legales" reserva el espacio, pero no es copy publicable.
+    if not values["legal"] and "legal" not in suppressed:
+        legal_copy = [
+            item.strip()
+            for item in brief.legal_requirements
+            if item.strip()
+            and not item.casefold().startswith("conservar los legales")
+        ]
+        if legal_copy:
+            values["legal"] = " · ".join(legal_copy)[:700]
+    # El CTA no tiene una frase de respaldo segura: si no llega en la matriz o
+    # desde el completado de copy con contexto real, se oculta. Inventar
+    # "Conoce más" hace que una pieza institucional parezca una promoción.
     key_aliases = {
         "product_name": "nombre_producto", "headline": "titular", "subheadline": "subtitulo",
         "price": "precio", "previous_price": "precio_anterior", "installment": "cuota",
@@ -783,6 +804,125 @@ def _logo_path(campaign: Campaign) -> Path | None:
     return None
 
 
+_FIXED_PSD_ROLES = {"fixed_background", "fixed_decoration"}
+_FIXED_PSD_ASSET_MAX_PIXELS = 6_000_000
+_FIXED_PSD_RENDER_LIMIT = 8
+
+
+def _fixed_psd_asset_layers(
+    campaign: Campaign,
+    candidate: TemplateCandidate,
+    canvas: tuple[int, int],
+) -> list[tuple[str, Image.Image]]:
+    """Compone capas fijas extraídas del PSD que sustenta esta candidata.
+
+    Los assets se guardaron aislados durante la ingesta junto con la caja que
+    ocupaban en el PSD maestro. Aquí se escala esa caja al canvas de destino,
+    no el arte completo: los productos, precios y textos siguen siendo slots
+    nuevos de la matriz. Si falta metadato o el archivo no se puede abrir, la
+    plantilla conserva su fondo determinista normal.
+    """
+
+    source_ids = set(candidate.source_ids)
+    if not source_ids:
+        return []
+    ordered_sources = sorted(
+        (
+            source for source in campaign.sources
+            if source.source_id in source_ids and source.kind.value == "layered_design"
+        ),
+        key=lambda source: candidate.source_ids.index(source.source_id),
+    )
+    descriptors: list[tuple[int, int, int, str, Path, tuple[int, int, int, int], tuple[int, int]]] = []
+    for source_order, source in enumerate(ordered_sources):
+        assets = source.meta.get("layer_assets", [])
+        if not isinstance(assets, list):
+            continue
+        for asset in assets:
+            if not isinstance(asset, dict) or asset.get("role") not in _FIXED_PSD_ROLES:
+                continue
+            relative = asset.get("path")
+            raw_bbox = asset.get("bbox")
+            raw_source_size = asset.get("source_size")
+            if not isinstance(relative, str) or not isinstance(raw_bbox, (list, tuple)):
+                continue
+            if isinstance(raw_source_size, (list, tuple)) and len(raw_source_size) == 2:
+                source_size = raw_source_size
+            else:
+                source_size = (source.width, source.height)
+            try:
+                source_width, source_height = (int(value) for value in source_size)
+                left, top, right, bottom = (int(value) for value in raw_bbox)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if (
+                source_width <= 0
+                or source_height <= 0
+                or source_width * source_height > settings.campaign_max_source_pixels
+            ):
+                continue
+            left, right = max(0, min(source_width, left)), max(0, min(source_width, right))
+            top, bottom = max(0, min(source_height, top)), max(0, min(source_height, bottom))
+            if right <= left or bottom <= top:
+                continue
+            try:
+                path = campaign_store.campaign_path(
+                    campaign.client_id, campaign.campaign_id, relative
+                )
+            except Exception:  # noqa: BLE001 - manifiesto o ruta corrupta
+                continue
+            if not path.exists() or not path.is_file():
+                continue
+            try:
+                z_index = int(asset.get("z_index", 0))
+            except (TypeError, ValueError, OverflowError):
+                z_index = 0
+            role = str(asset["role"])
+            role_order = 0 if role == "fixed_background" else 1
+            descriptors.append(
+                (
+                    role_order, source_order, z_index, str(asset.get("name", "PSD fijo"))[:120],
+                    path, (left, top, right, bottom), (source_width, source_height),
+                )
+            )
+
+    layers: list[tuple[str, Image.Image]] = []
+    width, height = canvas
+    ordered_descriptors = sorted(
+        descriptors, key=lambda item: (item[0], item[1], item[2], item[3])
+    )
+    for _role, _source_order, _z, name, path, bbox, source_size in ordered_descriptors[:_FIXED_PSD_RENDER_LIMIT]:
+        try:
+            with Image.open(path) as probe:
+                if (
+                    probe.width <= 0
+                    or probe.height <= 0
+                    or probe.width * probe.height > _FIXED_PSD_ASSET_MAX_PIXELS
+                ):
+                    continue
+                probe.verify()
+            with Image.open(path) as image:
+                asset = image.convert("RGBA")
+            left, top, right, bottom = bbox
+            source_width, source_height = source_size
+            x = round(left * width / source_width)
+            y = round(top * height / source_height)
+            target_width = max(1, round((right - left) * width / source_width))
+            target_height = max(1, round((bottom - top) * height / source_height))
+            x, y = min(max(0, x), width - 1), min(max(0, y), height - 1)
+            target_width = min(target_width, width - x)
+            target_height = min(target_height, height - y)
+            fitted = asset.resize((target_width, target_height), Image.Resampling.LANCZOS)
+            asset.close()
+            layer = Image.new("RGBA", canvas, (0, 0, 0, 0))
+            layer.alpha_composite(fitted, (x, y))
+            fitted.close()
+            layers.append((f"PSD fijo · {name}", layer))
+        except Exception:  # noqa: BLE001 - un PNG dañado no bloquea producción
+            continue
+    return layers
+
+
 def _render(
     campaign: Campaign,
     brand_name: str,
@@ -808,6 +948,22 @@ def _render(
             "installment": "CUOTAS", "discount": "DESCUENTO", "cta": "CTA",
             "legal": "ESPACIO PARA LEGALES", "validity": "VIGENCIA",
         }
+        # Un slot puede existir como capacidad futura de la matriz sin ser una
+        # afirmación sobre esta campaña. La tarjeta de aprobación no debe
+        # enseñar un precio/descuento ficticio solo para ilustrar esa capacidad.
+        preview_slots = candidate.meta.get("preview_slot_keys")
+        if isinstance(preview_slots, list):
+            preview_keys = {str(item) for item in preview_slots}
+            region_by_slot = {
+                "nombre_producto": "product_name", "titular": "headline",
+                "subtitulo": "subheadline", "precio": "price",
+                "precio_anterior": "previous_price", "cuota": "installment",
+                "descuento": "discount", "cta": "cta", "legal": "legal",
+                "vigencia": "validity",
+            }
+            for slot, region in region_by_slot.items():
+                if slot not in preview_keys:
+                    values[region] = ""
     else:
         values = _values(row, campaign, candidate)
 
@@ -819,9 +975,20 @@ def _render(
         "vigencia": "validity", "logo": "logo", "producto": "product",
         "productos": "product",
     }
+    # En la vista previa del master se conserva un hueco de producto para que
+    # la persona pueda aprobarlo. En producción, una plantilla que admite cero
+    # productos debe liberar esa zona cuando la fila no trae producto/imagen;
+    # mostrar el placeholder en ese caso convertía una pieza institucional en
+    # un arte falso de producto.
+    show_product = row is None or bool(products)
     visible = {
         region for slot, region in slot_to_region.items()
-        if slot in keys and (region in {"product", "logo"} or values.get(region, "").strip())
+        if slot in keys
+        and (
+            region == "logo"
+            or (region == "product" and show_product)
+            or (region not in {"product", "logo"} and values.get(region, "").strip())
+        )
     }
     regions = _layout(candidate, width, height, safe, proposal, visible)
 
@@ -834,9 +1001,12 @@ def _render(
         blueprint.background_style,
     )
     layers.append(("00 · Fondo", background))
+    fixed_psd_layers = _fixed_psd_asset_layers(campaign, candidate, canvas)
+    for index, (_name, layer) in enumerate(fixed_psd_layers, 1):
+        layers.append((f"01.{index:02d} · {_name}", layer))
     texture = (
         _reference_texture(campaign, candidate, width, height, proposal)
-        if blueprint.background_style == "campaign"
+        if blueprint.background_style == "campaign" and not fixed_psd_layers
         else None
     )
     if texture is not None:
@@ -849,7 +1019,13 @@ def _render(
             ),
         )
     )
-    layers.extend(_product_layers(canvas, regions["product"], products or []))
+    has_product_slot = any(
+        slot.category == "product"
+        or slot.key in {"producto", "productos", "product", "products"}
+        for slot in candidate.slots
+    )
+    if has_product_slot and show_product:
+        layers.extend(_product_layers(canvas, regions["product"], products or []))
 
     text_specs = [
         ("Titular", "headline", "titular", bold, True, 3, False, False),
@@ -938,6 +1114,146 @@ def _product_tokens(row: MatrixRow) -> list[str]:
     return [item.strip() for item in re.split(r"[|;]", row.producto) if item.strip()]
 
 
+def _probe_product_image(path: Path) -> tuple[int, int]:
+    """Valida el archivo que se va a abrir, sin confiar solo en la subida.
+
+    Los activos persistidos pueden venir de una versión anterior de la campaña
+    o quedar dañados en disco. ``verify`` detecta archivos truncados y el filtro
+    convierte la advertencia de bomba de descompresión en un error explicable.
+    """
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(path) as image:
+                image.verify()
+            with Image.open(path) as image:
+                width, height = image.size
+    except (OSError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise CampaignProductionError(
+            f"La imagen de producto '{path.name}' no se puede decodificar. "
+            "Vuelve a cargar una copia válida."
+        ) from exc
+    if width <= 0 or height <= 0:
+        raise CampaignProductionError(
+            f"La imagen de producto '{path.name}' no tiene dimensiones válidas."
+        )
+    return width, height
+
+
+def _validate_product_render_budget(
+    row: MatrixRow,
+    product_paths: list[Path],
+    *,
+    max_decode_pixels: int | None = None,
+    max_products: int | None = None,
+) -> None:
+    """Comprueba el coste real de abrir un producto o combo antes de renderizar.
+
+    El límite de subida por archivo no basta: cuatro fotos válidas de 20 Mpx
+    pueden pedir varios cientos de MB a la vez. El presupuesto es por fila,
+    porque las filas se procesan secuencialmente y un mismo producto puede
+    reutilizarse en toda la matriz sin penalizar el lote entero.
+    """
+
+    maximum_products = max(
+        1,
+        int(
+            max_products
+            if max_products is not None
+            else getattr(settings, "campaign_max_products_per_piece", 6)
+        ),
+    )
+    if len(product_paths) > maximum_products:
+        raise CampaignProductionError(
+            f"Fila {row.row_number}: el combo tiene {len(product_paths)} imágenes; "
+            f"el límite seguro es {maximum_products}. Divide el combo en más piezas."
+        )
+
+    native_limit = max(
+        1,
+        int(
+            max_decode_pixels
+            if max_decode_pixels is not None
+            else getattr(
+                settings,
+                "campaign_max_product_decode_pixels",
+                settings.campaign_max_product_pixels,
+            )
+        ),
+    )
+    total_pixels = 0
+    for path in product_paths:
+        width, height = _probe_product_image(path)
+        pixels = width * height
+        if pixels > settings.campaign_max_product_pixels:
+            raise CampaignProductionError(
+                f"La imagen de producto '{path.name}' excede el límite individual "
+                f"de {settings.campaign_max_product_megapixels} Mpx."
+            )
+        total_pixels += pixels
+    if total_pixels > native_limit:
+        raise CampaignProductionError(
+            f"Fila {row.row_number}: las imágenes del producto suman "
+            f"{total_pixels / 1_000_000:.1f} Mpx; el límite seguro para un arte es "
+            f"{native_limit / 1_000_000:.0f} Mpx. Reduce las fotos o divide el combo."
+        )
+
+
+def _open_product_for_render(
+    path: Path, *, max_working_pixels: int | None = None
+) -> Image.Image:
+    """Abre una foto de producto en un tamaño de trabajo seguro para el renderer."""
+
+    _probe_product_image(path)
+    configured_working_limit = (
+        max_working_pixels
+        if max_working_pixels is not None
+        else getattr(
+            settings,
+            "campaign_product_working_pixels",
+            settings.campaign_max_output_pixels,
+        )
+    )
+    # Un producto no necesita más píxeles que el lienzo más grande permitido;
+    # incluso una variable de entorno demasiado generosa no debe retirar esta
+    # protección de memoria.
+    working_limit = max(
+        1,
+        min(int(configured_working_limit), settings.campaign_max_output_pixels),
+    )
+    try:
+        with Image.open(path) as source:
+            # JPEG admite una decodificación reducida; evita materializar una
+            # foto de catálogo de 20 Mpx cuando el slot usa solo unos pocos.
+            if source.format == "JPEG":
+                scale = min(1.0, math.sqrt(working_limit / max(1, source.width * source.height)))
+                if scale < 1.0:
+                    source.draft("RGB", (
+                        max(1, int(source.width * scale)),
+                        max(1, int(source.height * scale)),
+                    ))
+            source.seek(0)
+            source.load()
+            product = ImageOps.exif_transpose(source)
+            pixels = product.width * product.height
+            if pixels > working_limit:
+                scale = math.sqrt(working_limit / pixels)
+                product.thumbnail(
+                    (
+                        max(1, int(product.width * scale)),
+                        max(1, int(product.height * scale)),
+                    ),
+                    Image.Resampling.LANCZOS,
+                )
+            # ``convert`` sucede después de reducir, no sobre la foto nativa.
+            return product.convert("RGBA").copy()
+    except (OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise CampaignProductionError(
+            f"La imagen de producto '{path.name}' no se pudo preparar para el arte."
+        ) from exc
+
+
 def match_product_paths(row: MatrixRow, products: dict[str, Path]) -> list[Path]:
     by_key: dict[str, list[Path]] = {}
     for filename, path in products.items():
@@ -971,7 +1287,7 @@ def match_product_paths(row: MatrixRow, products: dict[str, Path]) -> list[Path]
     return matches
 
 
-def _resolved_formats(tokens: Iterable[str]) -> list[tuple[str, int, int, dict[str, float]]]:
+def resolve_formats(tokens: Iterable[str]) -> list[tuple[str, int, int, dict[str, float]]]:
     """Resuelve y deduplica aliases antes de contar o escribir archivos."""
 
     resolved: list[tuple[str, int, int, dict[str, float]]] = []
@@ -985,10 +1301,26 @@ def _resolved_formats(tokens: Iterable[str]) -> list[tuple[str, int, int, dict[s
     return resolved
 
 
-def complete_copy_once(campaign: Campaign, rows: list[MatrixRow]) -> list[str]:
-    """Completa solo copy generable en una unica llamada para toda la tanda."""
+def complete_copy_once(
+    campaign: Campaign,
+    rows: list[MatrixRow],
+    allowed_fields_by_row: Mapping[int, set[str]] | None = None,
+) -> list[str]:
+    """Completa una vez el copy que cada plantilla aprobada permite.
+
+    ``allowed_fields_by_row`` sale de la selección ya validada. Si falta (por
+    compatibilidad con llamadas internas antiguas), se conservan los tres
+    campos de copy, pero la producción siempre entrega el mapa explícito.
+    """
+
     if not settings.openai_api_key:
         return ["OpenAI no esta configurado; el copy vacio uso el brief como respaldo."]
+
+    def allowed(row: MatrixRow) -> set[str]:
+        if allowed_fields_by_row is None:
+            return set(_COPY_FIELDS)
+        return set(allowed_fields_by_row.get(row.row_number, set())) & _COPY_FIELDS
+
     pending = [
         {
             "row_number": row.row_number,
@@ -1001,7 +1333,7 @@ def complete_copy_once(campaign: Campaign, rows: list[MatrixRow]) -> list[str]:
         }
         for row in rows
         if any(
-            value is None and field not in set(row.suppressed_fields)
+            value is None and field not in set(row.suppressed_fields) and field in allowed(row)
             for field, value in (
                 ("titular", row.titular),
                 ("subtitulo", row.subtitulo),
@@ -1037,11 +1369,12 @@ def complete_copy_once(campaign: Campaign, rows: list[MatrixRow]) -> list[str]:
         for row in rows:
             item = updates.get(row.row_number, {})
             suppressed = set(row.suppressed_fields)
-            if row.titular is None and "titular" not in suppressed:
+            fields = allowed(row)
+            if row.titular is None and "titular" not in suppressed and "titular" in fields:
                 row.titular = str(item.get("headline") or "")[:220] or None
-            if row.subtitulo is None and "subtitulo" not in suppressed:
+            if row.subtitulo is None and "subtitulo" not in suppressed and "subtitulo" in fields:
                 row.subtitulo = str(item.get("subtitle") or "")[:300] or None
-            if row.cta is None and "cta" not in suppressed:
+            if row.cta is None and "cta" not in suppressed and "cta" in fields:
                 row.cta = str(item.get("cta") or "")[:80] or None
         return []
     except Exception:  # noqa: BLE001 - la produccion no depende de la API
@@ -1098,6 +1431,7 @@ def produce_batch(
     matrix_filename: str,
     default_formats: Iterable[str],
     use_ai_copy: bool,
+    on_progress: Callable[[int, int, str], None] | None = None,
 ) -> ProductionBatch:
     approved = [candidate for candidate in campaign.template_candidates if candidate.approved]
     if not approved:
@@ -1106,11 +1440,23 @@ def produce_batch(
         raise CampaignProductionError("La matriz no contiene filas de produccion.")
     defaults = [item for item in default_formats if str(item).strip()] or ["meta_feed_4_5"]
     row_formats = {
-        row.row_number: _resolved_formats(row.formatos or defaults) for row in rows
+        row.row_number: resolve_formats(row.formatos or defaults) for row in rows
     }
     planned = sum(
         len(row_formats[row.row_number]) * row.cantidad_propuestas for row in rows
     )
+
+    def report_progress(done: int, detail: str) -> None:
+        """El renderer no debe fallar si el canal de progreso se interrumpe."""
+
+        if on_progress is None:
+            return
+        try:
+            on_progress(done, planned, detail)
+        except Exception:  # noqa: BLE001 - progreso es observabilidad, no render
+            pass
+
+    report_progress(0, "Validando productos y formatos…")
     maximum = max(1, int(getattr(settings, "campaign_max_pieces", 120)))
     if planned > maximum:
         raise CampaignProductionError(
@@ -1128,9 +1474,16 @@ def produce_batch(
             f"{settings.campaign_max_batch_megapixels} Mpx). Divide la matriz."
         )
     missing: list[tuple[MatrixRow, int, int]] = []
+    row_products: dict[int, list[Path]] = {}
+    row_candidates: dict[int, TemplateCandidate] = {}
     for row in rows:
         expected = product_count(row)
-        found = len(match_product_paths(row, products))
+        # Una fila sin producto puede elegir una plantilla institucional. No
+        # usemos el fallback de ``match_product_paths`` (que toma la única foto
+        # disponible) porque la foto no fue solicitada por esa fila.
+        product_paths = match_product_paths(row, products) if expected else []
+        row_products[row.row_number] = product_paths
+        found = len(product_paths)
         if found < expected:
             missing.append((row, expected, found))
     if missing:
@@ -1143,6 +1496,18 @@ def produce_batch(
             "Faltan imagenes de producto para " + labels
             + ". Cada producto del combo necesita un archivo que coincida con la columna imagen."
         )
+    for row in rows:
+        candidate = select_template(row, approved)
+        if candidate is None:
+            raise CampaignProductionError(
+                f"Fila {row.row_number}: ninguna plantilla aprobada soporta ese contenido o combo."
+            )
+        row_candidates[row.row_number] = candidate
+    # Validar el coste de decodificación antes de crear carpetas, llamar a IA o
+    # abrir píxeles. Un error de tamaño/combo debe ser una respuesta 422 útil,
+    # no un proceso agotado a mitad de la tanda.
+    for row in rows:
+        _validate_product_render_budget(row, row_products[row.row_number])
     batch = ProductionBatch(
         client_id=campaign.client_id,
         campaign_id=campaign.campaign_id,
@@ -1151,21 +1516,20 @@ def produce_batch(
     )
     batch_dir = campaign_store.batch_dir(campaign.client_id, campaign.campaign_id, batch.batch_id)
     if use_ai_copy:
-        batch.warnings.extend(complete_copy_once(campaign, rows))
+        report_progress(0, "Completando el copy permitido por el brief…")
+        allowed_copy_by_row = {
+            row_number: ai_fillable_fields(candidate)
+            for row_number, candidate in row_candidates.items()
+        }
+        batch.warnings.extend(complete_copy_once(campaign, rows, allowed_copy_by_row))
     try:
         for row in rows:
-            candidate = select_template(row, approved)
-            if candidate is None:
-                raise CampaignProductionError(
-                    f"Fila {row.row_number}: ninguna plantilla aprobada soporta ese contenido o combo."
-                )
-            product_paths = match_product_paths(row, products)
+            candidate = row_candidates[row.row_number]
+            product_paths = row_products[row.row_number]
             opened: list[Image.Image] = []
             try:
                 for path in product_paths:
-                    with Image.open(path) as image:
-                        image.load()
-                        opened.append(image.copy())
+                    opened.append(_open_product_for_render(path))
                 for format_id, width, height, safe in row_formats[row.row_number]:
                     for proposal in range(1, row.cantidad_propuestas + 1):
                         final, layers = _render(
@@ -1195,6 +1559,10 @@ def produce_batch(
                             f"production/{batch.batch_id}/files/{png_rel}"
                         )
                         batch.pieces.append(piece)
+                        report_progress(
+                            len(batch.pieces),
+                            f"Renderizando arte {len(batch.pieces)} de {planned}…",
+                        )
                         final.close()
                         for _name, layer in layers:
                             layer.close()
@@ -1203,6 +1571,7 @@ def produce_batch(
                     image.close()
         batch.total_pieces = len(batch.pieces)
         batch.status = "partial" if batch.warnings else "ready"
+        report_progress(planned, "Empaquetando PNG, JPG, PSD y CSV…")
         csv_path, zip_path = _write_manifest(batch_dir, batch)
         batch.manifest_url = (
             f"/clients/{campaign.client_id}/campaigns/{campaign.campaign_id}/production/"
@@ -1213,6 +1582,7 @@ def produce_batch(
             f"{batch.batch_id}/files/{zip_path.name}"
         )
         campaign_store.save_batch(batch)
+        report_progress(planned, "Entregables listos.")
         return batch
     except Exception:
         shutil.rmtree(batch_dir, ignore_errors=True)

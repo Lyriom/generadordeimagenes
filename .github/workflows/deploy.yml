@@ -295,7 +295,9 @@ jobs:
             \[*\]) echo "correcto: API de clientes/campañas disponible" ;;
             *) echo "ERROR: /api/clients no devolvió una lista JSON"; echo "$clientes" | head -c 600; exit 1 ;;
           esac
-          curl -fsS http://127.0.0.1:8014/api/openapi.json \
-            | grep -q '"/clients/{client_id}/campaigns"' || {
+          openapi=$(curl -fsS http://127.0.0.1:8014/api/openapi.json)
+          printf '%s' "$openapi" | grep -q '"/clients/{client_id}/campaigns"' || {
               echo "ERROR: OpenAPI no contiene las rutas campaign-first"; exit 1; }
+          printf '%s' "$openapi" | grep -q '"/clients/{client_id}/campaigns/{campaign_id}/production/assets"' || {
+              echo "ERROR: OpenAPI no contiene la carga persistente de imágenes de producción"; exit 1; }
           REMOTO

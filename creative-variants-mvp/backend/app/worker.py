@@ -29,7 +29,120 @@ celery_app.conf.update(
     task_eager_propagates=EAGER,
     # Sin esto AsyncResult no encontraría el resultado de una tarea eager.
     task_store_eager_result=EAGER,
+    # Una tanda puede tardar varios minutos. El broker solo la confirma al
+    # terminar y la vuelve a entregar si el proceso muere, en vez de dejar un
+    # manifiesto STARTED/PROGRESS huérfano para siempre. Un solo prefetched task
+    # por worker además evita que una cola se vea "en curso" mientras aún espera
+    # en memoria de otro proceso.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    worker_prefetch_multiplier=1,
 )
+
+
+def _campaign_job_state(
+    task: Any,
+    job: Any,
+    state: str,
+    progress: int,
+    detail: str,
+    *,
+    error: str | None = None,
+) -> None:
+    """Sincroniza Redis y el manifiesto en disco de una tanda de campaña.
+
+    Redis permite actualizar el porcentaje rápido; el manifiesto es la fuente
+    durable para que una recarga, una expiración del result backend o el
+    reinicio del worker no borre el estado que ve el equipo.
+    """
+
+    from app.services import campaign_store
+
+    job.state = state
+    job.progress = max(0, min(100, int(progress)))
+    job.detail = detail[:500]
+    job.error = error[:2000] if error else None
+    campaign_store.save_production_job(job)
+    if state in {"STARTED", "PROGRESS"}:
+        task.update_state(
+            state=state,
+            meta={
+                "progress": job.progress,
+                "status": job.detail,
+                "batch_id": job.batch_id,
+            },
+        )
+
+
+@celery_app.task(bind=True, name="produce_campaign_batch_task")
+def produce_campaign_batch_task(self, client_id: str, campaign_id: str, task_id: str):
+    """Renderiza una orden de campaña ya persistida por la API.
+
+    Nunca recibe archivos ni una matriz por Celery: ambos viven en
+    ``production/jobs/<task_id>`` antes de llegar aquí. Eso elimina los límites
+    de serialización del broker y evita que un timeout HTTP cancele la tanda.
+    """
+
+    from app.models.campaign import Campaign
+    from app.services import campaign_creative, campaign_store, production_matrix
+
+    job = campaign_store.load_production_job(client_id, campaign_id, task_id)
+    if job.state == "COMPLETED" and job.batch_id:
+        # Un mensaje redeliverado no debe renderizar una segunda tanda.
+        return {"batch_id": job.batch_id, "status": "COMPLETED"}
+
+    _campaign_job_state(self, job, "STARTED", 4, "Preparando la orden de producción…")
+    try:
+        campaign = Campaign.model_validate(job.campaign_snapshot)
+        rows = [production_matrix.MatrixRow.model_validate(row) for row in job.rows]
+        products: dict[str, Any] = {}
+        for filename, relative_path in job.product_files.items():
+            target = campaign_store.campaign_path(client_id, campaign_id, relative_path)
+            if not target.exists() or not target.is_file():
+                raise campaign_creative.CampaignProductionError(
+                    f"La imagen '{filename}' de esta tanda ya no está disponible."
+                )
+            if filename.casefold() in {name.casefold() for name in products}:
+                raise campaign_creative.CampaignProductionError(
+                    f"La orden contiene dos imágenes llamadas '{filename}'."
+                )
+            products[filename] = target
+
+        def report(done: int, total: int, detail: str) -> None:
+            # 6–96 deja una cola visual para el empaquetado final y evita que
+            # la barra llegue a 100 % antes de que el ZIP exista.
+            progress = 6 + int(90 * done / max(1, total))
+            _campaign_job_state(self, job, "PROGRESS", progress, detail)
+
+        batch = campaign_creative.produce_batch(
+            campaign,
+            job.brand_name,
+            rows,
+            products,
+            matrix_filename=job.matrix_filename,
+            default_formats=job.default_formats,
+            use_ai_copy=job.use_ai_copy,
+            on_progress=report,
+        )
+        job.batch_id = batch.batch_id
+        _campaign_job_state(self, job, "COMPLETED", 100, "Entregables listos.")
+        return {
+            "batch_id": batch.batch_id,
+            "status": "COMPLETED",
+            "total_pieces": batch.total_pieces,
+        }
+    except Exception as exc:
+        # Se conserva la causa por tanda; el navegador puede mostrarla aun si
+        # Redis expira el resultado de Celery después de varios minutos.
+        _campaign_job_state(
+            self,
+            job,
+            "FAILED",
+            job.progress,
+            "La producción no pudo completarse.",
+            error=str(exc),
+        )
+        raise
 
 
 @celery_app.task(bind=True, name="generate_variants_task")

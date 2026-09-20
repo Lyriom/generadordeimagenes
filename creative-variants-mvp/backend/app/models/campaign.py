@@ -333,8 +333,11 @@ class CampaignBriefPatchRequest(BaseModel):
     primary_message: str | None = Field(default=None, max_length=3000)
     creative_concept: str | None = Field(default=None, max_length=1000)
     tone: list[str] | None = None
+    headline_style: str | None = Field(default=None, max_length=1000)
+    cta_style: str | None = Field(default=None, max_length=1000)
     visual_rules: list[str] | None = None
     product_treatment: list[str] | None = None
+    legal_requirements: list[str] | None = None
     required_elements: list[str] | None = None
     optional_elements: list[str] | None = None
     forbidden_elements: list[str] | None = None

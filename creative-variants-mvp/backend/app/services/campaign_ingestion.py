@@ -7,8 +7,10 @@ KV activos.
 from __future__ import annotations
 
 import io
+import math
 import posixpath
 import re
+import unicodedata
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree
@@ -58,6 +60,34 @@ _TEXT_LIMIT = 60_000
 _PREVIEW_LIMIT = 16
 _PDF_TEXT_PAGE_LIMIT = 500
 _EMBEDDED_IMAGE_LIMIT = 50 * 1024 * 1024
+
+# Un PSD puede traer cientos de capas auxiliares. Solo congelamos las que el
+# diseñador identificó de forma explícita como fondo o decoración de marca. Es
+# deliberadamente conservador: una capa ambigua es mejor dejarla como evidencia
+# del brief que reutilizar por error un producto, una oferta o un icono social.
+_PSD_FIXED_ASSET_LIMIT = 8
+_PSD_FIXED_ASSET_MAX_PIXELS = 6_000_000
+_PSD_BACKGROUND_MARKERS = {
+    "background", "backdrop", "bg", "fondo", "gradiente", "gradient",
+    "textura", "texture", "pattern", "patron", "relleno", "backplate",
+}
+_PSD_DECORATION_MARKERS = {
+    "deco", "decoracion", "decorative", "ornamento", "ornament", "marco",
+    "frame", "trama", "linea", "lineas", "line", "forma", "formas",
+    "shape", "shapes", "brillo", "glow", "destello", "spark", "estrella",
+    "star", "onda", "wave", "rayo", "ray", "curva", "curve",
+}
+_PSD_EXCLUDED_MARKERS = {
+    "producto", "product", "sku", "modelo", "pack", "combo", "precio",
+    "price", "oferta", "promo", "promotion", "discount", "descuento",
+    "cuota", "titulo", "titular", "headline", "copy", "texto", "text",
+    "legal", "cta", "llamado", "fecha", "date", "vigencia", "validity",
+    "vencimiento", "vence", "codigo", "code", "qr", "url", "link", "web",
+    "website", "instagram", "insta", "ig", "facebook", "fb", "tiktok", "youtube",
+    "yt", "linkedin", "whatsapp", "twitter", "redes", "social", "icon", "icono",
+    "iconos", "emoji", "foto", "photo", "imagen", "image", "persona", "person",
+}
+_PSD_LOGO_MARKERS = {"logo", "logotipo", "isotipo"}
 
 
 def _representative_indices(total: int, limit: int) -> list[int]:
@@ -696,6 +726,118 @@ def _extract_xlsx(path: Path, source: CampaignSource) -> None:
         source.meta["worksheets"] = len(worksheets)
 
 
+def _psd_name_tokens(name: str) -> set[str]:
+    """Normaliza el nombre humano de una capa sin depender del idioma.
+
+    Photoshop conserva los nombres literalmente. Normalizarlos aqui permite
+    reconocer ``Decoración`` y ``decoracion`` igual, pero sin intentar deducir
+    semántica desde los píxeles de una capa que podría contener un producto.
+    """
+
+    folded = unicodedata.normalize("NFKD", name or "")
+    folded = "".join(char for char in folded if not unicodedata.combining(char))
+    return set(re.findall(r"[a-z0-9]+", folded.casefold()))
+
+
+def _psd_fixed_asset_role(name: str, kind: str, is_group: bool) -> str | None:
+    """Devuelve un rol seguro para una capa PSD que puede congelarse.
+
+    Nunca interpretamos grupos: un grupo llamado ""fondo"" puede incluir el
+    titular, una foto o un precio. Tampoco se reutilizan capas de texto ni
+    nombres que indiquen contenido variable o iconografía de redes. Esta
+    restricción es la que evita que una plantilla copie un arte fuente entero.
+    """
+
+    if is_group or kind.casefold() == "type":
+        return None
+    tokens = _psd_name_tokens(name)
+    if not tokens or tokens.intersection(_PSD_EXCLUDED_MARKERS):
+        return None
+    if tokens.intersection(_PSD_LOGO_MARKERS):
+        return "logo"
+    if tokens.intersection(_PSD_BACKGROUND_MARKERS):
+        return "fixed_background"
+    if tokens.intersection(_PSD_DECORATION_MARKERS):
+        return "fixed_decoration"
+    return None
+
+
+def _psd_bbox(
+    raw_bbox: object, source_width: int, source_height: int
+) -> tuple[int, int, int, int] | None:
+    """Acota una caja de PSD antes de asignar memoria o escribir un asset."""
+
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        return None
+    try:
+        left, top, right, bottom = (int(value) for value in raw_bbox)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    left = max(0, min(source_width, left))
+    right = max(0, min(source_width, right))
+    top = max(0, min(source_height, top))
+    bottom = max(0, min(source_height, bottom))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _asset_rgba_from_psd_layer(
+    layer,
+    bbox: tuple[int, int, int, int],
+    source_size: tuple[int, int],
+) -> Image.Image | None:
+    """Lee una capa aislada con dimensiones conocidas y alpha preservado.
+
+    Dependiendo de la versión de ``psd-tools``, ``Layer.composite`` devuelve
+    bien el recorte de la capa o un canvas completo. Ambos son contratos
+    conocidos; cualquier otro tamaño se descarta en vez de reescalar contenido
+    incierto sobre una zona de plantilla.
+    """
+
+    expected = (bbox[2] - bbox[0], bbox[3] - bbox[1])
+    try:
+        # Los objetos inteligentes pueden devolver el lienzo entero aunque su
+        # caja visible sea pequeña. Pedir el viewport evita decodificar el PSD
+        # completo por cada decoración. Algunos dobles/formatos antiguos no
+        # aceptan ese argumento, por eso conservamos el camino compatible.
+        try:
+            rendered = layer.composite(viewport=bbox)
+        except TypeError:
+            rendered = layer.composite()
+        if rendered is None or rendered.width <= 0 or rendered.height <= 0:
+            return None
+        if rendered.width * rendered.height > settings.campaign_max_source_pixels:
+            return None
+        rgba = rendered.convert("RGBA")
+        if rendered is not rgba:
+            rendered.close()
+        if rgba.size == source_size:
+            cropped = rgba.crop(bbox)
+            rgba.close()
+            rgba = cropped
+        elif rgba.size != expected:
+            rgba.close()
+            return None
+        if rgba.getchannel("A").getbbox() is None:
+            rgba.close()
+            return None
+        if rgba.width * rgba.height > _PSD_FIXED_ASSET_MAX_PIXELS:
+            scale = math.sqrt(_PSD_FIXED_ASSET_MAX_PIXELS / (rgba.width * rgba.height))
+            resized = rgba.resize(
+                (
+                    max(1, int(round(rgba.width * scale))),
+                    max(1, int(round(rgba.height * scale))),
+                ),
+                Image.Resampling.LANCZOS,
+            )
+            rgba.close()
+            rgba = resized
+        return rgba
+    except Exception:  # noqa: BLE001 - una capa rota no invalida todo el PSD
+        return None
+
+
 def _extract_psd(
     client_id: str, campaign_id: str, path: Path, source: CampaignSource
 ) -> None:
@@ -724,55 +866,87 @@ def _extract_psd(
         for index, layer in enumerate(layers[:500]):
             name = str(getattr(layer, "name", "") or f"Capa {index + 1}").strip()
             raw_kind = str(getattr(layer, "kind", "") or "")
-            kind = raw_kind or ("group" if layer.is_group() else "pixel")
-            bbox = [int(value) for value in getattr(layer, "bbox", (0, 0, 0, 0))]
+            is_group = bool(layer.is_group())
+            kind = raw_kind or ("group" if is_group else "pixel")
+            bounded_bbox = _psd_bbox(
+                getattr(layer, "bbox", None), source.width, source.height
+            )
+            bbox = list(bounded_bbox or (0, 0, 0, 0))
             text_value = ""
             if kind == "type":
                 try:
                     text_value = str(layer.text or "").replace("\r", "\n").strip()
                 except Exception:  # noqa: BLE001 - metadato de texto opcional
                     text_value = ""
-            manifest.append(
-                {
-                    "name": name[:240],
-                    "kind": kind[:40],
-                    "visible": bool(getattr(layer, "visible", True)),
-                    "bbox": bbox,
-                    "text": text_value[:1000],
-                }
-            )
+            manifest_item: dict[str, object] = {
+                "name": name[:240],
+                "kind": kind[:40],
+                "visible": bool(getattr(layer, "visible", True)),
+                "bbox": bbox,
+                "text": text_value[:1000],
+            }
+            manifest.append(manifest_item)
             if name:
                 text_chunks.append(f"[Capa] {name}")
             if text_value:
                 text_chunks.append(text_value)
 
-            # Si el PSD nombra su logo, se conserva ese recurso aislado. Esto
-            # evita usar por error la composicion completa (o un icono social)
-            # como marca en las plantillas.
-            marker = name.casefold()
-            is_logo = any(token in marker for token in ("logo", "logotipo", "isotipo"))
-            if not is_logo or len(layer_assets) >= 4 or not bool(getattr(layer, "visible", True)):
+            role = _psd_fixed_asset_role(name, kind, is_group)
+            if (
+                role is None
+                or bounded_bbox is None
+                or not bool(getattr(layer, "visible", True))
+            ):
+                continue
+            # Los logos aislados pueden repetirse unas pocas veces; los fondos
+            # y decoraciones se acotan más fuerte porque se componen en cada
+            # preview y cada pieza de producción.
+            same_role = sum(1 for item in layer_assets if item.get("role") == role)
+            fixed_count = sum(
+                1 for item in layer_assets
+                if item.get("role") in {"fixed_background", "fixed_decoration"}
+            )
+            if role != "logo" and fixed_count >= _PSD_FIXED_ASSET_LIMIT:
+                continue
+            role_limit = {
+                "logo": 4,
+                "fixed_background": 2,
+                "fixed_decoration": 6,
+            }[role]
+            if same_role >= role_limit:
                 continue
             try:
-                layer_width = max(0, bbox[2] - bbox[0])
-                layer_height = max(0, bbox[3] - bbox[1])
-                if not layer_width or not layer_height or layer_width * layer_height > 30_000_000:
+                layer_width = bounded_bbox[2] - bounded_bbox[0]
+                layer_height = bounded_bbox[3] - bounded_bbox[1]
+                if layer_width * layer_height > settings.campaign_max_source_pixels:
                     continue
-                rendered = layer.composite()
-                if rendered is None or rendered.width * rendered.height > 30_000_000:
+                rgba = _asset_rgba_from_psd_layer(
+                    layer, bounded_bbox, (source.width, source.height)
+                )
+                if rgba is None:
                     continue
-                rgba = rendered.convert("RGBA")
-                if rgba.getchannel("A").getbbox() is None:
-                    continue
-                rgba.thumbnail((2000, 2000), Image.Resampling.LANCZOS)
-                target_asset = asset_folder / f"psd-logo-{len(layer_assets) + 1:02d}.png"
+                asset_type = {
+                    "logo": "logo",
+                    "fixed_background": "background",
+                    "fixed_decoration": "decoration",
+                }[role]
+                target_asset = asset_folder / f"psd-{asset_type}-{same_role + 1:02d}.png"
                 target_asset.parent.mkdir(parents=True, exist_ok=True)
                 rgba.save(target_asset, format="PNG", optimize=True)
+                rendered_size = [rgba.width, rgba.height]
+                rgba.close()
                 relative = _relative(client_id, campaign_id, target_asset)
                 source.asset_files.append(relative)
-                layer_assets.append(
-                    {"name": name[:240], "role": "logo", "path": relative, "bbox": bbox}
-                )
+                layer_assets.append({
+                    "name": name[:240],
+                    "role": role,
+                    "path": relative,
+                    "bbox": list(bounded_bbox),
+                    "source_size": [source.width, source.height],
+                    "rendered_size": rendered_size,
+                    "z_index": index,
+                })
+                manifest_item["reusable_asset_role"] = role
             except Exception:  # noqa: BLE001 - el resto del PSD sigue siendo util
                 continue
         source.meta["layer_manifest"] = manifest

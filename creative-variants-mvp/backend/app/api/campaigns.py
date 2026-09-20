@@ -6,10 +6,9 @@ import io
 import json
 import mimetypes
 import shutil
-import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from PIL import Image, UnidentifiedImageError
 from starlette.concurrency import run_in_threadpool
@@ -33,7 +32,13 @@ from ..models.campaign import (
     ProductionAsset,
     ProductionAssetsResponse,
 )
-from ..models.campaign_production import ProductionBatch, ProductionBatchList
+from ..models.campaign_production import (
+    ProductionBatch,
+    ProductionBatchList,
+    ProductionJob,
+    ProductionTaskList,
+    ProductionTaskStatus,
+)
 from ..models.project import new_id, utcnow
 from ..models.template import Brand
 from ..services import (
@@ -44,7 +49,7 @@ from ..services import (
     production_matrix,
     template_store,
 )
-from ..services.security import FileValidationError, slugify
+from ..services.security import FileValidationError, slugify, validate_uuid
 from .deps import bind_session
 
 router = APIRouter(
@@ -57,6 +62,19 @@ CHUNK = 1024 * 1024
 MAX_FILES_PER_REQUEST = 50
 PRODUCT_IMAGE_EXTENSIONS = {
     ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"
+}
+# Nunca se conserva el Content-Type declarado por el navegador: es un dato no
+# confiable y una imagen válida puede subir con ``text/html``. Pillow ya abre el
+# binario para validar sus píxeles; usamos exactamente el formato que decodificó
+# para servirlo después.
+PRODUCT_IMAGE_MEDIA_TYPES = {
+    "PNG": "image/png",
+    "JPEG": "image/jpeg",
+    "WEBP": "image/webp",
+    "BMP": "image/bmp",
+    "GIF": "image/gif",
+    "TIFF": "image/tiff",
+    "AVIF": "image/avif",
 }
 
 
@@ -343,6 +361,46 @@ def campaign_source_file(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "El archivo ya no esta disponible.")
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type, filename=Path(source.filename).stem + path.suffix)
+
+
+@router.delete(
+    "/{client_id}/campaigns/{campaign_id}/sources/{source_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_campaign_source(client_id: str, campaign_id: str, source_id: str) -> None:
+    """Retira evidencia equivocada sin dejarla contaminando el siguiente análisis."""
+
+    campaign = _campaign_or_404(client_id, campaign_id)
+    source = next((item for item in campaign.sources if item.source_id == source_id), None)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa fuente en la campana.")
+    # El job contiene un snapshot del brief/plantillas, pero los recursos de
+    # campaña (logos, fondos y activos PSD) siguen siendo archivos locales.
+    # Borrarlos mientras el worker espera alteraría silenciosamente una tanda
+    # ya aprobada. Al terminar se puede quitar la fuente con normalidad.
+    active_jobs = campaign_store.list_production_jobs(
+        client_id,
+        campaign_id,
+        states={"PENDING", "STARTED", "PROGRESS"},
+    )
+    if active_jobs:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Hay una producción en curso que usa este contexto. Espera a que termine antes de quitar la fuente.",
+        )
+    source_root = campaign_store.campaign_path(
+        client_id, campaign_id, f"sources/{source.source_id}"
+    )
+    campaign.sources = [item for item in campaign.sources if item.source_id != source_id]
+    # El brief y las propuestas fueron construidos con el archivo que se retira;
+    # conservarlos sería peor que pedir un reanálisis explícito.
+    campaign.brief = None
+    campaign.brief_reviewed_at = None
+    campaign.template_candidates = []
+    campaign.analysis_engine = "none"
+    campaign.status = "ready_for_brief"
+    campaign_store.save_campaign(campaign)
+    shutil.rmtree(source_root, ignore_errors=True)
 
 
 @router.post(
@@ -674,6 +732,278 @@ async def _matrix_payload(upload: UploadFile) -> tuple[str, bytes]:
     return name, payload
 
 
+def _default_format_list(raw: str) -> list[str]:
+    """Comparte el contrato JSON entre previsualización y producción."""
+
+    try:
+        decoded = json.loads(raw or "[]")
+        if not isinstance(decoded, list):
+            raise ValueError
+        return [str(item) for item in decoded if str(item).strip()]
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "default_formats debe ser una lista JSON.",
+        ) from exc
+
+
+def _planned_matrix_pieces(
+    rows: list[production_matrix.MatrixRow], default_formats: list[str]
+) -> int:
+    """Cuenta exactamente lo que se produciría, resolviendo aliases y duplicados."""
+
+    defaults = default_formats or ["meta_feed_4_5"]
+    try:
+        return sum(
+            len(campaign_creative.resolve_formats(row.formatos or defaults))
+            * row.cantidad_propuestas
+            for row in rows
+        )
+    except campaign_creative.CampaignProductionError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+_MATRIX_FIELD_LABELS = {
+    "producto": "producto",
+    "titular": "titular",
+    "subtitulo": "subtítulo",
+    "precio_anterior": "precio anterior",
+    "precio": "precio",
+    "cuota": "cuota",
+    "descuento": "descuento",
+    "cta": "CTA",
+    "legal": "legal",
+    "vigencia": "vigencia",
+}
+
+
+def _matrix_requested_fields(row: production_matrix.MatrixRow) -> list[str]:
+    """Campos que una plantilla debe poder representar para esta fila."""
+
+    fields: list[str] = []
+    if production_matrix.product_count(row):
+        fields.append("producto")
+    for field in (
+        "titular",
+        "subtitulo",
+        "precio_anterior",
+        "precio_actual",
+        "cuota",
+        "descuento",
+        "cta",
+        "legal",
+        "vigencia",
+    ):
+        if getattr(row, field) not in (None, ""):
+            # La matriz puede llamarlo ``precio_actual``, pero las plantillas
+            # guardan el slot canónico ``precio``. El plan expone ese mismo
+            # nombre para que UI y aprobación hablen del mismo campo.
+            fields.append("precio" if field == "precio_actual" else field)
+    return fields
+
+
+def _matrix_preview_plans(
+    campaign: Campaign, rows: list[production_matrix.MatrixRow]
+) -> list[dict[str, object]]:
+    """Explica la selección antes de guardar/producir una matriz.
+
+    Esta comprobación no mira fotos: la pantalla permite cargar la matriz antes
+    de subir sus productos. Sí usa exactamente el selector de producción, por
+    lo que una incompatibilidad de slots, combo o plantilla forzada se ve antes
+    de iniciar la tanda y sin descartar el borrador válido.
+    """
+
+    approved = [candidate for candidate in campaign.template_candidates if candidate.approved]
+    plans: list[dict[str, object]] = []
+    for row in rows:
+        fields = _matrix_requested_fields(row)
+        candidate = production_matrix.select_template(row, approved)
+        product_total = production_matrix.product_count(row)
+        if candidate is not None:
+            plans.append(
+                {
+                    "row_number": row.row_number,
+                    "product_count": product_total,
+                    "status": "ready",
+                    "template": {
+                        "candidate_id": candidate.candidate_id,
+                        "name": candidate.name,
+                    },
+                    "required_fields": fields,
+                    "ai_fillable_fields": sorted(production_matrix.ai_fillable_fields(candidate)),
+                    "message": f"Se usará «{candidate.name}» para esta fila.",
+                }
+            )
+            continue
+
+        content = [
+            (f"{product_total} productos" if product_total > 1 else "un producto")
+            if field == "producto" else _MATRIX_FIELD_LABELS[field]
+            for field in fields
+        ]
+        description = ", ".join(content) or "el contenido de la fila"
+        if not approved:
+            plan_status = "needs_approval"
+            message = (
+                "Aún no hay una plantilla aprobada. Revisa y aprueba una propuesta antes de producir."
+            )
+        elif row.plantilla:
+            plan_status = "incompatible"
+            message = (
+                f"La plantilla solicitada «{row.plantilla}» no admite {description}. "
+                "Elige otra plantilla aprobada o corrige la fila."
+            )
+        else:
+            plan_status = "incompatible"
+            message = (
+                f"Ninguna plantilla aprobada admite {description}. "
+                "Aprueba una propuesta compatible o ajusta la matriz."
+            )
+        plans.append(
+            {
+                "row_number": row.row_number,
+                "product_count": product_total,
+                "status": plan_status,
+                "template": None,
+                "required_fields": fields,
+                "ai_fillable_fields": [],
+                "message": message,
+            }
+        )
+    return plans
+
+
+def _save_matrix_draft(
+    campaign: Campaign,
+    *,
+    matrix_name: str,
+    payload: bytes,
+) -> str:
+    """Guarda la matriz ya validada sin exponer una ruta del servidor.
+
+    ``File`` no sobrevive a un F5, pero una fila ya validada no debería exigir
+    volver a subir el XLSX/CSV. El identificador opaco queda ligado a la
+    campaña actual y la producción lo vuelve a parsear al arrancar, de modo que
+    no confía en las filas que el navegador guardó en sessionStorage.
+    """
+
+    suffix = Path(matrix_name).suffix.lower()
+    if suffix not in {".csv", ".tsv", ".xlsx"}:
+        suffix = ".csv"
+    draft_id = new_id()
+    folder = campaign_store.production_draft_dir(
+        campaign.client_id, campaign.campaign_id, draft_id
+    )
+    target = folder / f"matrix{suffix}"
+    try:
+        target.write_bytes(payload)
+        campaign.meta["production_matrix_draft"] = {
+            "draft_id": draft_id,
+            "filename": matrix_name[:240],
+            "stored_path": campaign_store.relative_path(
+                campaign.client_id, campaign.campaign_id, target
+            ),
+        }
+        campaign_store.save_campaign(campaign)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+    return draft_id
+
+
+def _load_matrix_draft(
+    campaign: Campaign, raw_draft_id: str
+) -> tuple[str, bytes]:
+    """Lee exclusivamente la última matriz guardada para esta campaña."""
+
+    draft_id = raw_draft_id.strip()
+    try:
+        validate_uuid(draft_id, "matrix_draft_id")
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    draft = campaign.meta.get("production_matrix_draft")
+    if not isinstance(draft, dict) or draft.get("draft_id") != draft_id:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "La matriz guardada ya no está disponible. Vuelve a validarla.",
+        )
+    relative = draft.get("stored_path")
+    filename = str(draft.get("filename") or "matriz.csv")[:240]
+    if not isinstance(relative, str) or not relative:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "La matriz guardada está incompleta. Vuelve a validarla.",
+        )
+    try:
+        target = campaign_store.campaign_path(
+            campaign.client_id, campaign.campaign_id, relative
+        )
+        payload = target.read_bytes()
+    except (OSError, ValueError) as exc:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "No se encontró el archivo de matriz guardado. Vuelve a validarlo.",
+        ) from exc
+    if not payload or len(payload) > 5 * 1024 * 1024:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "La matriz guardada ya no es válida. Vuelve a subirla.",
+        )
+    return filename, payload
+
+
+def _preflight_production_order(
+    campaign: Campaign,
+    rows: list[production_matrix.MatrixRow],
+    products: dict[str, Path],
+    planned_pieces: int,
+) -> None:
+    """Rechaza errores deterministas antes de dejar una orden en cola."""
+
+    approved = [candidate for candidate in campaign.template_candidates if candidate.approved]
+    if not approved:
+        raise campaign_creative.CampaignProductionError(
+            "Aprueba al menos una plantilla antes de producir."
+        )
+    if planned_pieces > settings.campaign_max_pieces:
+        raise campaign_creative.CampaignProductionError(
+            f"La tanda pide {planned_pieces} artes; el limite por tanda es "
+            f"{settings.campaign_max_pieces}. Dividela en varias matrices."
+        )
+    missing: list[tuple[production_matrix.MatrixRow, int, int]] = []
+    for row in rows:
+        expected = production_matrix.product_count(row)
+        # ``match_product_paths`` tiene un fallback útil para una sola foto
+        # cargada. No debe activarse cuando la matriz no pidió producto: de lo
+        # contrario una pieza institucional acabaría mostrando esa foto.
+        found = (
+            len(campaign_creative.match_product_paths(row, products))
+            if expected
+            else 0
+        )
+        if found < expected:
+            missing.append((row, expected, found))
+    if missing:
+        labels = ", ".join(
+            f"fila {row.row_number} ({found}/{expected} imagenes: "
+            f"{row.imagen or row.producto or 'sin imagen'})"
+            for row, expected, found in missing[:8]
+        )
+        raise campaign_creative.CampaignProductionError(
+            "Faltan imagenes de producto para " + labels
+            + ". Cada producto del combo necesita un archivo que coincida con la columna imagen."
+        )
+    # Solo después de comprobar las fotos se resuelve la plantilla. Así una
+    # fila de combo con una imagen faltante recibe la corrección útil (en vez
+    # de ocultarla detrás de otra incompatibilidad), mientras las filas sin
+    # producto siguen siendo válidas si una institucional las soporta.
+    for row in rows:
+        if production_matrix.select_template(row, approved) is None:
+            raise campaign_creative.CampaignProductionError(
+                f"Fila {row.row_number}: ninguna plantilla aprobada soporta ese contenido o combo."
+            )
+
+
 async def _read_product_upload(
     upload: UploadFile, index: int
 ) -> tuple[str, str, str, bytes, int, int]:
@@ -690,47 +1020,25 @@ async def _read_product_upload(
     await upload.close()
     if len(payload) > min(settings.max_upload_bytes, 100 * 1024 * 1024):
         raise FileValidationError(f"'{filename}' supera el limite de imagen de producto.")
+    decoded_format = ""
     try:
         with Image.open(io.BytesIO(payload)) as probe:
             probe.verify()
         with Image.open(io.BytesIO(payload)) as probe:
             width, height = probe.size
+            decoded_format = str(probe.format or "").upper()
             if width * height > settings.campaign_max_product_pixels:
                 raise FileValidationError(f"'{filename}' declara demasiados pixeles.")
     except FileValidationError:
         raise
     except (UnidentifiedImageError, OSError) as exc:
         raise FileValidationError(f"'{filename}' no se puede decodificar.") from exc
-    media_type = (upload.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream")[:160]
-    return filename, suffix, media_type, payload, width, height
-
-
-async def _temporary_products(uploads: list[UploadFile], root: Path) -> dict[str, Path]:
-    if len(uploads) > 200:
-        raise FileValidationError("Sube como maximo 200 imagenes de producto por tanda.")
-    stored: dict[str, Path] = {}
-    seen_names: set[str] = set()
-    total_bytes = 0
-    for index, upload in enumerate(uploads):
-        filename, suffix, _media_type, payload, _width, _height = await _read_product_upload(
-            upload, index
+    media_type = PRODUCT_IMAGE_MEDIA_TYPES.get(decoded_format)
+    if media_type is None:
+        raise FileValidationError(
+            f"'{filename}' usa un formato de imagen que no se puede servir de forma segura."
         )
-        filename_key = filename.casefold()
-        if filename_key in seen_names:
-            raise FileValidationError(
-                f"La imagen de producto '{filename}' aparece mas de una vez en la tanda."
-            )
-        seen_names.add(filename_key)
-        total_bytes += len(payload)
-        if total_bytes > settings.campaign_max_product_batch_bytes:
-            raise FileValidationError(
-                "Las imagenes de producto superan el limite conjunto de "
-                f"{settings.campaign_max_product_batch_mb} MB por tanda."
-            )
-        target = root / f"{index:03d}{suffix}"
-        target.write_bytes(payload)
-        stored[filename] = target
-    return stored
+    return filename, suffix, media_type, payload, width, height
 
 
 async def _store_production_assets(
@@ -823,6 +1131,76 @@ def _stored_product_assets(campaign: Campaign, asset_ids: list[str]) -> dict[str
     return products
 
 
+def _persist_production_job(
+    campaign: Campaign,
+    brand_name: str,
+    rows: list[production_matrix.MatrixRow],
+    products: dict[str, Path],
+    *,
+    matrix_name: str,
+    matrix_payload: bytes,
+    asset_ids: list[str],
+    default_formats: list[str],
+    use_ai_copy: bool,
+    planned_pieces: int,
+) -> ProductionJob:
+    """Guarda todo lo que necesita el worker antes de tocar el broker.
+
+    Los activos se copian al directorio de la orden, en vez de referenciarlos
+    desde la biblioteca de productos. Así el usuario puede limpiar o reemplazar
+    una foto mientras la tarea espera sin corromper una tanda que ya aprobó.
+    """
+
+    job = ProductionJob(
+        client_id=campaign.client_id,
+        campaign_id=campaign.campaign_id,
+        matrix_filename=matrix_name[:240],
+        product_asset_ids=list(dict.fromkeys(asset_ids)),
+        rows=[row.model_dump(mode="json") for row in rows],
+        default_formats=default_formats,
+        use_ai_copy=use_ai_copy,
+        brand_name=brand_name[:240],
+        campaign_snapshot=campaign.model_dump(mode="json"),
+        planned_pieces=planned_pieces,
+    )
+    job_dir = campaign_store.production_job_dir(
+        campaign.client_id, campaign.campaign_id, job.task_id
+    )
+    try:
+        # No se usa el nombre suministrado por el navegador como ruta. Solo se
+        # conserva para mostrarlo y el worker recibe archivos de nombres fijos.
+        suffix = Path(matrix_name).suffix.lower()
+        if suffix not in {".csv", ".tsv", ".xlsx"}:
+            suffix = ".csv"
+        matrix_target = job_dir / f"matrix{suffix}"
+        matrix_target.write_bytes(matrix_payload)
+        job.matrix_path = campaign_store.relative_path(
+            campaign.client_id, campaign.campaign_id, matrix_target
+        )
+
+        products_dir = job_dir / "products"
+        products_dir.mkdir(parents=True, exist_ok=True)
+        for index, (filename, source) in enumerate(products.items()):
+            extension = Path(filename).suffix.lower()
+            # Todos vienen de ProductionAsset o de _read_product_upload, pero
+            # mantenemos esta guarda para que una biblioteca antigua no cree
+            # una ruta impredecible dentro de la orden.
+            if extension not in PRODUCT_IMAGE_EXTENSIONS:
+                raise FileValidationError(
+                    f"La imagen '{filename}' no tiene una extensión compatible."
+                )
+            target = products_dir / f"{index:03d}{extension}"
+            shutil.copyfile(source, target)
+            job.product_files[filename] = campaign_store.relative_path(
+                campaign.client_id, campaign.campaign_id, target
+            )
+        campaign_store.save_production_job(job)
+        return job
+    except Exception:
+        shutil.rmtree(job_dir, ignore_errors=True)
+        raise
+
+
 @router.post(
     "/{client_id}/campaigns/{campaign_id}/production/assets",
     response_model=ProductionAssetsResponse,
@@ -884,39 +1262,60 @@ async def preview_production_matrix(
     client_id: str,
     campaign_id: str,
     matrix: UploadFile = File(...),
+    default_formats: str = Form("[]"),
 ) -> dict[str, object]:
     """Parsea la matriz con el mismo contrato que usara produccion.
 
     La UI no mantiene un segundo parser: CSV, TSV y XLSX se validan aqui para
     que la revision que ve el usuario sea exactamente la tanda que se generara.
     """
-    _campaign_or_404(client_id, campaign_id)
+    campaign = _campaign_or_404(client_id, campaign_id)
     matrix_name, payload = await _matrix_payload(matrix)
     try:
         rows = production_matrix.parse_matrix(payload, matrix_name)
     except production_matrix.MatrixParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    formats = _default_format_list(default_formats)
+    planned = _planned_matrix_pieces(rows, formats)
+    draft_id = _save_matrix_draft(
+        campaign, matrix_name=matrix_name, payload=payload
+    )
     return {
         "rows": [row.model_dump(mode="json") for row in rows],
         "total_rows": len(rows),
-        "requested_pieces": production_matrix.requested_piece_count(rows),
+        "requested_pieces": planned,
+        "matrix_draft_id": draft_id,
+        "plans": _matrix_preview_plans(campaign, rows),
     }
 
 
 @router.post(
     "/{client_id}/campaigns/{campaign_id}/production",
-    response_model=ProductionBatch,
-    status_code=status.HTTP_201_CREATED,
+    response_model=ProductionBatch | ProductionTaskStatus,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        status.HTTP_201_CREATED: {"model": ProductionBatch},
+        status.HTTP_202_ACCEPTED: {"model": ProductionTaskStatus},
+    },
 )
 async def produce_campaign(
     client_id: str,
     campaign_id: str,
-    matrix: UploadFile = File(...),
+    response: Response,
+    matrix: UploadFile | None = File(None),
+    matrix_draft_id: str = Form(""),
     product_files: list[UploadFile] = File(default=[]),
     product_asset_ids: str = Form("[]"),
     default_formats: str = Form("[]"),
     use_ai_copy: bool = Form(True),
-) -> ProductionBatch:
+) -> ProductionBatch | ProductionTaskStatus:
+    """Persiste y encola una tanda sin mantener la petición HTTP abierta.
+
+    En modo ``CELERY_TASK_ALWAYS_EAGER`` (pruebas y desarrollo) se conserva el
+    contrato histórico: devuelve la tanda terminada con HTTP 201. En producción
+    devuelve HTTP 202 y una orden consultable con ``/production/tasks/{id}``.
+    """
+
     brand = _brand_or_404(client_id)
     campaign = _campaign_or_404(client_id, campaign_id)
     if not campaign.brief_reviewed_at:
@@ -924,21 +1323,26 @@ async def produce_campaign(
             status.HTTP_409_CONFLICT,
             "Revisa y guarda el brief antes de producir.",
         )
-    matrix_name, payload = await _matrix_payload(matrix)
+    if matrix is not None and matrix_draft_id.strip():
+        await matrix.close()
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Envía una matriz nueva o una matriz guardada, no las dos.",
+        )
+    if matrix is not None:
+        matrix_name, payload = await _matrix_payload(matrix)
+    elif matrix_draft_id.strip():
+        matrix_name, payload = _load_matrix_draft(campaign, matrix_draft_id)
+    else:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Sube o valida una matriz antes de producir.",
+        )
     try:
         rows = production_matrix.parse_matrix(payload, matrix_name)
     except production_matrix.MatrixParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
-    try:
-        decoded_formats = json.loads(default_formats or "[]")
-        if not isinstance(decoded_formats, list):
-            raise ValueError
-        formats = [str(item) for item in decoded_formats if str(item).strip()]
-    except (json.JSONDecodeError, ValueError) as exc:
-        raise HTTPException(
-            status.HTTP_422_UNPROCESSABLE_ENTITY,
-            "default_formats debe ser una lista JSON.",
-        ) from exc
+    formats = _default_format_list(default_formats)
     try:
         decoded_asset_ids = json.loads(product_asset_ids or "[]")
         if not isinstance(decoded_asset_ids, list) or not all(
@@ -950,36 +1354,94 @@ async def produce_campaign(
             status.HTTP_422_UNPROCESSABLE_ENTITY,
             "product_asset_ids debe ser una lista JSON.",
         ) from exc
-    with tempfile.TemporaryDirectory(prefix="creative-products-") as temporary:
-        staged = _stored_product_assets(campaign, decoded_asset_ids)
-        uploaded = await _temporary_products(product_files, Path(temporary))
-        collision = next(
-            (
-                name
-                for name in uploaded
-                if name.casefold() in {item.casefold() for item in staged}
-            ),
-            None,
+
+    # Los archivos enviados junto a la matriz también pasan a ser activos de la
+    # campaña antes de encolar. Dejarían de existir al cerrar esta petición, que
+    # era la causa de tandas que «empezaban» pero no tenían fotos en el worker.
+    direct_name_list = [
+        (upload.filename or f"producto-{index + 1}.png")[:240].casefold()
+        for index, upload in enumerate(product_files)
+    ]
+    direct_names = set(direct_name_list)
+    if len(direct_names) != len(direct_name_list):
+        raise FileValidationError(
+            "Hay dos imágenes nuevas con el mismo nombre. Renombra una antes de producir."
         )
+    try:
+        staged = _stored_product_assets(campaign, decoded_asset_ids)
+        selected_names = {name.casefold() for name in staged}
+        collision = next((name for name in direct_names if name in selected_names), None)
         if collision:
-            raise HTTPException(
-                status.HTTP_422_UNPROCESSABLE_ENTITY,
-                f"La imagen '{collision}' esta repetida entre las ya cargadas y las nuevas.",
+            raise FileValidationError(
+                f"La imagen '{collision}' esta repetida entre las ya cargadas y las nuevas."
             )
-        products = {**staged, **uploaded}
+        assets, _warnings = await _store_production_assets(campaign, product_files)
+        direct_ids = [
+            asset.asset_id
+            for asset in assets
+            if asset.filename.casefold() in direct_names
+        ]
+        selected_asset_ids = list(dict.fromkeys([*decoded_asset_ids, *direct_ids]))
+        products = _stored_product_assets(campaign, selected_asset_ids)
+        planned = _planned_matrix_pieces(rows, formats)
+        _preflight_production_order(campaign, rows, products, planned)
+        job = _persist_production_job(
+            campaign,
+            brand.name,
+            rows,
+            products,
+            matrix_name=matrix_name,
+            matrix_payload=payload,
+            asset_ids=selected_asset_ids,
+            default_formats=formats,
+            use_ai_copy=use_ai_copy,
+            planned_pieces=planned,
+        )
+    except campaign_creative.CampaignProductionError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    try:
+        from app.worker import produce_campaign_batch_task
+
+        # La clave del job y la de Celery son una sola. No hay que guardar una
+        # tabla de mapeo y una consulta sigue funcionando si Redis se reinicia.
+        produce_campaign_batch_task.apply_async(  # type: ignore[attr-defined]
+            args=(client_id, campaign_id, job.task_id), task_id=job.task_id
+        )
+    except campaign_creative.CampaignProductionError as exc:
+        # En eager la excepción sale de apply_async; el worker ya dejó el error
+        # durable en job.json y mantenemos el 422 claro que tenía la API previa.
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    except Exception as exc:
+        # Un Redis caído no debe parecer una tanda aceptada. Se conserva el job
+        # fallido para soporte, pero el usuario recibe un 503 accionable.
+        job.state = "FAILED"
+        job.detail = "No se pudo poner la tanda en cola."
+        job.error = str(exc)[:2000]
+        campaign_store.save_production_job(job)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "No se pudo iniciar el worker de producción. Inténtalo de nuevo en un momento.",
+        ) from exc
+
+    refreshed = campaign_store.load_production_job(client_id, campaign_id, job.task_id)
+    if refreshed.state == "COMPLETED" and refreshed.batch_id:
         try:
-            return await run_in_threadpool(
-                campaign_creative.produce_batch,
-                campaign,
-                brand.name,
-                rows,
-                products,
-                matrix_filename=matrix_name,
-                default_formats=formats,
-                use_ai_copy=use_ai_copy,
-            )
-        except campaign_creative.CampaignProductionError as exc:
-            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+            batch = campaign_store.load_batch(client_id, campaign_id, refreshed.batch_id)
+        except campaign_store.CampaignNotFoundError as exc:
+            raise HTTPException(
+                status.HTTP_500_INTERNAL_SERVER_ERROR,
+                "La tarea terminó pero no se encontró su tanda de entregables.",
+            ) from exc
+        response.status_code = status.HTTP_201_CREATED
+        return batch
+    if refreshed.state == "FAILED":
+        # Un backend eager sin propagación sigue devolviendo el detalle útil.
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            refreshed.error or "La producción no pudo completarse.",
+        )
+    return _production_task_status(client_id, campaign_id, refreshed)
 
 
 @router.get(
@@ -989,6 +1451,78 @@ async def produce_campaign(
 def list_production_batches(client_id: str, campaign_id: str) -> ProductionBatchList:
     _campaign_or_404(client_id, campaign_id)
     return ProductionBatchList(batches=campaign_store.list_batches(client_id, campaign_id))
+
+
+def _production_task_status(
+    client_id: str, campaign_id: str, job: ProductionJob
+) -> ProductionTaskStatus:
+    """Convierte el manifiesto privado en el contrato público de polling."""
+
+    result: ProductionBatch | None = None
+    if job.state == "COMPLETED" and job.batch_id:
+        try:
+            result = campaign_store.load_batch(client_id, campaign_id, job.batch_id)
+        except campaign_store.CampaignNotFoundError:
+            # Un estado de tarea concluida sin archivo final no es un éxito
+            # utilizable; queda explícito en vez de devolver un resultado vacío.
+            job.state = "FAILED"
+            job.detail = "La tarea terminó sin encontrar sus entregables."
+            job.error = "No se encontró la tanda final en el almacenamiento."
+            campaign_store.save_production_job(job)
+    return ProductionTaskStatus(
+        task_id=job.task_id,
+        state=job.state,
+        result=result,
+        error=job.error if job.state == "FAILED" else None,
+        meta={
+            "progress": job.progress,
+            "status": job.detail,
+            "planned_pieces": job.planned_pieces,
+            "batch_id": job.batch_id,
+        },
+    )
+
+
+@router.get(
+    "/{client_id}/campaigns/{campaign_id}/production/tasks",
+    response_model=ProductionTaskList,
+)
+def list_pending_production_tasks(
+    client_id: str, campaign_id: str
+) -> ProductionTaskList:
+    """Devuelve tandas que siguen vivas, incluso desde otra sesión."""
+
+    _campaign_or_404(client_id, campaign_id)
+    active = campaign_store.list_production_jobs(
+        client_id,
+        campaign_id,
+        states={"PENDING", "STARTED", "PROGRESS"},
+    )
+    return ProductionTaskList(
+        tasks=[_production_task_status(client_id, campaign_id, job) for job in active]
+    )
+
+
+@router.get(
+    "/{client_id}/campaigns/{campaign_id}/production/tasks/{task_id}",
+    response_model=ProductionTaskStatus,
+)
+def get_production_task(
+    client_id: str, campaign_id: str, task_id: str
+) -> ProductionTaskStatus:
+    """Estado durable de una tanda asíncrona.
+
+    Se lee el manifiesto propio, no solo ``AsyncResult``: Redis puede expirar
+    resultados, pero el equipo debe poder volver a esta pantalla horas después
+    y saber si la tanda terminó o cuál fue el error.
+    """
+
+    _campaign_or_404(client_id, campaign_id)
+    try:
+        job = campaign_store.load_production_job(client_id, campaign_id, task_id)
+    except campaign_store.CampaignNotFoundError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa orden de producción.") from None
+    return _production_task_status(client_id, campaign_id, job)
 
 
 @router.get(

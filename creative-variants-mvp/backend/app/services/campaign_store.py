@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 from ..models.campaign import Campaign, ClientKnowledge
-from ..models.campaign_production import ProductionBatch
+from ..models.campaign_production import ProductionBatch, ProductionJob
 from . import template_store
 from .security import resolve_inside, validate_uuid
 
@@ -147,6 +147,81 @@ def batch_dir(client_id: str, campaign_id: str, batch_id: str) -> Path:
     target = production_root(client_id, campaign_id) / validate_uuid(batch_id, "batch_id")
     target.mkdir(parents=True, exist_ok=True)
     return target
+
+
+def production_jobs_root(client_id: str, campaign_id: str) -> Path:
+    """Órdenes pendientes, separadas de las tandas ya entregadas."""
+
+    target = production_root(client_id, campaign_id) / "jobs"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def production_drafts_root(client_id: str, campaign_id: str) -> Path:
+    """Matrices validadas, disponibles aunque el navegador se recargue."""
+
+    target = production_root(client_id, campaign_id) / "drafts"
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def production_draft_dir(client_id: str, campaign_id: str, draft_id: str) -> Path:
+    target = production_drafts_root(client_id, campaign_id) / validate_uuid(
+        draft_id, "matrix_draft_id"
+    )
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def production_job_dir(client_id: str, campaign_id: str, task_id: str) -> Path:
+    target = production_jobs_root(client_id, campaign_id) / validate_uuid(task_id, "task_id")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def save_production_job(job: ProductionJob) -> Path:
+    job.touch()
+    target = production_job_dir(job.client_id, job.campaign_id, job.task_id) / "job.json"
+    _write_json(target, job.model_dump(mode="json"))
+    return target
+
+
+def load_production_job(client_id: str, campaign_id: str, task_id: str) -> ProductionJob:
+    target = production_job_dir(client_id, campaign_id, task_id) / "job.json"
+    if not target.exists():
+        raise CampaignNotFoundError(task_id)
+    with target.open("r", encoding="utf-8") as handle:
+        job = ProductionJob.model_validate(json.load(handle))
+    if job.client_id != client_id or job.campaign_id != campaign_id:
+        raise CampaignNotFoundError(task_id)
+    return job
+
+
+def list_production_jobs(
+    client_id: str,
+    campaign_id: str,
+    *,
+    states: set[str] | None = None,
+) -> list[ProductionJob]:
+    """Órdenes de producción, ordenadas por la última actualización."""
+
+    jobs: list[ProductionJob] = []
+    for entry in production_jobs_root(client_id, campaign_id).iterdir():
+        manifest = entry / "job.json"
+        if not entry.is_dir() or not manifest.exists():
+            continue
+        try:
+            with manifest.open("r", encoding="utf-8") as handle:
+                item = ProductionJob.model_validate(json.load(handle))
+            if (
+                item.client_id == client_id
+                and item.campaign_id == campaign_id
+                and (states is None or item.state in states)
+            ):
+                jobs.append(item)
+        except Exception:  # noqa: BLE001 - un manifiesto corrupto no bloquea la campaña
+            continue
+    return sorted(jobs, key=lambda item: item.updated_at, reverse=True)
 
 
 def save_batch(batch: ProductionBatch) -> Path:

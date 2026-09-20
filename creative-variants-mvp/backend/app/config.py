@@ -39,6 +39,16 @@ class Settings:
     def __init__(self) -> None:
         self.app_name: str = os.getenv("APP_NAME", "Creative Variants MVP")
         self.app_version: str = "1.0.0"
+        # La interfaz desplegada usa el mismo origen (/api), por lo que no
+        # necesita CORS abierto. Solo se permiten los orígenes locales de
+        # desarrollo, más los que el servidor declare explícitamente.
+        self.cors_origins: list[str] = [
+            item.strip().rstrip("/")
+            for item in os.getenv(
+                "CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501"
+            ).split(",")
+            if item.strip()
+        ]
         # Qué build concreto está corriendo. El número de versión se mueve
         # cuando alguien lo cambia; esto se mueve solo en cada despliegue, que es
         # lo que hace falta para saber si lo que estás mirando ya trae el último
@@ -215,6 +225,20 @@ class Settings:
         self.campaign_max_product_megapixels: int = _env_int(
             "CAMPAIGN_MAX_PRODUCT_MEGAPIXELS", 50
         )
+        # Una foto de producto puede ser mucho más grande que el hueco donde
+        # termina dibujada. Antes de abrirla a tamaño completo, la producción
+        # limita el total de píxeles nativos por arte y la reduce a una copia de
+        # trabajo. Así un combo de fotos de catálogo no agota la RAM aunque la
+        # subida individual sea válida.
+        self.campaign_max_product_decode_megapixels: int = _env_int(
+            "CAMPAIGN_MAX_PRODUCT_DECODE_MEGAPIXELS", 24
+        )
+        self.campaign_product_working_megapixels: int = _env_int(
+            "CAMPAIGN_PRODUCT_WORKING_MEGAPIXELS", 4
+        )
+        self.campaign_max_products_per_piece: int = _env_int(
+            "CAMPAIGN_MAX_PRODUCTS_PER_PIECE", 6
+        )
         self.campaign_max_output_megapixels: int = _env_int(
             "CAMPAIGN_MAX_OUTPUT_MEGAPIXELS", 16
         )
@@ -253,6 +277,14 @@ class Settings:
     @property
     def campaign_max_product_pixels(self) -> int:
         return self.campaign_max_product_megapixels * 1_000_000
+
+    @property
+    def campaign_max_product_decode_pixels(self) -> int:
+        return self.campaign_max_product_decode_megapixels * 1_000_000
+
+    @property
+    def campaign_product_working_pixels(self) -> int:
+        return self.campaign_product_working_megapixels * 1_000_000
 
     @property
     def campaign_max_output_pixels(self) -> int:

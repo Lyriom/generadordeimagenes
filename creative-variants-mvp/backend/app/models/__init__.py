@@ -135,5 +135,8 @@ from .campaign import (  # noqa: F401
 from .campaign_production import (  # noqa: F401
     ProductionBatch,
     ProductionBatchList,
+    ProductionJob,
     ProductionPiece,
+    ProductionTaskList,
+    ProductionTaskStatus,
 )

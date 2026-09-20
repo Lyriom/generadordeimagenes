@@ -428,6 +428,33 @@ def _slot_id(slot: Any) -> str:
     return _key(str(_value(slot, "id", _value(slot, "key", ""))))
 
 
+_AI_COPY_SLOT_ALIASES = {
+    "headline": "titular",
+    "title": "titular",
+    "subheadline": "subtitulo",
+    "subtitle": "subtitulo",
+    "call_to_action": "cta",
+}
+_AI_COPY_FIELDS = frozenset({"titular", "subtitulo", "cta"})
+
+
+def ai_fillable_fields(template: Any) -> set[str]:
+    """Devuelve el copy que una plantilla aprobada autorizó a completar.
+
+    El mismo cálculo lo consumen el plan previo y el worker. Así el modelo no
+    escribe un CTA o un titular que no tenga una zona aprobada en la plantilla.
+    """
+
+    fields: set[str] = set()
+    for slot in _template_slots(template):
+        if not bool(_value(slot, "generate_if_missing", False)):
+            continue
+        key = _AI_COPY_SLOT_ALIASES.get(_slot_id(slot), _slot_id(slot))
+        if key in _AI_COPY_FIELDS:
+            fields.add(key)
+    return fields
+
+
 def product_count(row: MatrixRow) -> int:
     # Una celda puede describir un combo como ``TV | Soundbar``. No se parte
     # por ``+``: forma parte de muchos nombres comerciales y SKU.
@@ -486,6 +513,21 @@ def score_template(row: MatrixRow, template: Any) -> float:
         return float("-inf")
 
     score = 20.0 if products and product_slots == products else 0.0
+    category = _key(str(_value(template, "category", "")))
+    has_commercial_content = any(
+        getattr(row, field) is not None
+        for field in ("precio_anterior", "precio_actual", "cuota", "descuento")
+    )
+    # Una plantilla base puede aceptar todos los campos opcionales, pero cuando
+    # existe una plantilla aprobada específicamente para oferta/combo/mensaje
+    # conviene elegirla: conserva la flexibilidad sin convertir toda pieza en
+    # la misma retícula genérica.
+    if products >= 2 and category == "combo":
+        score += 8.0
+    elif products == 1 and has_commercial_content and category == "price_promotion":
+        score += 6.0
+    elif products == 0 and category == "institutional":
+        score += 6.0
     for field in (
         "titular",
         "subtitulo",
@@ -502,7 +544,13 @@ def score_template(row: MatrixRow, template: Any) -> float:
         if field == "precio_actual":
             aliases.add("precio")
         if value is not None:
-            score += 3.0 if aliases & slot_ids else -4.0
+            # Una celda con contenido es una orden, no una sugerencia. Elegir
+            # una plantilla sin ese slot haría que el renderer descartase en
+            # silencio precio, CTA o legal. Es preferible pedir otra plantilla
+            # aprobada (o corregir la matriz) a entregar un arte incompleto.
+            if not aliases & slot_ids:
+                return float("-inf")
+            score += 3.0
         elif field in row.suppressed_fields and aliases & slot_ids:
             # No invalida: un slot opcional debe poder desaparecer, pero una
             # plantilla que no depende de él necesita menos reflow.
@@ -531,6 +579,7 @@ def select_template(row: MatrixRow, templates: Sequence[Any]) -> Any | None:
 
 
 __all__ = [
+    "ai_fillable_fields",
     "MatrixParseError",
     "MatrixRow",
     "parse_csv",

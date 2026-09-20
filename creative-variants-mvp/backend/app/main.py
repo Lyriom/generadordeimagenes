@@ -76,7 +76,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # MVP local; restringir en producción
+    allow_origins=settings.cors_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -88,6 +88,20 @@ app.include_router(ingest_router)
 app.include_router(projects_router)
 app.include_router(references_router)
 app.include_router(templates_router)
+
+
+@app.middleware("http")
+async def _safe_content_types(request: Request, call_next):
+    """Evita MIME-sniffing para archivos y previews que el usuario sube.
+
+    La API puede devolver imágenes, PDFs y entregables con nombres controlados
+    por la campaña. Este encabezado se aplica a todas las respuestas para que
+    un navegador no intente interpretar un binario como HTML o JavaScript.
+    """
+
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
 
 
 @app.exception_handler(FileValidationError)

@@ -11,10 +11,14 @@ de un PDF o diapositiva en un KV independiente:
    corregible. Si OpenAI no está disponible, existe un análisis local funcional.
 4. Se proponen entre 3 y 5 plantillas **sin productos**, con zonas adaptables para
    producto, precio, copy, CTA, vigencia y legales. Una persona las aprueba.
-5. Una matriz CSV/TSV indica productos, imágenes, formatos y número de propuestas.
+5. Una matriz CSV, TSV o XLSX indica productos, imágenes, formatos y número de
+   propuestas. Las fotos de producto se guardan dentro de la campaña, se ven
+   vinculadas a cada fila y sobreviven una recarga antes de producir.
    El motor elige la plantilla compatible, oculta campos vacíos y recompone cada
    orientación.
-6. Cada tanda entrega PNG, JPG, PSD por capas, ZIP organizado y CSV de estado.
+6. Cada tanda entrega PNG, JPG, PSD por capas para revisión, ZIP organizado y
+   CSV de estado. El PSD generado conserva capas rasterizadas de la composición;
+   no sustituye al PSD maestro editable del cliente.
 
 Las plantillas aprobadas y las correcciones viven en la memoria del cliente para
 campañas futuras. La generación actual se concentra en piezas estáticas; no crea

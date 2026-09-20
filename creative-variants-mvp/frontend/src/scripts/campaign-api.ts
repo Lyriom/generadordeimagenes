@@ -5,7 +5,10 @@ import type {
   CampaignSource,
   CampaignSourceKind,
   CampaignWorkspace,
+  CampaignMatrixPreview,
+  CampaignProductionTask,
   ClientProfile,
+  MatrixProductionPlan,
   ProductionBatch,
   TemplateCandidate,
   TemplateCandidateField,
@@ -231,6 +234,17 @@ export async function uploadCampaignSources(
   }
 }
 
+export async function deleteCampaignSource(
+  clientId: string,
+  campaignId: string,
+  sourceId: string,
+): Promise<void> {
+  await del(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/sources/" + encodeURIComponent(sourceId),
+  );
+}
+
 function normaliseFields(value: unknown): TemplateCandidateField[] {
   return list(value).map((field: any, index) => ({
     id: String(field?.id || field?.key || "campo_" + String(index + 1)),
@@ -270,6 +284,7 @@ export function normaliseCandidate(raw: any, index = 0): TemplateCandidate {
       : null,
     preview_urls: previewUrls,
     source_project_id: raw?.source_project_id || null,
+    source_ids: strings(raw?.source_ids),
     warnings: strings(raw?.warnings),
     approved_at: raw?.approved_at || null,
     decision_notes: raw?.decision_notes || null,
@@ -299,6 +314,8 @@ function normaliseBrief(raw: any, engine?: string, warnings: string[] = []): Cam
     concept: stringValue("concept", stringValue("creative_concept")),
     palette: strings(raw?.palette),
     typography: strings(raw?.typography || raw?.fonts),
+    headline_style: stringValue("headline_style"),
+    cta_style: stringValue("cta_style"),
     visual_rules: strings(raw?.visual_rules || raw?.composition_rules),
     product_treatment: strings(raw?.product_treatment),
     required_elements: strings(raw?.required_elements || raw?.mandatory_elements),
@@ -352,8 +369,11 @@ export async function reviseCampaignBrief(
     primary_message?: string;
     creative_concept?: string;
     tone?: string[];
+    headline_style?: string;
+    cta_style?: string;
     visual_rules?: string[];
     product_treatment?: string[];
+    legal_requirements?: string[];
     required_elements?: string[];
     optional_elements?: string[];
     forbidden_elements?: string[];
@@ -452,19 +472,40 @@ function normaliseProductionBatch(raw: any): ProductionBatch {
   };
 }
 
+function normaliseProductionTask(raw: any): CampaignProductionTask {
+  const state = String(raw?.state || "PENDING").toUpperCase();
+  const valid = ["PENDING", "STARTED", "PROGRESS", "COMPLETED", "FAILED"];
+  const meta = raw?.meta && typeof raw.meta === "object" ? raw.meta : {};
+  return {
+    task_id: String(raw?.task_id || ""),
+    state: (valid.includes(state) ? state : "PENDING") as CampaignProductionTask["state"],
+    result: Array.isArray(raw?.result?.pieces) ? normaliseProductionBatch(raw.result) : null,
+    error: raw?.error ? String(raw.error) : null,
+    meta: {
+      progress: Number(meta?.progress || raw?.progress || 0),
+      status: meta?.status || raw?.detail ? String(meta?.status || raw?.detail) : "",
+      planned_pieces: Number(meta?.planned_pieces || raw?.planned_pieces || 0),
+      batch_id: meta?.batch_id || raw?.batch_id ? String(meta?.batch_id || raw?.batch_id) : null,
+    },
+  };
+}
+
 export async function produceCampaign(
   clientId: string,
   campaignId: string,
-  matrix: File,
+  matrix: File | null,
+  matrixDraftId: string | null,
   productFiles: File[],
   productAssetIds: string[],
   defaultFormats: string[],
   useAiCopy: boolean,
   onProgress?: (sent: number, total: number) => void,
   onUploaded?: () => void,
-): Promise<ProductionBatch> {
+): Promise<ProductionBatch | CampaignProductionTask> {
   const form = new FormData();
-  form.append("matrix", matrix);
+  if (matrixDraftId) form.append("matrix_draft_id", matrixDraftId);
+  else if (matrix) form.append("matrix", matrix);
+  else throw new Error("Primero valida una matriz de producción.");
   productFiles.forEach((file) => form.append("product_files", file));
   form.append("product_asset_ids", JSON.stringify(productAssetIds));
   form.append("default_formats", JSON.stringify(defaultFormats));
@@ -476,22 +517,123 @@ export async function produceCampaign(
     onProgress,
     onUploaded,
   );
-  return normaliseProductionBatch(payload);
+  // En desarrollo/tests la tarea Celery eager conserva la respuesta histórica
+  // (la tanda lista). En producción llega una orden 202 y se hace polling.
+  return Array.isArray(payload?.pieces)
+    ? normaliseProductionBatch(payload)
+    : normaliseProductionTask(payload);
+}
+
+export async function getCampaignProductionTask(
+  clientId: string,
+  campaignId: string,
+  taskId: string,
+): Promise<CampaignProductionTask> {
+  const payload: any = await get(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/production/tasks/" + encodeURIComponent(taskId),
+  );
+  return normaliseProductionTask(payload);
+}
+
+export async function listCampaignProductionTasks(
+  clientId: string,
+  campaignId: string,
+): Promise<CampaignProductionTask[]> {
+  const payload: any = await get(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/production/tasks",
+  );
+  return list(payload?.tasks).map(normaliseProductionTask)
+    .filter((task) => Boolean(task.task_id));
+}
+
+export async function pollCampaignProductionTask(
+  clientId: string,
+  campaignId: string,
+  taskId: string,
+  onProgress: (progress: number, detail: string) => void,
+): Promise<ProductionBatch> {
+  // La tarea vive en el servidor; este límite solo evita que una pestaña deje
+  // un poll infinito. Al actualizar, la orden y sus entregables siguen ahí.
+  const started = Date.now();
+  while (Date.now() - started < 45 * 60 * 1000) {
+    const task = await getCampaignProductionTask(clientId, campaignId, taskId);
+    if (task.state === "COMPLETED") {
+      if (task.result) return task.result;
+      throw new Error("La producción terminó pero no devolvió sus entregables.");
+    }
+    if (task.state === "FAILED") {
+      throw new Error(task.error || "La producción no pudo completarse.");
+    }
+    onProgress(
+      Math.max(5, Math.min(98, Number(task.meta.progress || 5))),
+      task.meta.status || "El worker está produciendo los artes…",
+    );
+    await new Promise((resolve) => window.setTimeout(resolve, 1100));
+  }
+  throw new Error("La tanda sigue en proceso. Actualiza luego para ver sus entregables.");
+}
+
+/** Convierte el preflight de la matriz en un contrato pequeño y seguro para la
+ * interfaz. Un estado desconocido se trata como incompatible: es preferible
+ * explicar que el plan no se entiende antes que producir una pieza distinta a
+ * la que el servidor revisó. */
+export function normaliseMatrixProductionPlan(raw: any): MatrixProductionPlan | null {
+  const rowNumber = Math.trunc(Number(raw?.row_number));
+  if (!Number.isFinite(rowNumber) || rowNumber < 2) return null;
+  const receivedStatus = String(raw?.status || "").trim();
+  const statuses = ["ready", "needs_approval", "incompatible"] as const;
+  const status = statuses.includes(receivedStatus as typeof statuses[number])
+    ? receivedStatus as MatrixProductionPlan["status"]
+    : "incompatible";
+  const rawTemplate = raw?.template && typeof raw.template === "object" ? raw.template : null;
+  const message = String(raw?.message || "").trim() || (
+    status === "ready"
+      ? "La fila tiene una plantilla compatible."
+      : receivedStatus
+        ? "El servidor devolvió un estado de plan no compatible."
+        : "No se pudo validar la compatibilidad de esta fila."
+  );
+  return {
+    row_number: rowNumber,
+    product_count: Math.max(0, Math.trunc(Number(raw?.product_count) || 0)),
+    status,
+    template: rawTemplate
+      ? {
+        candidate_id: String(rawTemplate?.candidate_id || ""),
+        name: String(rawTemplate?.name || ""),
+      }
+      : null,
+    required_fields: strings(raw?.required_fields),
+    ai_fillable_fields: strings(raw?.ai_fillable_fields),
+    message,
+  };
 }
 
 export async function previewCampaignMatrix(
   clientId: string,
   campaignId: string,
   matrix: File,
-): Promise<any[]> {
+  defaultFormats: string[] = [],
+): Promise<CampaignMatrixPreview> {
   const form = new FormData();
   form.append("matrix", matrix);
+  form.append("default_formats", JSON.stringify(defaultFormats));
   const payload: any = await upload(
     "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
       encodeURIComponent(campaignId) + "/production/preview",
     form,
   );
-  return list(payload?.rows);
+  return {
+    rows: list(payload?.rows),
+    plans: list(payload?.plans)
+      .map(normaliseMatrixProductionPlan)
+      .filter((plan): plan is MatrixProductionPlan => plan !== null),
+    matrixDraftId: typeof payload?.matrix_draft_id === "string" && payload.matrix_draft_id
+      ? payload.matrix_draft_id
+      : null,
+  };
 }
 
 export async function uploadCampaignProductAssets(

@@ -12,6 +12,9 @@ import pymupdf as fitz
 import pytest
 from fastapi.testclient import TestClient
 
+from app.models.campaign_production import ProductionJob
+from app.services import campaign_store
+
 
 def _client_and_campaign(client: TestClient) -> tuple[dict, dict]:
     created_client = client.post(
@@ -145,6 +148,66 @@ def test_documentos_son_fuentes_de_una_campana_y_no_multiples_kv(
     }
 
 
+def test_quitar_fuente_invalida_el_brief_y_elimina_su_evidencia(
+    client: TestClient, artwork_png: bytes
+):
+    profile, campaign = _client_and_campaign(client)
+    uploaded = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources",
+        files=[("files", ("referencia.png", artwork_png, "image/png"))],
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    source_id = uploaded.json()["sources"][0]["source_id"]
+    generated = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
+        json={"use_ai": False},
+    )
+    assert generated.status_code == 200, generated.text
+
+    removed = client.delete(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources/{source_id}"
+    )
+    assert removed.status_code == 204, removed.text
+    campaign_after = client.get(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"
+    )
+    assert campaign_after.status_code == 200, campaign_after.text
+    assert campaign_after.json()["sources"] == []
+    assert campaign_after.json()["brief"] is None
+    assert campaign_after.json()["template_candidates"] == []
+
+    missing = client.delete(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources/{source_id}"
+    )
+    assert missing.status_code == 404
+
+
+def test_no_se_puede_borrar_contexto_mientras_una_produccion_esta_en_cola(
+    client: TestClient, artwork_png: bytes
+):
+    profile, campaign = _client_and_campaign(client)
+    uploaded = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources",
+        files=[("files", ("referencia.png", artwork_png, "image/png"))],
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    source_id = uploaded.json()["sources"][0]["source_id"]
+    campaign_store.save_production_job(
+        ProductionJob(
+            client_id=profile["client_id"],
+            campaign_id=campaign["campaign_id"],
+            state="PENDING",
+        )
+    )
+
+    removed = client.delete(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources/{source_id}"
+    )
+
+    assert removed.status_code == 409, removed.text
+    assert "producción en curso" in removed.json()["detail"]
+
+
 def test_pdf_de_varias_paginas_sigue_siendo_una_sola_fuente(client: TestClient):
     profile, campaign = _client_and_campaign(client)
     before = len(client.get("/projects").json())
@@ -211,14 +274,22 @@ def test_brief_offline_propone_tres_a_cinco_plantillas_sin_productos_reales(
     assert body["engine"] == "deterministic"
     assert 3 <= len(body["template_candidates"]) <= 5
     assert body["brief"]["objective"]
+    product_candidates = 0
     for candidate in body["template_candidates"]:
         assert candidate["status"] == "proposed"
         assert set(candidate["source_ids"]) <= source_ids
         assert candidate["supported_aspects"]
         slots = candidate["slots"]
         products = [slot for slot in slots if slot["category"] == "product"]
-        assert products, candidate
-        assert all(slot["required"] is True for slot in products)
+        # La biblioteca mezcla masters de producto con una pieza institucional
+        # válida sin foto. Lo importante para una campaña comercial es que al
+        # menos una candidata soporte producto, no forzar una foto ficticia en
+        # cada composición de marca.
+        if products:
+            product_candidates += 1
+            assert all(slot["required"] is True for slot in products)
+        else:
+            assert candidate["supported_product_count"]["minimum"] == 0
         assert all(
             slot["required"] is False
             for slot in slots
@@ -227,6 +298,7 @@ def test_brief_offline_propone_tres_a_cinco_plantillas_sin_productos_reales(
         # Una candidata define huecos y reglas; no lleva el televisor de la
         # referencia ni copy rasterizado dentro.
         assert all("content" not in slot and "image" not in slot for slot in slots)
+    assert product_candidates >= 1
 
     persisted = client.get(
         f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"
@@ -424,10 +496,14 @@ def test_correcciones_del_brief_son_permanentes_y_sobreviven_reanalisis(
             "objective": "Priorizar combos de regreso a clases",
             "audience": "Familias con hijos en edad escolar",
             "primary_message": "Todo para clases con crédito directo",
+            "headline_style": "Titular corto y de alto contraste",
+            "cta_style": "Solo cuando exista una acción verificable",
+            "legal_requirements": ["Válido del 1 al 30 de septiembre."],
         },
     )
     assert revised.status_code == 200, revised.text
     assert revised.json()["primary_message"] == "Todo para clases con crédito directo"
+    assert revised.json()["legal_requirements"] == ["Válido del 1 al 30 de septiembre."]
 
     regenerated = client.post(
         f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/brief/generate",
@@ -437,6 +513,9 @@ def test_correcciones_del_brief_son_permanentes_y_sobreviven_reanalisis(
     assert regenerated.json()["brief"]["objective"] == "Priorizar combos de regreso a clases"
     assert regenerated.json()["brief"]["audience"] == "Familias con hijos en edad escolar"
     assert regenerated.json()["brief"]["primary_message"] == "Todo para clases con crédito directo"
+    assert regenerated.json()["brief"]["headline_style"] == "Titular corto y de alto contraste"
+    assert regenerated.json()["brief"]["cta_style"] == "Solo cuando exista una acción verificable"
+    assert regenerated.json()["brief"]["legal_requirements"] == ["Válido del 1 al 30 de septiembre."]
     knowledge = client.get(f"/clients/{profile['client_id']}").json()
     assert any("Correccion manual" in item for item in knowledge["learned_rules"])
 

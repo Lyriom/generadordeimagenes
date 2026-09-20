@@ -1,4 +1,5 @@
 import {
+  ApiError,
   del,
   downloadUrl,
   fileUrl,
@@ -13,13 +14,18 @@ import {
 import {
   createCampaign,
   createClient,
+  deleteCampaignSource,
   deleteCampaignProductAsset,
   decideTemplateCandidate,
   generateCampaignBrief,
+  getCampaignProductionTask,
   listCampaigns,
+  listCampaignProductionTasks,
   listClients,
   listProductionBatches,
   loadCampaignState,
+  normaliseMatrixProductionPlan,
+  pollCampaignProductionTask,
   previewCampaignMatrix,
   produceCampaign,
   reviseCampaignBrief,
@@ -44,7 +50,9 @@ import type {
   Variant,
   ViewName,
   CampaignIntelligence,
+  CampaignProductionTask,
   CampaignProductionAsset,
+  MatrixProductionPlan,
   CampaignSource,
   CampaignWorkspace,
   ClientProfile,
@@ -288,8 +296,14 @@ interface State {
   templateCandidates: TemplateCandidate[];
   /** Filas de la matriz de producción cargada por el equipo. */
   productionMatrix: MatrixRow[];
+  /** Compatibilidad por fila calculada por el servidor al validar la matriz. */
+  productionMatrixPlans: MatrixProductionPlan[];
+  /** Identificador de la matriz validada que vive en la campaña, no en el navegador. */
+  productionMatrixDraftId: string | null;
   productionMatrixFile: File | null;
   productionBatch: ProductionBatch | null;
+  /** Orden en curso; se conserva para que una recarga no haga repetirla. */
+  productionTask: CampaignProductionTask | null;
   clientCampaigns: CampaignWorkspace[];
 }
 
@@ -306,6 +320,7 @@ interface CampaignBrief {
 }
 
 interface MatrixRow {
+  rowNumber: number;
   product: string;
   image: string;
   headline: string;
@@ -379,8 +394,11 @@ const state: State = {
   campaignIntelligence: null,
   templateCandidates: [],
   productionMatrix: [],
+  productionMatrixPlans: [],
+  productionMatrixDraftId: null,
   productionMatrixFile: null,
   productionBatch: null,
+  productionTask: null,
   clientCampaigns: [],
 };
 
@@ -397,8 +415,11 @@ function resetCampaignWork(clientName = ""): void {
   state.campaignIntelligence = null;
   state.templateCandidates = [];
   state.productionMatrix = [];
+  state.productionMatrixPlans = [];
+  state.productionMatrixDraftId = null;
   state.productionMatrixFile = null;
   state.productionBatch = null;
+  state.productionTask = null;
   state.products = [];
   state.individualProducts = new Set();
   state.groups = [];
@@ -604,7 +625,14 @@ function saveSession(): void {
     sessionStorage.setItem("creative-campaign-intelligence", JSON.stringify(state.campaignIntelligence));
     sessionStorage.setItem("creative-template-candidates", JSON.stringify(state.templateCandidates));
     sessionStorage.setItem("creative-production-matrix", JSON.stringify(state.productionMatrix));
+    sessionStorage.setItem("creative-production-matrix-draft", state.productionMatrixDraftId || "");
+    if (state.productionMatrixPlans.length) {
+      sessionStorage.setItem("creative-production-matrix-plans", JSON.stringify(state.productionMatrixPlans));
+    } else {
+      sessionStorage.removeItem("creative-production-matrix-plans");
+    }
     sessionStorage.setItem("creative-production-batch", JSON.stringify(state.productionBatch));
+    sessionStorage.setItem("creative-production-task", JSON.stringify(state.productionTask));
   } catch {
     /* modo privado: la campaña solo vive en memoria */
   }
@@ -661,6 +689,7 @@ async function refreshAll(): Promise<void> {
     state.clientCampaigns = [];
   }
   if (state.activeClientId && state.campaignWorkspace?.campaign_id) {
+    let recoveredCampaign: CampaignWorkspace | null = null;
     try {
       const recovered = await loadCampaignState(
         state.activeClientId,
@@ -670,21 +699,89 @@ async function refreshAll(): Promise<void> {
       state.campaignSources = recovered.sources;
       state.campaignIntelligence = recovered.brief;
       state.templateCandidates = recovered.candidates;
-      const batches = await listProductionBatches(
-        state.activeClientId,
-        recovered.workspace.campaign_id,
-      );
-      if (!state.productionBatch && batches.length) state.productionBatch = batches[0];
+      recoveredCampaign = recovered.workspace;
       // Las fuentes de conocimiento del flujo nuevo nunca son Projects/KV. Una
       // sesión antigua podía conservar las 25 páginas del PDF en esta lista.
       state.campaignIds = [];
       state.campaign = [];
       state.activeId = null;
-    } catch {
-      state.campaignWorkspace = null;
-      state.campaignSources = [];
-      state.campaignIntelligence = null;
-      state.templateCandidates = [];
+    } catch (error) {
+      // Una caída transitoria, o una respuesta lenta durante un despliegue, no
+      // puede convertir una campaña guardada en una pantalla vacía. Solo se
+      // limpia el estado si el servidor confirma que esa campaña ya no existe.
+      if (error instanceof ApiError && error.status === 404) {
+        state.campaignWorkspace = null;
+        state.campaignSources = [];
+        state.campaignIntelligence = null;
+        state.templateCandidates = [];
+        state.productionMatrix = [];
+        state.productionMatrixPlans = [];
+        state.productionMatrixDraftId = null;
+        state.productionMatrixFile = null;
+        state.productionBatch = null;
+        state.productionTask = null;
+        state.campaignBrief = emptyCampaignBrief(
+          state.clients.find((client) => client.client_id === state.activeClientId)?.name || "",
+        );
+        toast("Esta campaña ya no está disponible en el servidor.", "info");
+      } else {
+        toast(
+          "No pudimos sincronizar la campaña ahora. Conservamos tu brief y plantillas; vuelve a actualizar en un momento.",
+          "info",
+        );
+      }
+    }
+
+    // La galería es secundaria al espacio de trabajo: si este endpoint falla,
+    // el brief y las plantillas recién recuperados siguen siendo válidos. Antes
+    // ambos pedidos compartían un catch y un fallo de tandas borraba todo.
+    if (recoveredCampaign) {
+      try {
+        const batches = await listProductionBatches(
+          state.activeClientId,
+          recoveredCampaign.campaign_id,
+        );
+        state.productionBatch = batches[0] || null;
+      } catch {
+        toast(
+          "La campaña se cargó, pero no pudimos consultar las tandas todavía. Tus artes guardados siguen intactos.",
+          "info",
+        );
+      }
+      // Una recarga mientras se renderiza no necesita repetir la subida. La
+      // orden persistida retoma su estado y, si ya concluyó, deja disponibles
+      // los entregables sin esperar al siguiente clic de la persona.
+      let activeTasks: CampaignProductionTask[] = [];
+      try {
+        activeTasks = await listCampaignProductionTasks(
+          state.activeClientId,
+          recoveredCampaign.campaign_id,
+        );
+      } catch {
+        // El listado es una ayuda para recuperar otra sesión; no afecta las
+        // tandas ni invalida una orden que ya tenga esta pestaña.
+      }
+      if (state.productionTask?.task_id) {
+        try {
+          const task = await getCampaignProductionTask(
+            state.activeClientId,
+            recoveredCampaign.campaign_id,
+            state.productionTask.task_id,
+          );
+          state.productionTask = task;
+          if (task.state === "COMPLETED" && task.result) {
+            state.productionBatch = task.result;
+            state.productionTask = null;
+          }
+        } catch {
+          // La tanda permanece guardada en el servidor aunque una consulta
+          // puntual falle; no se borra el task_id que permite retomarla.
+        }
+      } else if (activeTasks.length) {
+        // Si otra persona (o este usuario desde otra pestaña) abrió la misma
+        // campaña, la última orden activa sigue disponible para retomar.
+        state.productionTask = activeTasks[0];
+      }
     }
   }
 
@@ -1036,7 +1133,8 @@ function activeCampaignHtml(): string {
     source.bytes ? readableSize(source.bytes) + " · " : "",
     esc(source.role || source.summary || "Lista para el análisis"), '</small></div>',
     '<span class="source-state ', source.status === "error" ? "error" : '', '">',
-    source.status === "error" ? "Error" : source.status === "warning" ? "Revisar" : "✓ Analizada", '</span></article>',
+    source.status === "error" ? "Error" : source.status === "warning" ? "Revisar" : "✓ Analizada", '</span>',
+    '<button class="source-remove" type="button" data-source-id="', attr(source.source_id), '" aria-label="Quitar ', attr(source.filename), '" title="Quitar esta fuente">×</button></article>',
   ].join("")).join("");
   return [
     '<section class="campaign-summary knowledge-summary"><div><span class="kicker">CAMPAÑA ACTIVA</span><h2>',
@@ -1074,6 +1172,7 @@ async function analyzeCurrentCampaign(): Promise<void> {
     state.campaignSources = recovered.sources;
     state.campaignIntelligence = recovered.brief || result.brief;
     state.templateCandidates = recovered.candidates.length ? recovered.candidates : result.template_candidates;
+    state.productionMatrixPlans = [];
     state.campaignBrief.objective = result.brief.objective || state.campaignBrief.objective;
     state.campaignBrief.notes = result.brief.summary || state.campaignBrief.notes;
     state.campaignBrief.styleGuide = result.brief.visual_rules.join("\n");
@@ -1102,6 +1201,7 @@ function bindActiveCampaign(): void {
       state.campaignBrief.referenceUrl = urls[0] || "";
       state.campaignIntelligence = null;
       state.templateCandidates = [];
+      state.productionMatrixPlans = [];
       saveSession();
       idle();
       await analyzeCurrentCampaign();
@@ -1126,10 +1226,52 @@ function bindActiveCampaign(): void {
       state.campaignSources = [...byId.values()];
       state.campaignIntelligence = null;
       state.templateCandidates = [];
+      state.productionMatrixPlans = [];
       saveSession();
       toast("Material añadido. Vuelve a analizar para actualizar el brief.", "success");
       await renderCampaign();
     } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+  });
+  queryAll<HTMLButtonElement>(".source-remove").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!state.activeClientId || !state.campaignWorkspace) return;
+      const source = state.campaignSources.find((item) => item.source_id === button.dataset.sourceId);
+      if (!source) return;
+      const confirmed = await confirmAction({
+        title: "¿Quitar esta fuente?",
+        lines: [
+          "Se eliminará “" + source.filename + "” de la campaña.",
+          "El brief y las propuestas se volverán a generar sin este material.",
+        ],
+        confirm: "Sí, quitar fuente",
+        remember: "quitar-fuente-campana",
+      });
+      if (!confirmed) return;
+      busy("Quitando material", "Actualizando la base de conocimiento de la campaña…", 45);
+      try {
+        await deleteCampaignSource(
+          state.activeClientId,
+          state.campaignWorkspace.campaign_id,
+          source.source_id,
+        );
+        const recovered = await loadCampaignState(
+          state.activeClientId,
+          state.campaignWorkspace.campaign_id,
+        );
+        state.campaignWorkspace = recovered.workspace;
+        state.campaignSources = recovered.sources;
+        state.campaignIntelligence = recovered.brief;
+        state.templateCandidates = recovered.candidates;
+        state.productionMatrixPlans = [];
+        saveSession();
+        toast("Fuente quitada. Vuelve a analizar para reconstruir el brief.", "success");
+        await renderCampaign();
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        idle();
+      }
+    });
   });
 }
 
@@ -1402,7 +1544,7 @@ function queueCard(file: File, index: number): string {
     '<article class="queue-card">', media,
     '<div class="queue-meta"><strong>', esc(file.name), "</strong><span>",
     readableSize(file.size),
-    isLayered ? " · capas editables" : isImage ? " · referencia visual" : " · fuente de contexto",
+    isLayered ? " · capas para analizar" : isImage ? " · referencia visual" : " · fuente de contexto",
     "</span></div>",
     '<button type="button" class="queue-drop" data-index="', String(index),
     '" title="Quitar de la cola" aria-label="Quitar ', attr(file.name), '">×</button>',
@@ -1600,9 +1742,32 @@ export async function mountApp(): Promise<void> {
     const candidates = JSON.parse(sessionStorage.getItem("creative-template-candidates") || "[]");
     if (Array.isArray(candidates)) state.templateCandidates = candidates;
     const matrix = JSON.parse(sessionStorage.getItem("creative-production-matrix") || "[]");
-    if (Array.isArray(matrix)) state.productionMatrix = matrix.filter((row) => row && typeof row === "object");
+    if (Array.isArray(matrix)) {
+      // Las sesiones anteriores no tenían rowNumber. Lo reconstruimos de la
+      // posición de la hoja para poder relacionar el plan nuevo sin romper una
+      // matriz guardada antes de esta versión.
+      state.productionMatrix = matrix
+        .filter((row) => row && typeof row === "object")
+        .map((row: any, index) => ({
+          ...row,
+          rowNumber: Math.max(2, Math.trunc(Number(row?.rowNumber || row?.row_number || index + 2))),
+        })) as MatrixRow[];
+    }
+    const matrixDraftId = (sessionStorage.getItem("creative-production-matrix-draft") || "").trim();
+    state.productionMatrixDraftId = matrixDraftId || null;
+    const matrixPlans = JSON.parse(sessionStorage.getItem("creative-production-matrix-plans") || "[]");
+    if (Array.isArray(matrixPlans)) {
+      state.productionMatrixPlans = matrixPlans
+        .map(normaliseMatrixProductionPlan)
+        .filter((plan): plan is MatrixProductionPlan => plan !== null);
+    }
+    if (!state.productionMatrix.length) state.productionMatrixPlans = [];
     const batch = JSON.parse(sessionStorage.getItem("creative-production-batch") || "null");
     if (batch && typeof batch === "object") state.productionBatch = batch;
+    const task = JSON.parse(sessionStorage.getItem("creative-production-task") || "null");
+    if (task && typeof task === "object" && typeof task.task_id === "string") {
+      state.productionTask = task as CampaignProductionTask;
+    }
   } catch {
     state.campaignIds = [];
     state.activeId = null;
@@ -1933,11 +2098,18 @@ function renderCampaignIntelligence(): void {
   const evidence = state.campaignWorkspace?.social_evidence || [];
   const socialEvidence = evidence.map((item) => [
     '<article class="social-evidence"><strong>', esc(item.title || item.url), '</strong>',
-    item.description ? '<p>' + esc(item.description) + '</p>' : '',
-    item.posts?.length ? '<div class="evidence-strip">' + item.posts.slice(0, 5).map((post) =>
-      '<a href="' + attr(post) + '" target="_blank" rel="noreferrer"><img src="' + attr(post) +
-      '" alt="Post público de referencia" loading="lazy" referrerpolicy="no-referrer"></a>'
-    ).join("") + '</div>' : '',
+    item.accessible === false
+      ? '<p class="muted"><strong>No se usó como post:</strong> la red bloqueó la lectura pública. '
+        + 'Sube capturas en “Material de campaña” si esta referencia es importante.</p>'
+      : item.description ? '<p>' + esc(item.description) + '</p>' : '',
+    item.accessible !== false && item.posts?.length
+      ? '<div class="evidence-strip">' + item.posts.slice(0, 5).map((post) =>
+        '<a href="' + attr(post) + '" target="_blank" rel="noreferrer"><img src="' + attr(post) +
+        '" alt="Post público de referencia" loading="lazy" referrerpolicy="no-referrer"></a>'
+      ).join("") + '</div>'
+      : item.accessible !== false
+        ? '<p class="muted">Se leyó la URL, pero no expuso imágenes públicas de posts.</p>'
+        : '',
     '</article>',
   ].join("")).join("");
   content().innerHTML = [
@@ -1953,12 +2125,15 @@ function renderCampaignIntelligence(): void {
     '<label class="field" style="margin-top:14px"><span>Concepto creativo</span><textarea id="brief-concept" rows="2">', esc(brief.concept), '</textarea></label>',
     '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Tono · uno por línea</span><textarea id="brief-tone" rows="5">', esc(brief.tone.join("\n")), '</textarea></label>',
     '<label class="field"><span>Tratamiento del producto</span><textarea id="brief-product-treatment" rows="5">', esc(brief.product_treatment.join("\n")), '</textarea></label></div>',
+    '<div class="form-grid" style="margin-top:14px"><label class="field"><span>Estilo de titulares</span><textarea id="brief-headline-style" rows="2">', esc(brief.headline_style), '</textarea></label>',
+    '<label class="field"><span>Regla de CTA</span><textarea id="brief-cta-style" rows="2">', esc(brief.cta_style), '</textarea></label></div>',
     '<div class="brief-grid"><div><span class="label">Paleta detectada</span>', briefList(brief.palette), '</div><div><span class="label">Tipografías detectadas</span>', briefList(brief.typography), '</div></div>',
     '<div class="button-row" style="margin-top:20px"><button class="button" id="save-intelligence">', reviewed ? 'Guardar y regenerar plantillas' : 'Aprobar brief y generar plantillas', '</button><button class="ghost-button" id="rerun-intelligence">Reanalizar todo</button></div></section>',
     '<aside class="brief-side"><section class="card"><div class="card-head"><div><h2>Reglas visuales editables</h2><p>Una por línea.</p></div></div><label class="field"><textarea id="brief-visual-rules" rows="9">', esc(brief.visual_rules.join("\n")), '</textarea></label></section>',
     '<section class="card"><div class="card-head"><div><h2>Contenido dinámico</h2><p>Una regla por línea; vacío significa que no se fuerza.</p></div></div>',
     '<label class="field"><span>Obligatorio</span><textarea id="brief-required" rows="4">', esc(brief.required_elements.join("\n")), '</textarea></label>',
     '<label class="field brief-subhead"><span>Opcional</span><textarea id="brief-optional" rows="4">', esc(brief.optional_elements.join("\n")), '</textarea></label>',
+    '<label class="field brief-subhead"><span>Legales, fechas y restricciones</span><textarea id="brief-legal" rows="5">', esc(brief.legal.join("\n")), '</textarea></label>',
     '<label class="field brief-subhead"><span>No usar</span><textarea id="brief-forbidden" rows="4">', esc(brief.forbidden_elements.join("\n")), '</textarea></label></section></aside></div>',
     '<div class="spacer"></div><section class="card"><div class="card-head"><div><h2>Qué extrajo de cada archivo</h2><p>Las páginas se analizan dentro de su documento; no aparecen como KV separados.</p></div><span class="badge">', String(state.campaignSources.length), ' FUENTES</span></div><div class="knowledge-list">', sourceRows, '</div></section>',
     socialEvidence ? '<div class="spacer"></div><section class="card"><div class="card-head"><div><h2>Evidencia pública encontrada</h2><p>Esto es lo que la IA pudo leer realmente; una URL sin posts no se presenta como analizada.</p></div></div>' + socialEvidence + '</section>' : '',
@@ -1976,6 +2151,8 @@ function renderCampaignIntelligence(): void {
     const values = (selector: string) => (query<HTMLTextAreaElement>(selector)?.value || "")
       .split(/\n|,/).map((item) => item.trim()).filter(Boolean);
     const concept = query<HTMLTextAreaElement>("#brief-concept")?.value.trim() || "";
+    const headlineStyle = query<HTMLTextAreaElement>("#brief-headline-style")?.value.trim() || "";
+    const ctaStyle = query<HTMLTextAreaElement>("#brief-cta-style")?.value.trim() || "";
     busy("Aprobando el brief", "Guardando reglas y regenerando las plantillas desde esta versión…", 35);
     try {
       state.campaignIntelligence = await reviseCampaignBrief(
@@ -1987,8 +2164,11 @@ function renderCampaignIntelligence(): void {
           primary_message: message,
           creative_concept: concept,
           tone: values("#brief-tone"),
+          headline_style: headlineStyle,
+          cta_style: ctaStyle,
           visual_rules: values("#brief-visual-rules"),
           product_treatment: values("#brief-product-treatment"),
+          legal_requirements: values("#brief-legal"),
           required_elements: values("#brief-required"),
           optional_elements: values("#brief-optional"),
           forbidden_elements: values("#brief-forbidden"),
@@ -2011,6 +2191,7 @@ function renderCampaignIntelligence(): void {
       state.templateCandidates = recovered.candidates.length
         ? recovered.candidates
         : regenerated.template_candidates;
+      state.productionMatrixPlans = [];
       state.campaignBrief.objective = state.campaignIntelligence.objective;
       saveSession();
       toast("Brief aprobado y plantillas regeneradas desde tus correcciones.", "success");
@@ -4039,6 +4220,27 @@ function templateWireframe(candidate: TemplateCandidate): string {
   ].join("");
 }
 
+/** La aprobación no debe sentirse como una caja negra: la persona puede ver
+ * qué documentos, PSD o artes se usaron como evidencia de cada sistema. La
+ * miniatura de arriba representa la retícula propuesta; nunca se presenta como
+ * una copia literal ni como un producto ya colocado. */
+function templateEvidenceHtml(candidate: TemplateCandidate): string {
+  const sourceIds = candidate.source_ids || [];
+  const sources = sourceIds
+    .map((sourceId) => state.campaignSources.find((source) => source.source_id === sourceId))
+    .filter((source): source is CampaignSource => Boolean(source));
+  if (!sources.length) {
+    return '<div class="proposal-evidence muted tiny">Estructura propuesta con el brief y el material disponible de la campaña.</div>';
+  }
+  const labels = sources.slice(0, 4).map((source) =>
+    '<span class="field-pill">' + esc(sourceKindLabel(source)) + ' · ' + esc(source.filename) + '</span>'
+  ).join("");
+  const remaining = sources.length - Math.min(sources.length, 4);
+  return '<div class="proposal-evidence"><strong>Material analizado</strong><div class="field-pills">' +
+    labels + (remaining ? '<span class="field-pill">+' + String(remaining) + ' archivo' + (remaining === 1 ? '' : 's') + '</span>' : '') +
+    '</div><small>La vista previa enseña la estructura de la plantilla, no una copia literal ni un producto definitivo.</small></div>';
+}
+
 function renderTemplateProposals(): void {
   const candidates = state.templateCandidates;
   if (!candidates.length) {
@@ -4069,6 +4271,7 @@ function renderTemplateProposals(): void {
       candidate.status === "approved" ? "✓ Aprobada" : candidate.status === "rejected" ? "Descartada" : "Propuesta", '</span></div>',
       '<div class="proposal-body"><span class="kicker">', esc(candidate.category || "Plantilla estática"), '</span><h2>', esc(candidate.name), '</h2><p>', esc(candidate.description), '</p>',
       candidate.rationale ? '<div class="proposal-reason"><strong>Por qué funciona</strong><span>' + esc(candidate.rationale) + '</span></div>' : '',
+      templateEvidenceHtml(candidate),
       '<div class="proposal-meta"><span>', String(candidate.supported_product_count?.min ?? 1), '–', String(candidate.supported_product_count?.max ?? 1), ' productos</span><span>Adaptable por formato</span></div>',
       candidate.blueprint ? '<div class="field-pills blueprint-pills"><span class="field-pill">' + esc(candidate.blueprint.archetype || "retícula adaptable") + '</span><span class="field-pill">' + esc(candidate.blueprint.background_style || "fondo de campaña") + '</span><span class="field-pill">' + esc(candidate.blueprint.accent_style || "sistema visual") + '</span></div>' : '',
       '<div class="field-pills">', fields || '<span class="muted tiny">Los campos se definirán al materializar la plantilla.</span>', '</div>',
@@ -4117,6 +4320,7 @@ function renderTemplateProposals(): void {
         );
         state.campaignIntelligence = regenerated.brief;
         state.templateCandidates = regenerated.template_candidates;
+        state.productionMatrixPlans = [];
         saveSession();
         regenerated.warnings.forEach((warning) => toast(warning, "info"));
         toast("Corrección aplicada. Revisa el nuevo preview antes de aprobar.", "success");
@@ -4139,6 +4343,7 @@ function renderTemplateProposals(): void {
         const updated = await decideTemplateCandidate(state.activeClientId, state.campaignWorkspace.campaign_id, id, decision, note);
         if (!updated) throw new Error("Este despliegue todavía no puede guardar la aprobación de plantillas.");
         state.templateCandidates = state.templateCandidates.map((item) => item.candidate_id === id ? updated : item);
+        state.productionMatrixPlans = [];
         saveSession();
         toast(decision === "approve" ? "Plantilla aprobada y guardada en el cliente." : "Propuesta descartada.", "success");
         renderTemplateProposals();
@@ -4349,10 +4554,142 @@ function matrixRowReady(row: MatrixRow): boolean {
     matrixAmbiguousTokens(row).length === 0;
 }
 
+function matrixPlanForRow(row: MatrixRow): MatrixProductionPlan | null {
+  return state.productionMatrixPlans.find((plan) => plan.row_number === row.rowNumber) || null;
+}
+
+function matrixPlanReady(row: MatrixRow): boolean {
+  // Una matriz guardada por una versión anterior no trae planes. No la
+  // inutilizamos: el servidor volverá a aplicar el mismo preflight al generar.
+  if (!state.productionMatrixPlans.length) return true;
+  const plan = matrixPlanForRow(row);
+  if (!plan || plan.status !== "ready") return false;
+  // Si alguien cambió la aprobación después de validar la matriz, ese plan ya
+  // no describe la biblioteca actual y debe revisarse en el servidor.
+  return !plan.template || state.templateCandidates.some(
+    (candidate) => candidate.candidate_id === plan.template?.candidate_id && candidate.status === "approved",
+  );
+}
+
+/** Una respuesta parcial nunca puede parecer una validación correcta. El
+ * servidor suele devolver un plan por fila, pero este guard evita que una
+ * respuesta interrumpida habilite producción sin que la persona lo note. */
+function matrixRowsNeedingPlan(rows = state.productionMatrix): MatrixRow[] {
+  if (!state.productionMatrixPlans.length) return [];
+  return rows.filter((row) => !matrixPlanReady(row));
+}
+
+function matrixPlanProblem(row: MatrixRow): string {
+  const plan = matrixPlanForRow(row);
+  return plan?.message ||
+    "La fila " + String(row.rowNumber) +
+    " no recibió una plantilla compatible. Vuelve a validar la matriz.";
+}
+
+function matrixPlanReviewHtml(rows: MatrixRow[]): string {
+  if (!rows.length) return "";
+  if (!state.productionMatrixPlans.length) {
+    return '<div class="notice compact matrix-plan-review"><strong>Compatibilidad pendiente de confirmar:</strong> esta matriz se guardó antes de la revisión automática. El servidor la comprobará otra vez al generar.</div>';
+  }
+  const items = rows.slice(0, 12).map((row) => {
+    const plan = matrixPlanForRow(row);
+    if (!plan) {
+      return '<li><strong>Fila ' + String(row.rowNumber) + ':</strong> no se recibió el plan de esta fila; vuelve a validar la matriz.</li>';
+    }
+    const status = matrixPlanReady(row)
+      ? '✓ compatible'
+      : plan.status === "needs_approval" ? 'requiere aprobación' : 'incompatible';
+    const template = plan.template ? ' · ' + esc(plan.template.name) : '';
+    const fillable = plan.ai_fillable_fields.length
+      ? ' · IA puede completar: ' + esc(plan.ai_fillable_fields.join(", "))
+      : '';
+    return '<li class="matrix-plan-' + esc(plan.status) + '"><strong>Fila ' +
+      String(row.rowNumber) + ' · ' + status + '</strong>' + template + fillable +
+      '<small>' + esc(plan.message) + '</small></li>';
+  }).join("");
+  const remaining = rows.length - Math.min(rows.length, 12);
+  const issues = matrixRowsNeedingPlan(rows).length;
+  return '<section class="notice ' + (issues ? 'warning ' : 'success ') +
+    'compact matrix-plan-review"><strong>Plantilla por fila</strong><span>' +
+    (issues
+      ? ' Corrige o aprueba una plantilla antes de producir.'
+      : ' Todas las filas tienen una plantilla compatible.') +
+    '</span><ul>' + items + (remaining ? '<li>… y ' + String(remaining) + ' filas más.</li>' : '') +
+    '</ul></section>';
+}
+
 function matrixExpectedProductCount(row: MatrixRow): number {
   const products = row.product.split(/[|;]/).map((item) => item.trim()).filter(Boolean);
   const images = row.image.split(/[|;]/).map((item) => item.trim()).filter(Boolean);
-  return Math.max(1, products.length, images.length);
+  // Una fila institucional puede traer únicamente titular, fecha o legal. La
+  // imagen se exige cuando la propia fila declara un producto/archivo, no por
+  // defecto: el servidor elegirá una plantilla aprobada compatible con cero
+  // productos.
+  return Math.max(products.length, images.length);
+}
+
+/** No todos los formatos que el motor acepta se pueden dibujar en todos los
+ * navegadores. TIFF es el caso habitual; para esos archivos mostramos una ficha
+ * deliberada, no el icono de imagen rota del navegador. AVIF/GIF se intentan y
+ * también caen en esta ficha si el navegador concreto no los soporta. */
+const BROWSER_PRODUCT_PREVIEW_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp", "gif", "avif", "bmp",
+]);
+
+function productPreviewExtension(file: File | CampaignProductionAsset): string {
+  const asset = "asset_id" in file;
+  const declared = asset ? file.extension : "";
+  const filename = asset ? file.filename : file.name;
+  const inferred = filename.split(".").pop() || "";
+  return (declared || inferred).replace(/^\./, "").trim().toLowerCase();
+}
+
+function matrixProductPreviewFallbackHtml(extension: string, filename: string): string {
+  const format = (extension || "archivo").toUpperCase();
+  return [
+    '<span class="matrix-product-file-preview" role="img" aria-label="',
+    attr("Vista previa no disponible para " + filename), '"><b>', esc(format),
+    '</b><small>Sin miniatura</small></span>',
+  ].join("");
+}
+
+function matrixProductPreviewHtml(file: File | CampaignProductionAsset): string {
+  const asset = "asset_id" in file;
+  const filename = asset ? file.filename : file.name;
+  const extension = productPreviewExtension(file);
+  if (!BROWSER_PRODUCT_PREVIEW_EXTENSIONS.has(extension)) {
+    return matrixProductPreviewFallbackHtml(extension, filename);
+  }
+  const url = asset ? file.preview_url : productUrl(file);
+  return [
+    '<img class="matrix-product-preview" src="', attr(url), '" alt="', attr(filename),
+    '" data-preview-extension="', attr(extension), '" data-preview-filename="', attr(filename),
+    '" loading="lazy" decoding="async">',
+  ].join("");
+}
+
+function matrixProductPreviewFallback(extension: string, filename: string): HTMLSpanElement {
+  const preview = document.createElement("span");
+  preview.className = "matrix-product-file-preview";
+  preview.setAttribute("role", "img");
+  preview.setAttribute("aria-label", "Vista previa no disponible para " + filename);
+  const format = document.createElement("b");
+  format.textContent = (extension || "archivo").toUpperCase();
+  const detail = document.createElement("small");
+  detail.textContent = "Sin miniatura";
+  preview.append(format, detail);
+  return preview;
+}
+
+function bindMatrixProductPreviewFallbacks(): void {
+  queryAll<HTMLImageElement>(".matrix-product-preview").forEach((image) => {
+    image.addEventListener("error", () => {
+      image.replaceWith(matrixProductPreviewFallback(
+        image.dataset.previewExtension || "",
+        image.dataset.previewFilename || "imagen",
+      ));
+    }, { once: true });
+  });
 }
 
 function matrixProductCard(file: File | CampaignProductionAsset): string {
@@ -4366,7 +4703,7 @@ function matrixProductCard(file: File | CampaignProductionAsset): string {
       ? "No coincide con una fila todavía"
       : "Esperando la matriz para vincularse";
   return [
-    '<article class="matrix-product-card"><img src="', attr(asset ? file.preview_url : productUrl(file)), '" alt="', attr(filename), '">',
+    '<article class="matrix-product-card">', matrixProductPreviewHtml(file),
     '<div><strong>', esc(filename), '</strong><span class="', linked.length ? 'is-linked' : 'is-unlinked', '">',
     esc(label), '</span><small>', asset
       ? readableSize(file.size_bytes) + " · " + String(file.width) + "×" + String(file.height)
@@ -4381,11 +4718,12 @@ function matrixProductCard(file: File | CampaignProductionAsset): string {
 function renderCampaignProduction(): void {
   const rows = state.productionMatrix;
   const matched = rows.filter(
-    (row) => matrixRowReady(row),
+    (row) => matrixRowReady(row) && matrixPlanReady(row),
   ).length;
   const approved = state.templateCandidates.filter((item) => item.status === "approved");
   const exact = matrixRequestedPieces();
   const needsDefaultFormat = rows.some((row) => matrixFormats(row).length === 0);
+  const planIssueRows = matrixRowsNeedingPlan(rows);
   state.autoFormats = false;
   content().innerHTML = [
     stepBar("generate"),
@@ -4398,7 +4736,7 @@ function renderCampaignProduction(): void {
     rows.length ? String(exact) + " artes planificados" : "Sube la matriz para calcular la tanda",
     '</h2><p>', String(approved.length), ' plantillas aprobadas disponibles para selección automática.</p></div>',
     '<div class="production-command-stats"><span><strong>', String(rows.length), '</strong> filas</span><span><strong>',
-    String(matched), '</strong> con imagen</span><span><strong>', String(exact), '</strong> salidas</span></div></section>',
+    String(matched), '</strong> filas listas</span><span><strong>', String(exact), '</strong> salidas</span></div></section>',
     productionMatrixHtml(),
     '<div class="spacer"></div>',
     '<div class="production-format-note"><strong>Formatos por defecto</strong><span>Solo se usan cuando una fila deja “formatos” vacío. La medida escrita en la matriz siempre manda.</span></div>',
@@ -4407,25 +4745,37 @@ function renderCampaignProduction(): void {
     '<section class="card production-review"><div><div class="card-head"><div><h2>Revisión antes de producir</h2>',
     '<p>No se hace una llamada de imagen por pieza. El producto se recorta, mejora y compone localmente; el copy faltante usa como máximo una llamada de IA para toda la tanda.</p></div></div>',
     '<label class="choice ai-copy-choice"><input id="campaign-ai-copy" type="checkbox" checked> Completar con IA titular, subtítulo o CTA cuando la celda esté vacía y la plantilla lo admita</label>',
-    '<div class="notice compact"><strong>Nunca se inventan:</strong> precio, descuento, cuota, vigencia ni legales. Si faltan, el campo desaparece.</div></div>',
+    '<div class="notice compact"><strong>Nunca se inventan:</strong> precio, descuento, cuota ni vigencia. Los legales solo se completan desde el brief que aprobaste; si no hay copy, el campo desaparece.</div></div>',
     '<button class="button large" id="run-campaign-production"',
-    !state.productionMatrixFile || !rows.length || matched < rows.length || !approved.length ||
+    (!state.productionMatrixFile && !state.productionMatrixDraftId) || !rows.length || matched < rows.length || planIssueRows.length || !approved.length ||
       (needsDefaultFormat && !state.selectedFormats.size) ? " disabled" : "",
     '>Generar ', String(exact || 0), ' artes <span>→</span></button></section>',
     state.productionBatch
       ? '<div class="notice success" style="margin-top:18px"><strong>Última tanda:</strong> ' +
         String(state.productionBatch.total_pieces) + ' artes listos. <button class="ghost-button" id="open-last-batch">Ver entregables</button></div>'
       : '',
+    state.productionTask && !["COMPLETED", "FAILED"].includes(state.productionTask.state)
+      ? '<div class="notice compact" style="margin-top:12px"><strong>Tanda en curso:</strong> ' +
+        esc(state.productionTask.meta.status || "El worker sigue preparando los artes.") +
+        ' <button class="ghost-button" id="resume-production-task">Ver progreso</button></div>'
+      : '',
   ].join("");
   bindStepBar();
   bindProductionMatrix();
   bindFormatSelector();
   query("#open-last-batch")?.addEventListener("click", () => navigate("results"));
+  query("#resume-production-task")?.addEventListener("click", () => void resumeCampaignProductionTask());
   query("#run-campaign-production")?.addEventListener("click", () => void runCampaignProduction());
 }
 
 async function runCampaignProduction(): Promise<void> {
-  if (!state.activeClientId || !state.campaignWorkspace || !state.productionMatrixFile) return;
+  if (!state.activeClientId || !state.campaignWorkspace ||
+    (!state.productionMatrixFile && !state.productionMatrixDraftId)) return;
+  const planIssueRows = matrixRowsNeedingPlan();
+  if (planIssueRows.length) {
+    toast(matrixPlanProblem(planIssueRows[0]), "error");
+    return;
+  }
   const incomplete = state.productionMatrix.filter((row) => !matrixRowReady(row));
   if (incomplete.length) {
     const ambiguous = incomplete.flatMap(matrixAmbiguousTokens);
@@ -4440,10 +4790,11 @@ async function runCampaignProduction(): Promise<void> {
   const useAi = query<HTMLInputElement>("#campaign-ai-copy")?.checked !== false;
   busy("Produciendo la campaña", "Subiendo matriz y productos…", 5);
   try {
-    const batch = await produceCampaign(
+    const started = await produceCampaign(
       state.activeClientId,
       state.campaignWorkspace.campaign_id,
       state.productionMatrixFile,
+      state.productionMatrixDraftId,
       [],
       campaignProductAssets().map((asset) => asset.asset_id),
       Array.from(state.selectedFormats),
@@ -4454,9 +4805,58 @@ async function runCampaignProduction(): Promise<void> {
       ),
       () => busyProgress(62, "Eligiendo plantillas y adaptando todos los formatos…"),
     );
+    let batch: ProductionBatch;
+    if ("task_id" in started) {
+      // La API ya dejó matriz y fotos a salvo en el servidor. A partir de aquí
+      // cerrar o recargar la pestaña no duplica la tanda: se puede retomar con
+      // su task_id y consultar los entregables al volver.
+      state.productionTask = started;
+      saveSession();
+      busyProgress(
+        Math.max(6, Number(started.meta.progress || 6)),
+        started.meta.status || "La tanda quedó en cola; el worker la está preparando…",
+      );
+      batch = await pollCampaignProductionTask(
+        state.activeClientId,
+        state.campaignWorkspace.campaign_id,
+        started.task_id,
+        busyProgress,
+      );
+      state.productionTask = null;
+    } else {
+      batch = started;
+      state.productionTask = null;
+    }
     state.productionBatch = batch;
     saveSession();
     batch.warnings.forEach((warning) => toast(warning, "info"));
+    toast(String(batch.total_pieces) + " artes generados y empaquetados.", "success");
+    await navigate("results");
+  } catch (error) {
+    toast(errorMessage(error), "error");
+  } finally {
+    idle();
+  }
+}
+
+async function resumeCampaignProductionTask(): Promise<void> {
+  if (!state.activeClientId || !state.campaignWorkspace || !state.productionTask) return;
+  const task = state.productionTask;
+  busy(
+    "Produciendo la campaña",
+    task.meta.status || "Reconectando con el worker…",
+    Math.max(5, Number(task.meta.progress || 5)),
+  );
+  try {
+    const batch = await pollCampaignProductionTask(
+      state.activeClientId,
+      state.campaignWorkspace.campaign_id,
+      task.task_id,
+      busyProgress,
+    );
+    state.productionBatch = batch;
+    state.productionTask = null;
+    saveSession();
     toast(String(batch.total_pieces) + " artes generados y empaquetados.", "success");
     await navigate("results");
   } catch (error) {
@@ -4498,7 +4898,7 @@ function productionMatrixHtml(): string {
     ? campaignProductAssets()
     : state.products;
   const matched = rows.filter((row) => state.campaignWorkspace
-    ? matrixRowReady(row)
+    ? matrixRowReady(row) && matrixPlanReady(row)
     : matrixProductFile(row)
   ).length;
   const preview = rows.slice(0, 6).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline || "IA / vacío") + '</td><td>' + esc(row.price || "—") + '</td><td>' + esc(row.formats || "Por defecto") + '</td><td>' + String(row.proposals) + '</td></tr>').join("");
@@ -4517,13 +4917,18 @@ function productionMatrixHtml(): string {
     '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Una fila puede pedir uno o varios productos, formatos y propuestas. “No poner” elimina ese campo.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
     '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,.xlsx,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV, TSV o XLSX</strong><span>producto, imagen, titular, precio, CTA, formatos, propuestas</span></label>',
     '<label class="dropzone compact" id="matrix-product-drop"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/tiff,image/avif"><span class="drop-icon">⇧</span><strong>2. Añadir imágenes de producto</strong><span>PNG, JPG, WEBP, BMP, GIF, TIFF o AVIF · también puedes arrastrarlas aquí</span></label></div>',
-    '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' imágenes vinculadas</span><small>',
-    state.productionMatrixFile ? esc(state.productionMatrixFile.name) : "Todavía no has subido la matriz.", '</small></div>',
+    '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' listas para producir</span><small>',
+    state.productionMatrixFile
+      ? esc(state.productionMatrixFile.name)
+      : state.productionMatrixDraftId
+        ? "Matriz validada y guardada en esta campaña."
+        : "Todavía no has subido la matriz.", '</small></div>',
     '<section class="matrix-product-inventory"><div><strong>Imágenes cargadas para esta tanda</strong><span>', String(productFiles.length), productFiles.length === 1 ? ' imagen' : ' imágenes', '</span></div>',
     productFiles.length
       ? '<div class="matrix-product-list">' + productFiles.map(matrixProductCard).join("") + '</div>'
       : '<p class="muted tiny">Aquí aparecerán con miniatura y estado de vínculo. Quedan guardadas dentro de esta campaña y puedes volver después sin cargarlas otra vez.</p>',
     '</section>',
+    state.campaignWorkspace ? matrixPlanReviewHtml(rows) : '',
     matchWarnings.length ? '<div class="notice warning compact matrix-match-warnings"><strong>Revisa las imágenes:</strong><ul>' + matchWarnings.map((warning) => '<li>' + warning + '</li>').join("") + '</ul></div>' : '',
     rows.length ? '<div class="inventory matrix-preview"><table><thead><tr><th>Producto</th><th>Imagen</th><th>Titular</th><th>Precio</th><th>Formatos</th><th>Propuestas</th></tr></thead><tbody>' + preview + '</tbody></table></div><div class="button-row" style="margin-top:12px"><button class="ghost-button" id="clear-production-matrix">Quitar matriz</button><span class="muted tiny">Vacío = la IA puede completar si corresponde · “no poner” = se omite.</span></div>' : '',
     '</section>',
@@ -4536,20 +4941,27 @@ function matrixKey(value: string): string {
 }
 
 function bindProductionMatrix(): void {
+  bindMatrixProductPreviewFallbacks();
   query<HTMLInputElement>("#production-matrix")?.addEventListener("change", async (event) => {
-    const file = (event.currentTarget as HTMLInputElement).files?.[0];
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    // La referencia File queda en estado; liberar el control permite elegir la
+    // misma matriz tras corregirla o después de un error de validación.
+    input.value = "";
     if (!file) return;
     if (!state.activeClientId || !state.campaignWorkspace) {
       toast("Primero abre una campaña para validar la matriz.", "error");
       return;
     }
     try {
-      const rows = await previewCampaignMatrix(
+      const preview = await previewCampaignMatrix(
         state.activeClientId,
         state.campaignWorkspace.campaign_id,
         file,
+        Array.from(state.selectedFormats),
       );
-      state.productionMatrix = rows.map((row: any) => ({
+      state.productionMatrix = preview.rows.map((row: any) => ({
+        rowNumber: Number(row?.row_number || 0),
         product: String(row?.producto || ""),
         image: String(row?.imagen || ""),
         headline: String(row?.titular || ""),
@@ -4567,13 +4979,18 @@ function bindProductionMatrix(): void {
         template: String(row?.plantilla || ""),
         omit: Array.isArray(row?.suppressed_fields) ? row.suppressed_fields.map(String) : [],
       }));
+      state.productionMatrixPlans = preview.plans;
       state.productionMatrixFile = file;
+      state.productionMatrixDraftId = preview.matrixDraftId;
       saveSession();
       toast(String(state.productionMatrix.length) + " filas importadas en la matriz.", "success");
       await renderGenerate();
     } catch (error) {
       state.productionMatrix = [];
+      state.productionMatrixPlans = [];
+      state.productionMatrixDraftId = null;
       state.productionMatrixFile = null;
+      saveSession();
       toast(errorMessage(error), "error");
     }
   });
@@ -4691,6 +5108,8 @@ function bindProductionMatrix(): void {
   });
   query("#clear-production-matrix")?.addEventListener("click", async () => {
     state.productionMatrix = [];
+    state.productionMatrixPlans = [];
+    state.productionMatrixDraftId = null;
     state.productionMatrixFile = null;
     saveSession();
     await renderGenerate();
@@ -5273,13 +5692,23 @@ async function renderCampaignResults(): Promise<void> {
   if (batches.length) state.productionBatch = batches[0];
   const batch = state.productionBatch;
   if (!batch?.pieces.length) {
+    const pending = state.productionTask && !["COMPLETED", "FAILED"].includes(state.productionTask.state)
+      ? '<div class="notice compact" style="margin-top:16px"><strong>La tanda sigue en proceso.</strong> ' +
+        esc(state.productionTask.meta.status || "El worker continúa renderizando.") +
+        ' <button class="ghost-button" id="resume-production-task">Ver progreso</button></div>'
+      : state.productionTask?.state === "FAILED"
+        ? '<div class="notice warning" style="margin-top:16px"><strong>La última tanda falló:</strong> ' +
+          esc(state.productionTask.error || "No se pudo completar.") + '</div>'
+        : '';
     content().innerHTML = [
       stepBar("results"),
       pageHead("05 · ENTREGABLES", "Todavía no hay artes", "Carga una matriz y produce la primera tanda desde las plantillas aprobadas."),
       emptyState("▦", "La galería está vacía", "Los productos entran en este paso, nunca dentro de la plantilla.", '<button class="button" id="go-generate">Ir a producción</button>'),
+      pending,
     ].join("");
     bindStepBar();
     query("#go-generate")?.addEventListener("click", () => navigate("generate"));
+    query("#resume-production-task")?.addEventListener("click", () => void resumeCampaignProductionTask());
     return;
   }
   const cards = batch.pieces.map((piece) => [
