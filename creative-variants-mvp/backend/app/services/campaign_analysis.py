@@ -1055,7 +1055,8 @@ def deterministic_candidates(
         "product",
         kind="image",
         required=True,
-        role="Zona dominante, vacia en el master y poblada desde la matriz.",
+        repeatable=True,
+        role="Zona dominante, vacia en el master y poblada desde la matriz; admite de uno a cuatro productos.",
     )
     product_name = _slot(
         "nombre_producto",
@@ -1118,14 +1119,14 @@ def deterministic_candidates(
                 name="Producto protagonista",
                 category="single_product",
                 rationale=(
-                    "Master flexible para una foto de producto: las zonas de precio, cuota, "
+                    "Master flexible para uno a cuatro productos: las zonas de precio, cuota, "
                     "descuento, CTA, vigencia y legal solo se activan cuando la matriz o el brief las trae."
                 ),
                 layout_intent=(
                     "Producto dominante con aire alrededor; copy independiente y zonas comerciales "
                     "que se expanden o desaparecen sin dejar cajas vacías."
                 ),
-                supported_product_count=ProductCountRange(minimum=1, maximum=1),
+                supported_product_count=ProductCountRange(minimum=1, maximum=4),
                 slots=product_master_slots,
                 source_ids=evidence[:4],
                 adaptation_rules=common_rules,

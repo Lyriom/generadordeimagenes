@@ -200,6 +200,7 @@ export function normaliseSource(raw: any, index = 0, clientId = "", campaignId =
     role: raw?.role || raw?.classification
       ? String(raw.role || raw.classification)
       : strings(raw?.roles).join(" · ") || undefined,
+    roles: strings(raw?.roles),
     preview: raw?.preview || raw?.preview_url || previews[0] || null,
     previews,
     warnings,
@@ -243,6 +244,20 @@ export async function deleteCampaignSource(
     "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
       encodeURIComponent(campaignId) + "/sources/" + encodeURIComponent(sourceId),
   );
+}
+
+export async function updateCampaignSourceRole(
+  clientId: string,
+  campaignId: string,
+  sourceId: string,
+  role: string,
+): Promise<CampaignSource> {
+  const payload: any = await put(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/sources/" + encodeURIComponent(sourceId) + "/role",
+    { role },
+  );
+  return normaliseSource(payload, 0, clientId, campaignId);
 }
 
 function normaliseFields(value: unknown): TemplateCandidateField[] {

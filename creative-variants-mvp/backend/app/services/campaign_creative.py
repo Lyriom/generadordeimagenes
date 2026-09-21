@@ -225,6 +225,46 @@ def _reference_texture(
         return None
 
 
+def _fixed_brand_background(
+    campaign: Campaign,
+    canvas: tuple[int, int],
+) -> tuple[str, Image.Image] | None:
+    """Compone un fondo que la persona marcó explícitamente como fijo.
+
+    Un key visual o post entero se usa solo como textura deliberadamente
+    difusa: contiene producto y copy que no se deben reciclar. En cambio, un
+    PNG/JPG limpio marcado como ``background`` es una decisión humana de
+    branding y debe llegar nítido a todas las adaptaciones.
+    """
+
+    for source in campaign.sources:
+        if source.kind.value != "image" or "background" not in {
+            role.value for role in source.roles
+        }:
+            continue
+        try:
+            path = campaign_store.campaign_path(
+                campaign.client_id, campaign.campaign_id, source.stored_path
+            )
+        except Exception:  # noqa: BLE001 - manifiesto antiguo o dañado
+            continue
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            with Image.open(path) as probe:
+                probe.verify()
+            with Image.open(path) as image:
+                layer = ImageOps.fit(
+                    ImageOps.exif_transpose(image).convert("RGBA"),
+                    canvas,
+                    method=Image.Resampling.LANCZOS,
+                ).copy()
+            return f"Fondo fijo · {source.filename}", layer
+        except Exception:  # noqa: BLE001 - no se cae una tanda por un asset roto
+            continue
+    return None
+
+
 def _decorations(
     width: int,
     height: int,
@@ -1001,12 +1041,15 @@ def _render(
         blueprint.background_style,
     )
     layers.append(("00 · Fondo", background))
+    branding_background = _fixed_brand_background(campaign, canvas)
+    if branding_background is not None:
+        layers.append(("01 · " + branding_background[0], branding_background[1]))
     fixed_psd_layers = _fixed_psd_asset_layers(campaign, candidate, canvas)
     for index, (_name, layer) in enumerate(fixed_psd_layers, 1):
-        layers.append((f"01.{index:02d} · {_name}", layer))
+        layers.append((f"01.{index + 1:02d} · {_name}", layer))
     texture = (
         _reference_texture(campaign, candidate, width, height, proposal)
-        if blueprint.background_style == "campaign" and not fixed_psd_layers
+        if blueprint.background_style == "campaign" and not fixed_psd_layers and branding_background is None
         else None
     )
     if texture is not None:

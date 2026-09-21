@@ -48,12 +48,39 @@ def _looks_like_login_wall(title: str, description: str) -> bool:
     return any(signal in value for signal in signals)
 
 
+def _is_social_profile_page(page_url: str) -> bool:
+    """Distingue un perfil de un enlace a una publicación concreta.
+
+    En perfiles de Instagram/Facebook/TikTok el ``og:image`` suele ser avatar,
+    logo o imagen de instalación de la red. No sirve como referencia de artes;
+    en un enlace ``/p/``/``/reel/``/``/posts/`` el mismo metadato sí representa
+    la publicación y se conserva.
+    """
+
+    parsed = urlparse(page_url)
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    parts = [part.casefold() for part in parsed.path.split("/") if part]
+    if host.endswith("instagram.com"):
+        return not bool(parts and parts[0] in {"p", "reel", "reels", "tv", "stories"})
+    if host.endswith("facebook.com") or host.endswith("fb.com"):
+        return not any(part in {"posts", "photos", "photo", "reel", "reels", "videos", "video"} for part in parts)
+    if host.endswith("tiktok.com"):
+        return not any(part == "video" for part in parts)
+    if host.endswith("linkedin.com"):
+        return not any(part in {"posts", "feed", "video"} for part in parts)
+    return False
+
+
 def public_image_urls(html: str, page_url: str, *, login_wall: bool = False) -> list[str]:
     if login_wall:
         # Una pared de login suele anunciar como og:image el logo de la red. Es
         # exactamente el falso positivo que antes aparecia como «post».
         return []
-    candidates = [_meta(html, "og:image"), _meta(html, "twitter:image")]
+    # El OG de un perfil social es casi siempre avatar/logo. Lo excluimos de
+    # raíz y dejamos únicamente imágenes que el HTML exponga como publicaciones.
+    candidates = [] if _is_social_profile_page(page_url) else [
+        _meta(html, "og:image"), _meta(html, "twitter:image"),
+    ]
     candidates.extend(re.findall(r'<img[^>]+(?:src|data-src)=["\']([^"\']+)', html, flags=re.I))
     clean: list[str] = []
     # Un HTML público puede declarar miles de <img>. Acotar la muestra evita
@@ -155,4 +182,4 @@ def inspect_public_url(url: str, *, timeout: float = 6.0) -> dict[str, object]:
     }
 
 
-__all__ = ["PublicReferenceError", "ensure_public_host", "inspect_public_url"]
+__all__ = ["PublicReferenceError", "ensure_public_host", "inspect_public_url", "public_image_urls"]

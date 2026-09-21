@@ -308,6 +308,16 @@ class CampaignUpdateRequest(BaseModel):
     social_urls: list[str] | None = None
 
 
+class CampaignSourceRoleUpdateRequest(BaseModel):
+    """Decisión humana sobre el papel de un archivo de campaña.
+
+    Un logo o una textura que el equipo marca aquí pasa a ser branding fijo;
+    no queda como una referencia genérica que el renderer puede difuminar.
+    """
+
+    role: CampaignSourceRole
+
+
 class CampaignSourcesResponse(BaseModel):
     campaign_id: str
     sources: list[CampaignSource] = Field(default_factory=list)

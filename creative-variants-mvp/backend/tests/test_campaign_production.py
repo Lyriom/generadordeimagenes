@@ -552,6 +552,44 @@ def test_imagen_valida_no_conserva_el_mime_declarado_por_el_navegador(
     assert preview.headers["x-content-type-options"] == "nosniff"
 
 
+def test_un_fondo_marcado_por_el_equipo_se_compone_nitido_en_la_plantilla(
+    client: TestClient, artwork_png: bytes
+):
+    profile = client.post("/clients", json={"name": "Marca con branding"}).json()
+    client_id = profile["client_id"]
+    campaign_payload = client.post(
+        f"/clients/{client_id}/campaigns",
+        json={"name": "Campaña de marca", "objective": "Recordación"},
+    ).json()
+    campaign_id = campaign_payload["campaign_id"]
+    uploaded = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/sources",
+        files=[("files", ("fondo-limpio.png", artwork_png, "image/png"))],
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    source_id = uploaded.json()["sources"][0]["source_id"]
+
+    marked = client.put(
+        f"/clients/{client_id}/campaigns/{campaign_id}/sources/{source_id}/role",
+        json={"role": "background"},
+    )
+    assert marked.status_code == 200, marked.text
+    assert marked.json()["roles"] == ["background"]
+
+    campaign = campaign_store.load_campaign(client_id, campaign_id)
+    fixed = campaign_creative._fixed_brand_background(campaign, (180, 120))
+    assert fixed is not None
+    name, layer = fixed
+    try:
+        assert "fondo-limpio.png" in name
+        assert layer.size == (180, 120)
+        # El layer llega opaco y directo; no es la textura de referencia que
+        # el motor reduce y desenfoca para no reciclar un KV completo.
+        assert layer.getchannel("A").getextrema()[0] == 255
+    finally:
+        layer.close()
+
+
 def test_produccion_encolada_guarda_matriz_y_fotos_antes_del_worker(
     client: TestClient, artwork_png: bytes, monkeypatch: pytest.MonkeyPatch
 ):

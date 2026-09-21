@@ -4,6 +4,7 @@ from __future__ import annotations
 from app.models.campaign import Campaign, CampaignBrief, CampaignSource, CampaignSourceRole
 from app.services import campaign_analysis
 from app.services.campaign_analysis import deterministic_candidates
+from app.services.production_matrix import MatrixRow, select_template
 
 
 def _source(*, text: str, roles: list[CampaignSourceRole]) -> CampaignSource:
@@ -84,6 +85,9 @@ def test_master_de_producto_y_pieza_institucional_no_descartan_campos_de_matriz(
     assert {
         "producto", "precio", "precio_anterior", "cuota", "descuento", "cta", "vigencia", "legal",
     } <= {slot.key for slot in master.slots}
+    assert master.supported_product_count.minimum == 1
+    assert master.supported_product_count.maximum == 4
+    assert next(slot for slot in master.slots if slot.key == "producto").repeatable is True
     assert all(
         slot.hide_when_empty
         for slot in master.slots
@@ -93,6 +97,29 @@ def test_master_de_producto_y_pieza_institucional_no_descartan_campos_de_matriz(
     institutional = next(candidate for candidate in candidates if candidate.category == "institutional")
     assert institutional.supported_product_count.minimum == 0
     assert institutional.supported_product_count.maximum == 0
+
+
+def test_master_de_producto_admite_un_arte_grupal_aun_si_el_brief_no_menciono_combo():
+    campaign = Campaign(
+        client_id="cliente",
+        name="Lanzamiento",
+        objective="Presentar productos de la colección",
+        sources=[
+            _source(
+                text="Producto nuevo disponible. Comunicar beneficios.",
+                roles=[CampaignSourceRole.STRATEGY, CampaignSourceRole.PRODUCT_REFERENCE],
+            )
+        ],
+    )
+    candidates = deterministic_candidates(campaign, CampaignBrief(objective=campaign.objective))
+    master = next(candidate for candidate in candidates if candidate.name == "Producto protagonista")
+    row = MatrixRow(
+        row_number=2,
+        producto="Silla | Mesa | Lámpara",
+        imagen="silla.png | mesa.png | lampara.png",
+    )
+
+    assert select_template(row, [master]) is master
 
 
 def test_referencia_social_bloqueada_queda_visible_pero_no_se_usa_como_post(

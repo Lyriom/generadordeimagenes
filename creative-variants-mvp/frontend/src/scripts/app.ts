@@ -30,6 +30,7 @@ import {
   produceCampaign,
   reviseCampaignBrief,
   reviseTemplateCandidate,
+  updateCampaignSourceRole,
   updateCampaignContext,
   uploadCampaignProductAssets,
   uploadCampaignSources,
@@ -1013,7 +1014,7 @@ function campaignBriefHtml(compact: boolean): string {
 
     '<section class="card intake-section"><div class="intake-number">3</div><div class="intake-body">',
     '<div class="card-head"><div><span class="kicker">CONTEXTO PÚBLICO</span><h2>Añade las redes y sitios de la marca</h2>',
-    '<p>Una URL por línea. La IA contrastará cómo usa hoy la marca sus productos, precios, titulares, CTA y legales.</p></div></div>',
+    '<p>Una URL por línea. Pega perfiles y, cuando los tengas, enlaces públicos de posts concretos: la IA contrastará productos, precios, titulares, CTA y legales.</p></div></div>',
     '<label class="field"><span>Perfiles y sitios</span><textarea id="campaign-reference" rows="4" placeholder="https://instagram.com/marca&#10;https://facebook.com/marca&#10;https://marca.com"', intakeDisabled, '>',
     esc((brief.referenceUrls?.length ? brief.referenceUrls : [brief.referenceUrl]).filter(Boolean).join("\n")), '</textarea></label>',
     '<div class="notice compact"><strong>Acceso público:</strong> si una red bloquea la lectura, la campaña continúa con los demás archivos y podrás añadir capturas.</div>',
@@ -1122,6 +1123,26 @@ function sourceKindLabel(source: CampaignSource): string {
   return labels[source.kind] || "Archivo";
 }
 
+function sourceBrandingControlHtml(source: CampaignSource): string {
+  // Solo una imagen limpia se puede componer como logo o fondo fijo. Un PDF o
+  // un post completo seguirán siendo evidencia para el brief, no se copian por
+  // accidente dentro de todas las piezas.
+  if (source.kind !== "image") return "";
+  const current = source.roles?.[0] || "visual_reference";
+  const options: Array<[string, string]> = [
+    ["visual_reference", "Referencia visual"],
+    ["key_visual", "Key visual"],
+    ["final_art", "Arte final / inspiración"],
+    ["logo", "Logo fijo · conservar"],
+    ["background", "Fondo o textura fija · conservar"],
+    ["product_reference", "Referencia de producto"],
+  ];
+  return '<label class="source-branding-control"><span>Uso de este archivo</span><select class="source-role-select" data-source-id="' +
+    attr(source.source_id) + '">' + options.map(([value, label]) => '<option value="' + attr(value) + '"' +
+      (value === current ? " selected" : "") + '>' + esc(label) + '</option>').join("") +
+    '</select><small>Logo y fondo fijo entran nítidos en las plantillas.</small></label>';
+}
+
 function activeCampaignHtml(): string {
   const workspace = state.campaignWorkspace;
   const approved = state.templateCandidates.filter((item) => item.status === "approved").length;
@@ -1134,6 +1155,7 @@ function activeCampaignHtml(): string {
     esc(source.role || source.summary || "Lista para el análisis"), '</small></div>',
     '<span class="source-state ', source.status === "error" ? "error" : '', '">',
     source.status === "error" ? "Error" : source.status === "warning" ? "Revisar" : "✓ Analizada", '</span>',
+    sourceBrandingControlHtml(source),
     '<button class="source-remove" type="button" data-source-id="', attr(source.source_id), '" aria-label="Quitar ', attr(source.filename), '" title="Quitar esta fuente">×</button></article>',
   ].join("")).join("");
   return [
@@ -1147,9 +1169,9 @@ function activeCampaignHtml(): string {
     '<div class="stat"><strong>', state.campaignIntelligence ? "✓" : "—", '</strong><span>brief IA</span></div>',
     '<div class="stat"><strong>', String(approved), '/', String(state.templateCandidates.length), '</strong><span>plantillas aprobadas</span></div></div>',
     '<div class="campaign-active-grid"><section class="card"><div class="card-head"><div><h2>Material de campaña</h2>',
-    '<p>Cada archivo conserva su función como fuente de conocimiento.</p></div><label class="ghost-button file-button">Añadir material<input id="add-source-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,.ttf,.otf"></label></div>',
+    '<p>Cada archivo conserva su función como fuente de conocimiento. Sube logos y fondos limpios como PNG/JPG para fijarlos en todas las plantillas.</p></div><label class="ghost-button file-button">Añadir material<input id="add-source-files" type="file" multiple accept=".psd,.psb,.pdf,.pptx,.docx,.xlsx,.csv,.tsv,.txt,.rtf,.md,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,.ttf,.otf"></label></div>',
     '<div class="source-list">', sources || '<div class="notice">No hay fuentes guardadas todavía.</div>', '</div></section>',
-    '<section class="card"><div class="card-head"><div><h2>Contexto conectado</h2><p>Perfiles que completan el lenguaje visual.</p></div></div>',
+    '<section class="card"><div class="card-head"><div><h2>Contexto conectado</h2><p>Perfiles y posts públicos que completan el lenguaje visual.</p></div></div>',
     social.length ? '<div class="social-url-list">' + social.map((url) => '<a href="' + attr(url) + '" target="_blank" rel="noreferrer"><i>↗</i><span>' + esc(url.replace(/^https?:\/\//, "")) + '</span></a>').join("") + '</div>' : '<div class="notice">No se añadieron redes; el análisis usa solo los archivos.</div>',
     '<details class="context-editor"><summary>Añadir o corregir perfiles</summary><label class="field"><span>Una URL por línea</span><textarea id="connected-socials" rows="4">', esc(social.join("\n")), '</textarea></label>',
     '<button class="ghost-button" id="save-social-context">Guardar y reanalizar</button></details>',
@@ -1231,6 +1253,35 @@ function bindActiveCampaign(): void {
       toast("Material añadido. Vuelve a analizar para actualizar el brief.", "success");
       await renderCampaign();
     } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+  });
+  queryAll<HTMLSelectElement>(".source-role-select").forEach((select) => {
+    select.addEventListener("change", async () => {
+      if (!state.activeClientId || !state.campaignWorkspace || !select.dataset.sourceId) return;
+      const source = state.campaignSources.find((item) => item.source_id === select.dataset.sourceId);
+      if (!source) return;
+      busy("Fijando branding", "Guardando el elemento obligatorio y reconstruyendo las plantillas…", 28);
+      try {
+        const updated = await updateCampaignSourceRole(
+          state.activeClientId,
+          state.campaignWorkspace.campaign_id,
+          source.source_id,
+          select.value,
+        );
+        state.campaignSources = state.campaignSources.map((item) =>
+          item.source_id === updated.source_id ? updated : item,
+        );
+        state.campaignIntelligence = null;
+        state.templateCandidates = [];
+        state.productionMatrixPlans = [];
+        saveSession();
+        idle();
+        await analyzeCurrentCampaign();
+      } catch (error) {
+        select.value = source.roles?.[0] || "visual_reference";
+        toast(errorMessage(error), "error");
+        idle();
+      }
+    });
   });
   queryAll<HTMLButtonElement>(".source-remove").forEach((button) => {
     button.addEventListener("click", async () => {
@@ -2100,15 +2151,15 @@ function renderCampaignIntelligence(): void {
     '<article class="social-evidence"><strong>', esc(item.title || item.url), '</strong>',
     item.accessible === false
       ? '<p class="muted"><strong>No se usó como post:</strong> la red bloqueó la lectura pública. '
-        + 'Sube capturas en “Material de campaña” si esta referencia es importante.</p>'
+        + 'Pega enlaces públicos de posts concretos o sube capturas en “Material de campaña” si esta referencia es importante.</p>'
       : item.description ? '<p>' + esc(item.description) + '</p>' : '',
     item.accessible !== false && item.posts?.length
-      ? '<div class="evidence-strip">' + item.posts.slice(0, 5).map((post) =>
+      ? '<p class="muted tiny"><strong>' + String(item.posts.length) + '</strong> imagen' + (item.posts.length === 1 ? '' : 'es') + ' de publicaciones públicas; se excluyeron avatar y logos de red.</p><div class="evidence-strip">' + item.posts.slice(0, 5).map((post) =>
         '<a href="' + attr(post) + '" target="_blank" rel="noreferrer"><img src="' + attr(post) +
         '" alt="Post público de referencia" loading="lazy" referrerpolicy="no-referrer"></a>'
       ).join("") + '</div>'
       : item.accessible !== false
-        ? '<p class="muted">Se leyó la URL, pero no expuso imágenes públicas de posts.</p>'
+        ? '<p class="muted">Se leyó la URL, pero no expuso imágenes públicas de posts. Prueba con enlaces directos a publicaciones o añade capturas.</p>'
         : '',
     '</article>',
   ].join("")).join("");
@@ -4901,7 +4952,7 @@ function productionMatrixHtml(): string {
     ? matrixRowReady(row) && matrixPlanReady(row)
     : matrixProductFile(row)
   ).length;
-  const preview = rows.slice(0, 6).map((row) => '<tr><td>' + esc(row.product) + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline || "IA / vacío") + '</td><td>' + esc(row.price || "—") + '</td><td>' + esc(row.formats || "Por defecto") + '</td><td>' + String(row.proposals) + '</td></tr>').join("");
+  const preview = rows.slice(0, 6).map((row) => '<tr><td>' + esc(row.product || "Institucional") + '</td><td>' + esc(row.image || "—") + '</td><td>' + esc(row.headline || "IA / vacío") + '</td><td>' + esc(row.price || "—") + '</td><td>' + esc(row.formats || "Por defecto") + '</td><td>' + String(row.proposals) + '</td></tr>').join("");
   const matchWarnings = state.campaignWorkspace ? rows.flatMap((row) => {
     const ambiguous = matrixAmbiguousTokens(row);
     if (ambiguous.length) return [
@@ -4917,6 +4968,7 @@ function productionMatrixHtml(): string {
     '<section class="card matrix-card"><div class="card-head"><div><h2>Matriz de producción</h2><p>Una fila puede pedir uno o varios productos, formatos y propuestas. “No poner” elimina ese campo.</p></div><span class="badge', rows.length ? ' green' : '', '">', String(rows.length), ' FILAS</span></div>',
     '<div class="matrix-upload"><label class="dropzone compact"><input id="production-matrix" type="file" accept=".csv,.tsv,.xlsx,text/csv,text/tab-separated-values,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"><span class="drop-icon">⇧</span><strong>1. Subir matriz CSV, TSV o XLSX</strong><span>producto, imagen, titular, precio, CTA, formatos, propuestas</span></label>',
     '<label class="dropzone compact" id="matrix-product-drop"><input id="matrix-product-files" type="file" multiple accept=".png,.jpg,.jpeg,.webp,.bmp,.gif,.tif,.tiff,.avif,image/png,image/jpeg,image/webp,image/bmp,image/gif,image/tiff,image/avif"><span class="drop-icon">⇧</span><strong>2. Añadir imágenes de producto</strong><span>PNG, JPG, WEBP, BMP, GIF, TIFF o AVIF · también puedes arrastrarlas aquí</span></label></div>',
+    '<div class="matrix-manual-launch"><div><strong>¿No tienes matriz?</strong><span>Escríbela aquí: una fila puede ser institucional, de un producto o un arte grupal.</span></div><button class="ghost-button add-manual-matrix-row">+ Crear fila manual</button></div>',
     '<div class="matrix-guide" style="margin-top:14px"><strong>Estado de la tanda</strong><span>', String(rows.length), ' filas · ', String(matched), ' listas para producir</span><small>',
     state.productionMatrixFile
       ? esc(state.productionMatrixFile.name)
@@ -4928,11 +4980,100 @@ function productionMatrixHtml(): string {
       ? '<div class="matrix-product-list">' + productFiles.map(matrixProductCard).join("") + '</div>'
       : '<p class="muted tiny">Aquí aparecerán con miniatura y estado de vínculo. Quedan guardadas dentro de esta campaña y puedes volver después sin cargarlas otra vez.</p>',
     '</section>',
+    rows.length ? manualMatrixEditorHtml(rows, campaignProductAssets()) : '',
     state.campaignWorkspace ? matrixPlanReviewHtml(rows) : '',
     matchWarnings.length ? '<div class="notice warning compact matrix-match-warnings"><strong>Revisa las imágenes:</strong><ul>' + matchWarnings.map((warning) => '<li>' + warning + '</li>').join("") + '</ul></div>' : '',
     rows.length ? '<div class="inventory matrix-preview"><table><thead><tr><th>Producto</th><th>Imagen</th><th>Titular</th><th>Precio</th><th>Formatos</th><th>Propuestas</th></tr></thead><tbody>' + preview + '</tbody></table></div><div class="button-row" style="margin-top:12px"><button class="ghost-button" id="clear-production-matrix">Quitar matriz</button><span class="muted tiny">Vacío = la IA puede completar si corresponde · “no poner” = se omite.</span></div>' : '',
     '</section>',
   ].join("");
+}
+
+/** Editor visible para que la matriz no sea una barrera de Excel. La misma
+ * sintaxis que entiende el CSV (``Producto A | Producto B``) representa un
+ * arte grupal y conserva el contrato del backend para combos. */
+function manualMatrixEditorHtml(
+  rows: MatrixRow[],
+  assets: CampaignProductionAsset[],
+): string {
+  const assetNames = assets.map((asset) => '<option value="' + attr(asset.filename) + '"></option>').join("");
+  const approved = state.templateCandidates.filter((candidate) => candidate.status === "approved");
+  const templateOptions = '<option value="">Automática · IA elige la compatible</option>' +
+    approved.map((candidate) => '<option value="' + attr(candidate.name) + '">' + esc(candidate.name) + '</option>').join("");
+  const input = (row: MatrixRow, field: keyof MatrixRow, label: string, options: {
+    placeholder?: string; type?: string; list?: string; min?: number; value?: string | number;
+  } = {}) => '<label class="field"><span>' + esc(label) + '</span><input class="manual-matrix-field" data-row="' +
+    String(row.rowNumber) + '" data-field="' + attr(String(field)) + '"' +
+    ' type="' + attr(options.type || "text") + '" value="' + attr(String(options.value ?? row[field] ?? "")) + '"' +
+    (options.placeholder ? ' placeholder="' + attr(options.placeholder) + '"' : '') +
+    (options.list ? ' list="' + attr(options.list) + '"' : '') +
+    (options.min !== undefined ? ' min="' + String(options.min) + '"' : '') + '></label>';
+  const select = '<label class="field"><span>Plantilla</span><select class="manual-matrix-field" data-row="ROW" data-field="template">OPTIONS</select></label>';
+  const cards = rows.map((row) => {
+    const template = select.replace("ROW", String(row.rowNumber)).replace(
+      "OPTIONS",
+      templateOptions.replace('value="' + attr(row.template) + '"', 'value="' + attr(row.template) + '" selected'),
+    );
+    return '<article class="manual-matrix-row"><div class="manual-matrix-row-head"><div><strong>Fila ' + String(row.rowNumber) + '</strong><span>Vacío = opcional · “no poner” = ocultar</span></div><button class="icon-button remove-manual-matrix-row" data-row="' + String(row.rowNumber) + '" title="Quitar fila" aria-label="Quitar fila ' + String(row.rowNumber) + '">×</button></div>' +
+      '<div class="manual-matrix-grid">' +
+      input(row, "product", "Producto(s) / arte grupal", { placeholder: "Silla | Mesa | Lámpara" }) +
+      input(row, "image", "Archivo(s) de imagen", { placeholder: "silla.png | mesa.png", list: "matrix-asset-names" }) +
+      input(row, "headline", "Titular", { placeholder: "Vacío = IA si la plantilla lo permite" }) +
+      input(row, "subtitle", "Subtítulo") +
+      input(row, "price", "Precio actual") +
+      input(row, "previousPrice", "Precio anterior") +
+      input(row, "installment", "Cuota") +
+      input(row, "discount", "Descuento") +
+      input(row, "cta", "CTA") +
+      input(row, "validity", "Vigencia") +
+      input(row, "legal", "Legal") +
+      input(row, "formats", "Formatos", { placeholder: "feed | story | 1080x1350" }) +
+      input(row, "proposals", "Propuestas", { type: "number", min: 1, value: Math.max(1, row.proposals) }) +
+      template +
+      input(row, "notes", "Notas de composición", { placeholder: "Ej. producto principal a la derecha" }) +
+      '</div></article>';
+  }).join("");
+  return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Para un combo, separa productos y archivos con <strong>|</strong> en el mismo orden. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
+}
+
+function blankManualMatrixRow(): MatrixRow {
+  const rowNumber = Math.max(1, ...state.productionMatrix.map((row) => row.rowNumber)) + 1;
+  return {
+    rowNumber: Math.max(2, rowNumber), product: "", image: "", headline: "", subtitle: "", price: "",
+    previousPrice: "", installment: "", discount: "", cta: "", legal: "", validity: "", formats: "",
+    proposals: 1, notes: "", template: "", omit: [],
+  };
+}
+
+function matrixCsvCell(value: string | number): string {
+  return '"' + String(value ?? "").replace(/"/g, '""') + '"';
+}
+
+function manualMatrixFile(rows = state.productionMatrix): File {
+  const headers = [
+    "producto", "imagen", "titular", "subtitulo", "precio_actual", "precio_anterior", "cuota", "descuento",
+    "cta", "legal", "vigencia", "formatos", "cantidad_propuestas", "notas", "plantilla",
+  ];
+  const content = [headers.join(","), ...rows.map((row) => [
+    row.product, row.image, row.headline, row.subtitle, row.price, row.previousPrice, row.installment,
+    row.discount, row.cta, row.legal, row.validity, row.formats, Math.max(1, row.proposals), row.notes, row.template,
+  ].map(matrixCsvCell).join(","))].join("\n");
+  return new File([content], "matriz-manual.csv", { type: "text/csv" });
+}
+
+function applyCampaignMatrixPreview(file: File, preview: Awaited<ReturnType<typeof previewCampaignMatrix>>): void {
+  state.productionMatrix = preview.rows.map((row: any) => ({
+    rowNumber: Number(row?.row_number || 0),
+    product: String(row?.producto || ""), image: String(row?.imagen || ""), headline: String(row?.titular || ""),
+    subtitle: String(row?.subtitulo || ""), price: String(row?.precio_actual || ""),
+    previousPrice: String(row?.precio_anterior || ""), installment: String(row?.cuota || ""),
+    discount: String(row?.descuento || ""), cta: String(row?.cta || ""), legal: String(row?.legal || ""),
+    validity: String(row?.vigencia || ""), formats: Array.isArray(row?.formatos) ? row.formatos.join("|") : "",
+    proposals: Number(row?.cantidad_propuestas || 1), notes: String(row?.notas || ""),
+    template: String(row?.plantilla || ""), omit: Array.isArray(row?.suppressed_fields) ? row.suppressed_fields.map(String) : [],
+  }));
+  state.productionMatrixPlans = preview.plans;
+  state.productionMatrixFile = file;
+  state.productionMatrixDraftId = preview.matrixDraftId;
 }
 
 function matrixKey(value: string): string {
@@ -4960,38 +5101,81 @@ function bindProductionMatrix(): void {
         file,
         Array.from(state.selectedFormats),
       );
-      state.productionMatrix = preview.rows.map((row: any) => ({
-        rowNumber: Number(row?.row_number || 0),
-        product: String(row?.producto || ""),
-        image: String(row?.imagen || ""),
-        headline: String(row?.titular || ""),
-        subtitle: String(row?.subtitulo || ""),
-        price: String(row?.precio_actual || ""),
-        previousPrice: String(row?.precio_anterior || ""),
-        installment: String(row?.cuota || ""),
-        discount: String(row?.descuento || ""),
-        cta: String(row?.cta || ""),
-        legal: String(row?.legal || ""),
-        validity: String(row?.vigencia || ""),
-        formats: Array.isArray(row?.formatos) ? row.formatos.join("|") : "",
-        proposals: Number(row?.cantidad_propuestas || 1),
-        notes: String(row?.notas || ""),
-        template: String(row?.plantilla || ""),
-        omit: Array.isArray(row?.suppressed_fields) ? row.suppressed_fields.map(String) : [],
-      }));
-      state.productionMatrixPlans = preview.plans;
-      state.productionMatrixFile = file;
-      state.productionMatrixDraftId = preview.matrixDraftId;
+      applyCampaignMatrixPreview(file, preview);
       saveSession();
       toast(String(state.productionMatrix.length) + " filas importadas en la matriz.", "success");
       await renderGenerate();
     } catch (error) {
-      state.productionMatrix = [];
+      toast(errorMessage(error), "error");
+    }
+  });
+  const addManualRow = async (): Promise<void> => {
+    state.productionMatrix = [...state.productionMatrix, blankManualMatrixRow()];
+    state.productionMatrixPlans = [];
+    state.productionMatrixDraftId = null;
+    state.productionMatrixFile = null;
+    saveSession();
+    await renderGenerate();
+  };
+  queryAll<HTMLButtonElement>(".add-manual-matrix-row").forEach((button) => {
+    button.addEventListener("click", () => void addManualRow());
+  });
+  queryAll<HTMLInputElement | HTMLSelectElement>(".manual-matrix-field").forEach((field) => {
+    const update = () => {
+      const rowNumber = Number(field.dataset.row || 0);
+      const key = field.dataset.field as keyof MatrixRow | undefined;
+      const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+      if (!row || !key) return;
+      if (key === "proposals") {
+        row.proposals = Math.max(1, Math.trunc(Number(field.value) || 1));
+        field.value = String(row.proposals);
+      } else if (key !== "rowNumber" && key !== "omit") {
+        (row as any)[key] = field.value;
+      }
+      // Una edición manual invalida el archivo y el preflight anterior. El
+      // botón final queda bloqueado hasta que se valide de nuevo, en vez de
+      // producir silenciosamente la versión vieja del CSV.
+      state.productionMatrixPlans = [];
+      state.productionMatrixDraftId = null;
+      state.productionMatrixFile = null;
+      query<HTMLButtonElement>("#run-campaign-production")?.setAttribute("disabled", "");
+      const status = query<HTMLElement>(".manual-matrix-status");
+      if (status) status.textContent = "Cambios sin validar. Pulsa “Validar matriz manual” antes de producir.";
+      saveSession();
+    };
+    field.addEventListener("input", update);
+    field.addEventListener("change", update);
+  });
+  queryAll<HTMLButtonElement>(".remove-manual-matrix-row").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const rowNumber = Number(button.dataset.row || 0);
+      state.productionMatrix = state.productionMatrix.filter((row) => row.rowNumber !== rowNumber);
       state.productionMatrixPlans = [];
       state.productionMatrixDraftId = null;
       state.productionMatrixFile = null;
       saveSession();
+      await renderGenerate();
+    });
+  });
+  query<HTMLButtonElement>("#validate-manual-matrix")?.addEventListener("click", async () => {
+    if (!state.activeClientId || !state.campaignWorkspace || !state.productionMatrix.length) return;
+    const file = manualMatrixFile();
+    busy("Validando matriz manual", "Comprobando campos, combos y plantillas aprobadas…", 35);
+    try {
+      const preview = await previewCampaignMatrix(
+        state.activeClientId,
+        state.campaignWorkspace.campaign_id,
+        file,
+        Array.from(state.selectedFormats),
+      );
+      applyCampaignMatrixPreview(file, preview);
+      saveSession();
+      toast(String(state.productionMatrix.length) + " filas manuales validadas.", "success");
+      await renderGenerate();
+    } catch (error) {
       toast(errorMessage(error), "error");
+    } finally {
+      idle();
     }
   });
   const addProductImages = async (incoming: File[]): Promise<void> => {

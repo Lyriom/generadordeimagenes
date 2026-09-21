@@ -230,6 +230,7 @@ export interface CampaignSource {
   status: "uploaded" | "processing" | "ready" | "warning" | "error";
   summary?: string;
   role?: string;
+  roles?: string[];
   preview?: string | null;
   previews?: string[];
   warnings: string[];

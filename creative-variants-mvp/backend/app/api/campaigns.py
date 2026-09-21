@@ -20,6 +20,8 @@ from ..models.campaign import (
     CampaignBrief,
     CampaignBriefPatchRequest,
     CampaignCreateRequest,
+    CampaignSource,
+    CampaignSourceRoleUpdateRequest,
     CampaignUpdateRequest,
     CampaignSourcesResponse,
     CandidateDecisionRequest,
@@ -401,6 +403,38 @@ def delete_campaign_source(client_id: str, campaign_id: str, source_id: str) -> 
     campaign.status = "ready_for_brief"
     campaign_store.save_campaign(campaign)
     shutil.rmtree(source_root, ignore_errors=True)
+
+
+@router.put(
+    "/{client_id}/campaigns/{campaign_id}/sources/{source_id}/role",
+    response_model=CampaignSource,
+)
+def set_campaign_source_role(
+    client_id: str,
+    campaign_id: str,
+    source_id: str,
+    request: CampaignSourceRoleUpdateRequest,
+) -> CampaignSource:
+    """Confirma si una fuente debe actuar como branding fijo.
+
+    El rol automático es una hipótesis. Esta elección humana evita que un logo
+    o un fondo limpio se trate como inspiración genérica y se difumine en las
+    plantillas; también invalida el brief anterior para no mezclar contextos.
+    """
+
+    campaign = _campaign_or_404(client_id, campaign_id)
+    source = next((item for item in campaign.sources if item.source_id == source_id), None)
+    if source is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe esa fuente en la campana.")
+    source.roles = [request.role]
+    source.meta["user_role"] = request.role.value
+    campaign.brief = None
+    campaign.brief_reviewed_at = None
+    campaign.template_candidates = []
+    campaign.analysis_engine = "none"
+    campaign.status = "ready_for_brief"
+    campaign_store.save_campaign(campaign)
+    return source
 
 
 @router.post(
