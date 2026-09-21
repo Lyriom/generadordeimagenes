@@ -227,6 +227,13 @@ export function normaliseSource(raw: any, index = 0, clientId = "", campaignId =
     reusable_assets: list(raw?.meta?.layer_assets).map((item: any) => ({
       name: String(item?.name || "Asset PSD"), role: String(item?.role || ""),
     })).filter((item) => item.role),
+    layers: list(raw?.meta?.layer_manifest).map((item: any) => ({
+      name: String(item?.name || "Capa sin nombre"),
+      kind: String(item?.kind || "pixel"),
+      visible: item?.visible !== false,
+      text: item?.text ? String(item.text) : undefined,
+      reusable_asset_role: item?.reusable_asset_role ? String(item.reusable_asset_role) : undefined,
+    })),
     legacy_project_ids: strings(raw?.legacy_project_ids),
   };
 }

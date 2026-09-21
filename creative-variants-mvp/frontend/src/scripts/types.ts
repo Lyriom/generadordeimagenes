@@ -243,6 +243,13 @@ export interface CampaignSource {
     fixed_decorations?: number;
   };
   reusable_assets?: Array<{ name: string; role: string }>;
+  layers?: Array<{
+    name: string;
+    kind: string;
+    visible: boolean;
+    text?: string;
+    reusable_asset_role?: string;
+  }>;
   /** Solo existe en el fallback legado y nunca se presenta como un KV. */
   legacy_project_ids?: string[];
 }

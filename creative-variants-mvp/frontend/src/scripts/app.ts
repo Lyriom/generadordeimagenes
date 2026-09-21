@@ -1228,17 +1228,22 @@ function sourceBrandingControlHtml(source: CampaignSource): string {
 }
 
 function sourceAssetEvidenceHtml(source: CampaignSource): string {
-  const evidence = source.layer_evidence;
-  if (!evidence) return "";
+  const detected = source.layer_evidence;
+  if (!detected && !(source.layers || []).length) return "";
+  const evidence = detected || {};
   const assets = source.reusable_assets || [];
+  const layers = source.layers || [];
   const labels = [
     evidence.logo_assets ? String(evidence.logo_assets) + " logo" + (evidence.logo_assets === 1 ? "" : "s") + " preservado" + (evidence.logo_assets === 1 ? "" : "s") : "",
     evidence.fixed_backgrounds ? String(evidence.fixed_backgrounds) + " fondo fijo" + (evidence.fixed_backgrounds === 1 ? "" : "s") : "",
     evidence.fixed_decorations ? String(evidence.fixed_decorations) + " elemento" + (evidence.fixed_decorations === 1 ? "" : "s") + " de marca" : "",
     evidence.visible_layers ? String(evidence.visible_layers) + " capas visibles" : "",
   ].filter(Boolean);
-  return '<div class="source-asset-evidence"><strong>PSD leído por capas</strong><small>' + esc(labels.join(" · ") || "Sin assets reutilizables confirmados") + '</small>' +
+  return '<div class="source-asset-evidence"><strong>Capas detectadas en el archivo</strong><small>' + esc(labels.join(" · ") || String(layers.length) + " capas disponibles para revisar") + '</small>' +
     (assets.length ? '<div class="brief-tags">' + assets.slice(0, 6).map((asset) => '<span>' + esc(asset.role.replace(/_/g, " ") + " · " + asset.name) + '</span>').join("") + '</div>' : '') +
+    (layers.length ? '<details class="psd-layer-inventory"><summary>Ver ' + String(layers.length) + ' capas leídas</summary><div class="psd-layer-rows">' + layers.map((layer) =>
+      '<div class="psd-layer-row"><span class="psd-layer-visibility">' + (layer.visible ? "●" : "○") + '</span><div><strong>' + esc(layer.name) + '</strong><small>' + esc(layer.kind) + (layer.reusable_asset_role ? " · " + esc(layer.reusable_asset_role.replace(/_/g, " ")) : "") + (layer.text ? " · “" + esc(layer.text.slice(0, 90)) + "”" : "") + '</small></div></div>'
+    ).join("") + '</div></details>' : '') +
     '</div>';
 }
 
@@ -1665,7 +1670,10 @@ function bindProjectCards(): void {
   });
 }
 
-const ARTWORK_EXTENSIONS = /\.(psd|psb|pdf|pptx|docx|xlsx|csv|tsv|txt|rtf|md|png|jpe?g|webp|bmp|gif|tiff?|avif|ttf|otf)$/i;
+// Esta lista debe reflejar exactamente el accept del selector y el backend.
+// Antes el selector dejaba elegir AI/ZIP, pero esta validación antigua los
+// expulsaba de la cola antes de enviar una sola petición.
+const ARTWORK_EXTENSIONS = /\.(ai|psd|psb|pdf|pptx|docx|xlsx|csv|tsv|txt|rtf|md|png|jpe?g|webp|bmp|gif|tiff?|avif|ttf|otf|zip)$/i;
 const PRODUCT_IMAGE_EXTENSIONS = /\.(png|jpe?g|webp|bmp|gif|tiff?|avif)$/i;
 const HEIC_EXTENSIONS = /\.(heic|heif)$/i;
 
@@ -1685,7 +1693,7 @@ function readableSize(bytes: number): string {
  * formato. Lo importante es que no se quede un hueco: un archivo elegido tiene
  * que verse elegido. */
 function queueCard(file: File, index: number): string {
-  const isLayered = /\.(psd|psb)$/i.test(file.name);
+  const isLayered = /\.(ai|psd|psb)$/i.test(file.name);
   const isImage = /\.(png|jpe?g|webp|tiff?|avif|svg)$/i.test(file.name);
   const extension = (file.name.split(".").pop() || "FILE").toUpperCase();
   const media = isImage
@@ -1695,7 +1703,7 @@ function queueCard(file: File, index: number): string {
     '<article class="queue-card">', media,
     '<div class="queue-meta"><strong>', esc(file.name), "</strong><span>",
     readableSize(file.size),
-    isLayered ? " · capas para analizar" : isImage ? " · referencia visual" : " · fuente de contexto",
+    /\.zip$/i.test(file.name) ? " · fuentes a extraer" : isLayered ? " · capas para analizar" : isImage ? " · referencia visual" : " · fuente de contexto",
     "</span></div>",
     '<button type="button" class="queue-drop" data-index="', String(index),
     '" title="Quitar de la cola" aria-label="Quitar ', attr(file.name), '">×</button>',
@@ -1732,7 +1740,7 @@ function bindUpload(): void {
     title.textContent = conCola ? "Añadir más material" : "Arrastra todo el material aquí";
     hint.textContent = conCola
       ? ""
-      : "Documentos, presentaciones, PSD, imágenes, logos, textos y tipografías";
+      : "AI, PSD/PSB, PDF, PPTX, imágenes, logos, fuentes TTF/OTF o ZIP de fuentes";
     summary.hidden = queuedFiles.length === 0;
     summary.innerHTML = queuedFiles.length
       ? "<strong>" + String(queuedFiles.length) + (queuedFiles.length === 1 ? " archivo" : " archivos") +
@@ -1756,7 +1764,7 @@ function bindUpload(): void {
     if (rejected.length) {
       toast(
         "No se admite " + rejected.map((file) => file.name).join(", ") +
-        ". Usa documentos, presentaciones, PSD, imágenes, textos o tipografías estándar.",
+        ". Usa AI, PSD/PSB, PDF, PPTX, imágenes, textos, fuentes TTF/OTF o ZIP de fuentes.",
         "error",
       );
     }
