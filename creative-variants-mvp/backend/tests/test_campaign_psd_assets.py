@@ -219,3 +219,33 @@ def test_real_psd_color_fill_is_preserved_as_a_fixed_background(tmp_path: Path):
         final.close()
         for _name, layer in layers:
             layer.close()
+
+
+def test_psd_logo_group_is_preserved_instead_of_becoming_a_wordmark(
+    monkeypatch, tmp_path: Path
+):
+    """Un logo suele ser un grupo, no una sola capa raster de Photoshop."""
+
+    client_id, campaign_id, source_id = (str(uuid.uuid4()) for _ in range(3))
+    source = _source(client_id, campaign_id, source_id)
+    document = _FakePSD(
+        [
+            _FakeLayer(
+                "Fondo", (0, 0, 1000, 1000),
+                Image.new("RGBA", (1000, 1000), (18, 28, 54, 255)),
+            ),
+            _FakeLayer(
+                "Marca gráfica", (40, 40, 280, 140),
+                Image.new("RGBA", (240, 100), (241, 201, 33, 255)), group=True,
+            ),
+        ]
+    )
+    monkeypatch.setattr("psd_tools.PSDImage.open", staticmethod(lambda _path: document))
+    path = tmp_path / "master.psd"
+    path.write_bytes(b"8BPS\x00\x01")
+
+    _extract_psd(client_id, campaign_id, path, source)
+
+    logos = [item for item in source.meta["layer_assets"] if item["role"] == "logo"]
+    assert len(logos) == 1
+    assert logos[0]["name"] == "Marca gráfica"

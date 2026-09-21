@@ -1143,6 +1143,21 @@ function sourceBrandingControlHtml(source: CampaignSource): string {
     '</select><small>Logo y fondo fijo entran nítidos en las plantillas.</small></label>';
 }
 
+function sourceAssetEvidenceHtml(source: CampaignSource): string {
+  const evidence = source.layer_evidence;
+  if (!evidence) return "";
+  const assets = source.reusable_assets || [];
+  const labels = [
+    evidence.logo_assets ? String(evidence.logo_assets) + " logo" + (evidence.logo_assets === 1 ? "" : "s") + " preservado" + (evidence.logo_assets === 1 ? "" : "s") : "",
+    evidence.fixed_backgrounds ? String(evidence.fixed_backgrounds) + " fondo fijo" + (evidence.fixed_backgrounds === 1 ? "" : "s") : "",
+    evidence.fixed_decorations ? String(evidence.fixed_decorations) + " elemento" + (evidence.fixed_decorations === 1 ? "" : "s") + " de marca" : "",
+    evidence.visible_layers ? String(evidence.visible_layers) + " capas visibles" : "",
+  ].filter(Boolean);
+  return '<div class="source-asset-evidence"><strong>PSD leído por capas</strong><small>' + esc(labels.join(" · ") || "Sin assets reutilizables confirmados") + '</small>' +
+    (assets.length ? '<div class="brief-tags">' + assets.slice(0, 6).map((asset) => '<span>' + esc(asset.role.replace(/_/g, " ") + " · " + asset.name) + '</span>').join("") + '</div>' : '') +
+    '</div>';
+}
+
 function activeCampaignHtml(): string {
   const workspace = state.campaignWorkspace;
   const approved = state.templateCandidates.filter((item) => item.status === "approved").length;
@@ -1155,6 +1170,7 @@ function activeCampaignHtml(): string {
     esc(source.role || source.summary || "Lista para el análisis"), '</small></div>',
     '<span class="source-state ', source.status === "error" ? "error" : '', '">',
     source.status === "error" ? "Error" : source.status === "warning" ? "Revisar" : "✓ Analizada", '</span>',
+    sourceAssetEvidenceHtml(source),
     sourceBrandingControlHtml(source),
     '<button class="source-remove" type="button" data-source-id="', attr(source.source_id), '" aria-label="Quitar ', attr(source.filename), '" title="Quitar esta fuente">×</button></article>',
   ].join("")).join("");
@@ -2139,6 +2155,7 @@ function renderCampaignIntelligence(): void {
     '<div class="knowledge-row"><span class="source-format">', esc(sourceKindLabel(source)), '</span><div><strong>',
     esc(source.filename), '</strong><small>', esc(source.role || source.summary || "Contexto visual y textual"), '</small></div>',
     '<i>', source.warnings.length ? "Revisar" : "✓", '</i></div>',
+    sourceAssetEvidenceHtml(source),
     (source.previews || []).length
       ? '<div class="evidence-strip">' + (source.previews || []).slice(0, 5).map((preview) =>
           '<a href="' + attr(preview) + '" target="_blank" rel="noreferrer"><img src="' +

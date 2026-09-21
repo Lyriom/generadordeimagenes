@@ -29,7 +29,7 @@ from ..config import settings
 from ..models.campaign import Campaign, CampaignBrief, TemplateCandidate
 from ..models.campaign_production import ProductionBatch, ProductionPiece
 from ..models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS, SUPPORTED_FORMATS
-from . import campaign_store
+from . import campaign_store, client_fonts, template_store
 from .production_matrix import MatrixRow, ai_fillable_fields, product_count, select_template
 from .security import slugify
 
@@ -124,17 +124,62 @@ def _palette(brief: CampaignBrief | None) -> list[tuple[int, int, int]]:
     return colours[:6]
 
 
+def _catalogue_font_path(campaign: Campaign, *, bold: bool) -> str | None:
+    """Busca la fuente permanente del cliente antes de caer a una genérica."""
+
+    try:
+        brand = template_store.load_brand(campaign.client_id)
+        catalogues = client_fonts.catalog()
+        catalogue_id = brand.fonts.client_id or brand.slug
+        catalogue = next((item for item in catalogues if item["id"] == catalogue_id), None)
+        if catalogue is None:
+            return None
+        wanted = brand.fonts.bold if bold else brand.fonts.regular
+        if wanted:
+            return str(client_fonts.font_path(catalogue_id, wanted))
+        fonts = list(catalogue.get("fonts", []))
+        # El catálogo de Marcimex, por ejemplo, ya vive en el servidor. Si no
+        # se eligió una cara explícita, seleccionamos una cara sensata de esa
+        # familia; no volvemos a DejaVu por accidente.
+        preferred = (
+            ("black", "bold", "semibold", "heavy", "extrabold")
+            if bold else ("regular", "medium", "book", "normal")
+        )
+        chosen = next(
+            (
+                item for item in fonts
+                if any(token in str(item.get("name", "")).casefold() for token in preferred)
+                and "italic" not in str(item.get("name", "")).casefold()
+            ),
+            fonts[0] if fonts else None,
+        )
+        if chosen and chosen.get("id"):
+            return str(client_fonts.font_path(catalogue_id, str(chosen["id"])))
+    except Exception:  # noqa: BLE001 - una fuente opcional nunca bloquea un arte
+        return None
+    return None
+
+
 def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
     font_sources = [source for source in campaign.sources if source.kind.value == "font"]
     if font_sources:
-        try:
-            return str(
-                campaign_store.campaign_path(
-                    campaign.client_id, campaign.campaign_id, font_sources[0].stored_path
+        preference = ("bold", "black", "semi", "heavy") if bold else ("regular", "medium", "book", "light")
+        ranked = sorted(
+            font_sources,
+            key=lambda source: not any(token in source.filename.casefold() for token in preference),
+        )
+        for source in ranked:
+            try:
+                path = campaign_store.campaign_path(
+                    campaign.client_id, campaign.campaign_id, source.stored_path
                 )
-            )
-        except Exception:  # noqa: BLE001
-            pass
+                if path.is_file():
+                    return str(path)
+            except Exception:  # noqa: BLE001
+                continue
+    catalogue_font = _catalogue_font_path(campaign, bold=bold)
+    if catalogue_font:
+        return catalogue_font
     configured = settings.default_font_bold if bold else settings.default_font
     if configured and Path(configured).exists():
         return configured
@@ -829,6 +874,21 @@ def _logo_path(campaign: Campaign) -> Path | None:
                 continue
             if path.exists():
                 return path
+        # Campañas creadas en versiones intermedias pueden tener los PNG
+        # extraídos pero no el manifiesto completo. Recuperar un archivo que
+        # ya se llamó logo es seguro y evita que el renderer retroceda al
+        # wordmark genérico al abrir una campaña antigua.
+        for relative in source.asset_files:
+            if "logo" not in Path(relative).name.casefold():
+                continue
+            try:
+                path = campaign_store.campaign_path(
+                    campaign.client_id, campaign.campaign_id, relative
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            if path.is_file():
+                return path
     for source in campaign.sources:
         roles = {role.value for role in source.roles}
         if source.kind.value != "image" or "logo" not in roles:
@@ -1054,12 +1114,13 @@ def _render(
     )
     if texture is not None:
         layers.append(("01 · Atmósfera de campaña", texture))
+    # Si el PSD ya trajo sus marcos/ornamentos fijos, esa identidad es más
+    # valiosa que añadir tarjetas, líneas o brillos genéricos encima.
+    decoration_style = "minimal" if fixed_psd_layers else blueprint.accent_style
     layers.append(
         (
             "02 · Sistema visual",
-            _decorations(
-                width, height, colours, proposal, blueprint.accent_style
-            ),
+            _decorations(width, height, colours, proposal, decoration_style),
         )
     )
     has_product_slot = any(

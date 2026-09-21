@@ -204,6 +204,18 @@ export function normaliseSource(raw: any, index = 0, clientId = "", campaignId =
     preview: raw?.preview || raw?.preview_url || previews[0] || null,
     previews,
     warnings,
+    layer_evidence: raw?.meta?.layer_evidence && typeof raw.meta.layer_evidence === "object"
+      ? {
+          visible_layers: Number(raw.meta.layer_evidence.visible_layers || 0),
+          text_layers: Number(raw.meta.layer_evidence.text_layers || 0),
+          logo_assets: Number(raw.meta.layer_evidence.logo_assets || 0),
+          fixed_backgrounds: Number(raw.meta.layer_evidence.fixed_backgrounds || 0),
+          fixed_decorations: Number(raw.meta.layer_evidence.fixed_decorations || 0),
+        }
+      : undefined,
+    reusable_assets: list(raw?.meta?.layer_assets).map((item: any) => ({
+      name: String(item?.name || "Asset PSD"), role: String(item?.role || ""),
+    })).filter((item) => item.role),
     legacy_project_ids: strings(raw?.legacy_project_ids),
   };
 }

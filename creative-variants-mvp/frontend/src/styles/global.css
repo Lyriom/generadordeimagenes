@@ -2667,6 +2667,11 @@ details .inventory { margin-top: 14px; }
 .source-state, .knowledge-row > i { color: var(--success); font-style: normal; font-size: var(--fs-xs); font-weight: 750; }
 .source-state.error { color: var(--danger); }
 .source-branding-control { display:grid; gap:3px; min-width:0; }.source-branding-control span { color:var(--fg-muted); font-size:10px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }.source-branding-control select { min-width:0; padding:7px 8px; font-size:11px; }.source-branding-control small { margin:0; font-size:10px; line-height:1.25; }
+.source-asset-evidence { grid-column: 2 / -2; padding: 9px 11px; border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--line)); border-radius: 10px; background: color-mix(in srgb, var(--accent-soft) 56%, transparent); }
+.source-asset-evidence strong { font-size: var(--fs-xs); }
+.source-asset-evidence small { margin-top: 2px; }
+.source-asset-evidence .brief-tags { margin-top: 7px; }
+.source-asset-evidence .brief-tags > span { padding: 4px 7px; font-size: 10px; }
 .source-remove { width:28px; height:28px; padding:0; border:0; border-radius:8px; color:var(--fg-muted); background:transparent; font-size:20px; line-height:1; cursor:pointer; }
 .source-remove:hover { color:var(--danger); background:var(--danger-soft); }
 .file-button { position: relative; overflow: hidden; }

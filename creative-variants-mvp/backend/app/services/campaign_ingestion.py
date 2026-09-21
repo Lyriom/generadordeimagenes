@@ -87,7 +87,10 @@ _PSD_EXCLUDED_MARKERS = {
     "yt", "linkedin", "whatsapp", "twitter", "redes", "social", "icon", "icono",
     "iconos", "emoji", "foto", "photo", "imagen", "image", "persona", "person",
 }
-_PSD_LOGO_MARKERS = {"logo", "logotipo", "isotipo"}
+# Los diseñadores suelen llamar a este grupo "Marca" o "Brand", sobre todo
+# cuando el logo está construido de varias formas. Es una señal tan fuerte
+# como "logo" y no debe terminar como una decoración genérica.
+_PSD_LOGO_MARKERS = {"logo", "logotipo", "isotipo", "marca", "brand", "wordmark"}
 
 
 def _representative_indices(total: int, limit: int) -> list[int]:
@@ -748,13 +751,20 @@ def _psd_fixed_asset_role(name: str, kind: str, is_group: bool) -> str | None:
     restricción es la que evita que una plantilla copie un arte fuente entero.
     """
 
-    if is_group or kind.casefold() == "type":
-        return None
     tokens = _psd_name_tokens(name)
     if not tokens or tokens.intersection(_PSD_EXCLUDED_MARKERS):
         return None
     if tokens.intersection(_PSD_LOGO_MARKERS):
+        # Un logotipo real muchas veces es un grupo con letras, vectoriales y
+        # máscaras dentro. Componer el grupo preserva sus proporciones y evita
+        # reemplazarlo por una "M" o por el icono de una red social. Para los
+        # demás grupos seguimos siendo conservadores: podrían contener precio,
+        # producto o copy variable.
+        if kind.casefold() == "type":
+            return None
         return "logo"
+    if is_group or kind.casefold() == "type":
+        return None
     if tokens.intersection(_PSD_BACKGROUND_MARKERS):
         return "fixed_background"
     if tokens.intersection(_PSD_DECORATION_MARKERS):
@@ -952,6 +962,13 @@ def _extract_psd(
         source.meta["layer_manifest"] = manifest
         if layer_assets:
             source.meta["layer_assets"] = layer_assets
+        source.meta["layer_evidence"] = {
+            "visible_layers": sum(1 for item in manifest if item["visible"]),
+            "text_layers": sum(1 for item in manifest if item["kind"] == "type" and item["text"]),
+            "logo_assets": sum(1 for item in layer_assets if item["role"] == "logo"),
+            "fixed_backgrounds": sum(1 for item in layer_assets if item["role"] == "fixed_background"),
+            "fixed_decorations": sum(1 for item in layer_assets if item["role"] == "fixed_decoration"),
+        }
         source.extracted_text = _clean_text("\n".join(text_chunks))
         target = _source_folder(client_id, campaign_id, source) / "previews" / "composite.jpg"
         _save_thumbnail(composite, target)
@@ -1015,6 +1032,13 @@ def classify_roles(source: CampaignSource) -> list[CampaignSourceRole]:
     if source.kind == CampaignSourceKind.LAYERED_DESIGN:
         add(CampaignSourceRole.KEY_VISUAL)
         add(CampaignSourceRole.VISUAL_REFERENCE)
+        assets = source.meta.get("layer_assets", [])
+        if isinstance(assets, list):
+            asset_roles = {str(item.get("role")) for item in assets if isinstance(item, dict)}
+            if "logo" in asset_roles:
+                add(CampaignSourceRole.LOGO)
+            if "fixed_background" in asset_roles:
+                add(CampaignSourceRole.BACKGROUND)
     if source.kind in {CampaignSourceKind.IMAGE, CampaignSourceKind.PRESENTATION}:
         add(CampaignSourceRole.VISUAL_REFERENCE)
     if any(word in haystack for word in ("manual de marca", "brand book", "brandbook", "guideline")):

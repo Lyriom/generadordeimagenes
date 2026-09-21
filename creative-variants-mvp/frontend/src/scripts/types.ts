@@ -234,6 +234,15 @@ export interface CampaignSource {
   preview?: string | null;
   previews?: string[];
   warnings: string[];
+  /** Inventario verificable de un PSD: no es una inferencia visual. */
+  layer_evidence?: {
+    visible_layers?: number;
+    text_layers?: number;
+    logo_assets?: number;
+    fixed_backgrounds?: number;
+    fixed_decorations?: number;
+  };
+  reusable_assets?: Array<{ name: string; role: string }>;
   /** Solo existe en el fallback legado y nunca se presenta como un KV. */
   legacy_project_ids?: string[];
 }

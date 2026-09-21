@@ -16,6 +16,14 @@ def test_all_bundled_fonts_are_valid():
         assert hashlib.sha256(payload).hexdigest().startswith(font['id'])
 
 
+def test_catalogue_font_path_is_a_real_file_not_a_user_path():
+    marcimex = next(item for item in client_fonts.catalog() if item['id'] == 'marcimex')
+    selected = marcimex['fonts'][0]
+    path = client_fonts.font_path('marcimex', selected['id'])
+    assert path.is_file()
+    assert path.suffix.lower() in {'.ttf', '.otf'}
+
+
 def test_apply_persist_and_delete_project_keeps_catalog(client, project):
     catalog = client.get('/projects/font-library/catalog')
     assert catalog.status_code == 200
