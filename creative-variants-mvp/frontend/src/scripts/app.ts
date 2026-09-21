@@ -976,11 +976,13 @@ function campaignBriefHtml(compact: boolean): string {
   if (compact) return "";
   const intakeDisabled = state.activeClientId ? "" : " disabled";
   const clients = state.clients.map((client) => [
-    '<button class="client-choice', client.client_id === state.activeClientId ? " is-selected" : "",
-    '" type="button" data-client="', attr(client.client_id), '">',
+    '<article class="client-card', client.client_id === state.activeClientId ? " is-selected" : "", '">',
+    '<button class="client-choice" type="button" data-client="', attr(client.client_id), '">',
     '<span class="client-monogram">', esc(client.name.slice(0, 2).toUpperCase()), '</span>',
     '<span><strong>', esc(client.name), '</strong><small>', String(client.templates), ' plantillas · ',
-    String(client.campaigns), ' campañas</small></span><i>', client.client_id === state.activeClientId ? "✓" : "→", '</i></button>',
+    String(client.campaigns), ' campañas</small></span><i>', client.client_id === state.activeClientId ? "✓ Seleccionado" : "Seleccionar →", '</i></button>',
+    '<div class="client-card-actions"><button class="ghost-button small" type="button" data-manage-client="', attr(client.client_id), '">Editar</button>',
+    '<button class="client-delete-inline" type="button" data-delete-client="', attr(client.client_id), '" aria-label="Borrar ', attr(client.name), '">Borrar</button></div></article>',
   ].join("")).join("");
   const pastCampaigns = state.activeClientId
     ? state.clientCampaigns.map((campaign) => [
@@ -1139,6 +1141,45 @@ function bindCampaignBrief(): void {
       await renderCampaign();
       toast("Cliente eliminado.", "success");
     } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+  });
+  queryAll<HTMLButtonElement>("[data-manage-client]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const clientId = button.dataset.manageClient || "";
+      const client = state.clients.find((item) => item.client_id === clientId);
+      if (!client) return;
+      state.activeClientId = clientId;
+      state.clientCampaigns = await listCampaigns(clientId);
+      resetCampaignWork(client.name);
+      saveSession();
+      await renderCampaign();
+      query<HTMLDetailsElement>(".client-settings")?.setAttribute("open", "");
+    });
+  });
+  queryAll<HTMLButtonElement>("[data-delete-client]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const clientId = button.dataset.deleteClient || "";
+      const client = state.clients.find((item) => item.client_id === clientId);
+      if (!client) return;
+      const confirmed = await confirmAction({
+        title: "¿Borrar " + client.name + "?",
+        lines: ["Se eliminarán todas sus campañas, archivos fuente, plantillas y entregables.", "Esta acción no se puede deshacer."],
+        confirm: "Sí, borrar cliente", danger: true,
+      });
+      if (!confirmed) return;
+      busy("Borrando cliente", "Eliminando su biblioteca y campañas…", 55);
+      try {
+        await deleteClient(clientId);
+        state.clients = state.clients.filter((item) => item.client_id !== clientId);
+        if (state.activeClientId === clientId) {
+          state.activeClientId = null;
+          state.clientCampaigns = [];
+          resetCampaignWork("");
+        }
+        saveSession();
+        await renderCampaign();
+        toast("Cliente eliminado.", "success");
+      } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+    });
   });
 }
 
