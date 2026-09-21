@@ -282,6 +282,13 @@ class ClientCreateRequest(BaseModel):
     social_urls: list[str] = Field(default_factory=list)
 
 
+class ClientUpdateRequest(BaseModel):
+    """Datos permanentes del cliente, separados del brief de una campaña."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    social_urls: list[str] | None = None
+
+
 class ClientProfile(BaseModel):
     client_id: str
     name: str

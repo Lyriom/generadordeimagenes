@@ -14,6 +14,7 @@ import {
 import {
   createCampaign,
   createClient,
+  deleteClient,
   deleteCampaignSource,
   deleteCampaignProductAsset,
   decideTemplateCandidate,
@@ -32,6 +33,7 @@ import {
   reviseTemplateCandidate,
   updateCampaignSourceRole,
   updateCampaignContext,
+  updateClient,
   uploadCampaignProductAssets,
   uploadCampaignSources,
 } from "./campaign-api";
@@ -995,6 +997,7 @@ function campaignBriefHtml(compact: boolean): string {
     clients ? '<div class="client-grid">' + clients + '</div>' : '<div class="notice">Todavía no hay clientes. Crea el primero.</div>',
     '<div class="create-client-row"><label class="field"><span>Nuevo cliente</span><input id="new-client-name" placeholder="Nombre de la marca"></label>',
     '<button class="ghost-button" id="create-client" type="button">Crear cliente</button></div>',
+    state.activeClientId ? '<details class="client-settings"><summary>Editar cliente</summary><div class="form-grid"><label class="field"><span>Nombre del cliente</span><input id="edit-client-name" value="' + attr(state.clients.find((item) => item.client_id === state.activeClientId)?.name || "") + '"></label><label class="field"><span>Redes de la marca · una por línea</span><textarea id="edit-client-socials" rows="3">' + esc((state.clients.find((item) => item.client_id === state.activeClientId)?.social_urls || []).join("\n")) + '</textarea></label></div><div class="button-row"><button class="ghost-button" id="save-client" type="button">Guardar cambios</button><button class="danger-button" id="delete-client" type="button">Borrar cliente</button></div><p class="muted tiny">Borrar elimina campañas, fuentes, plantillas y entregables de este cliente. No se puede deshacer.</p></details>' : '',
     state.activeClientId && pastCampaigns
       ? '<div class="campaign-memory"><span class="label">Campañas guardadas de este cliente</span>' + pastCampaigns + '</div>'
       : '',
@@ -1095,6 +1098,46 @@ function bindCampaignBrief(): void {
       saveSession();
       await renderCampaign();
       toast("Cliente creado. Ya puedes reunir su campaña.", "success");
+    } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+  });
+  query("#save-client")?.addEventListener("click", async () => {
+    const clientId = state.activeClientId;
+    if (!clientId) return;
+    const name = query<HTMLInputElement>("#edit-client-name")?.value.trim() || "";
+    if (!name) { toast("El cliente necesita un nombre.", "error"); return; }
+    busy("Guardando cliente", "Actualizando su ficha permanente…", 45);
+    try {
+      const updated = await updateClient(clientId, {
+        name,
+        social_urls: parseSocialUrls(query<HTMLTextAreaElement>("#edit-client-socials")?.value || ""),
+      });
+      state.clients = state.clients.map((item) => item.client_id === clientId ? updated : item);
+      state.campaignBrief.client = updated.name;
+      saveSession();
+      await renderCampaign();
+      toast("Cliente actualizado.", "success");
+    } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
+  });
+  query("#delete-client")?.addEventListener("click", async () => {
+    const clientId = state.activeClientId;
+    const client = state.clients.find((item) => item.client_id === clientId);
+    if (!clientId || !client) return;
+    const confirmed = await confirmAction({
+      title: "¿Borrar " + client.name + "?",
+      lines: ["Se eliminarán todas sus campañas, archivos fuente, plantillas y entregables.", "Esta acción no se puede deshacer."],
+      confirm: "Sí, borrar cliente", danger: true,
+    });
+    if (!confirmed) return;
+    busy("Borrando cliente", "Eliminando su biblioteca y campañas…", 55);
+    try {
+      await deleteClient(clientId);
+      state.clients = state.clients.filter((item) => item.client_id !== clientId);
+      state.activeClientId = null;
+      state.clientCampaigns = [];
+      resetCampaignWork("");
+      saveSession();
+      await renderCampaign();
+      toast("Cliente eliminado.", "success");
     } catch (error) { toast(errorMessage(error), "error"); } finally { idle(); }
   });
 }

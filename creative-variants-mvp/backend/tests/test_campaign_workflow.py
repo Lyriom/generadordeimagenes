@@ -42,6 +42,35 @@ def _client_and_campaign(client: TestClient) -> tuple[dict, dict]:
     return profile, created_campaign.json()
 
 
+def test_cliente_se_puede_editar_y_borrar_su_biblioteca(client: TestClient):
+    created = client.post(
+        "/clients", json={"name": "Cliente original", "social_urls": ["https://marca.example"]}
+    )
+    assert created.status_code == 201, created.text
+    profile = created.json()
+    changed = client.put(
+        f"/clients/{profile['client_id']}",
+        json={"name": "Cliente editado", "social_urls": ["https://instagram.com/cliente"]},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["name"] == "Cliente editado"
+    assert changed.json()["social_urls"] == ["https://instagram.com/cliente"]
+
+    deleted = client.delete(f"/clients/{profile['client_id']}")
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(f"/clients/{profile['client_id']}").status_code == 404
+
+
+def test_cliente_con_produccion_activa_no_se_puede_borrar(client: TestClient):
+    profile, campaign = _client_and_campaign(client)
+    campaign_store.save_production_job(
+        ProductionJob(client_id=profile["client_id"], campaign_id=campaign["campaign_id"], state="PENDING")
+    )
+    response = client.delete(f"/clients/{profile['client_id']}")
+    assert response.status_code == 409
+    assert "producción en curso" in response.json()["detail"]
+
+
 def _pptx_two_slides(image: bytes) -> bytes:
     """PPTX mínimo suficiente para el extractor ZIP tolerante de campaña."""
 

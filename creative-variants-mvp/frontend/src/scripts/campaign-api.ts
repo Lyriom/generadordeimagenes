@@ -75,6 +75,17 @@ export async function createClient(name: string, socialUrls: string[]): Promise<
   }
 }
 
+export async function updateClient(
+  clientId: string,
+  input: { name?: string; social_urls?: string[] },
+): Promise<ClientProfile> {
+  return normaliseClient(await put("/clients/" + encodeURIComponent(clientId), input));
+}
+
+export async function deleteClient(clientId: string): Promise<void> {
+  await del("/clients/" + encodeURIComponent(clientId));
+}
+
 export function normaliseCampaign(raw: any, clientId = ""): CampaignWorkspace {
   const normalizedClientId = String(raw?.client_id || clientId);
   const campaignId = String(raw?.campaign_id || raw?.id || "");

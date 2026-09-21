@@ -23,6 +23,7 @@ from ..models.campaign import (
     CampaignSource,
     CampaignSourceRoleUpdateRequest,
     CampaignUpdateRequest,
+    ClientUpdateRequest,
     CampaignSourcesResponse,
     CandidateDecisionRequest,
     CandidateDecisionResponse,
@@ -140,6 +141,48 @@ def list_clients() -> list[ClientProfile]:
 @router.get("/{client_id}", response_model=ClientProfile)
 def get_client(client_id: str) -> ClientProfile:
     return _profile(_brand_or_404(client_id))
+
+
+@router.put("/{client_id}", response_model=ClientProfile)
+def update_client(client_id: str, request: ClientUpdateRequest) -> ClientProfile:
+    """Edita la ficha permanente sin alterar briefs ya aprobados."""
+
+    brand = _brand_or_404(client_id)
+    knowledge = campaign_store.load_knowledge(client_id)
+    if request.name is not None:
+        name = request.name.strip()
+        if name and name != brand.name:
+            brand.name = name
+            brand.slug = slugify(name, fallback="cliente")
+    if request.social_urls is not None:
+        urls = list(dict.fromkeys(item.strip()[:500] for item in request.social_urls if item.strip()))
+        knowledge.social_urls = urls
+        brand.meta["social_urls"] = urls
+    template_store.save_brand(brand)
+    campaign_store.save_knowledge(knowledge)
+    return _profile(brand)
+
+
+@router.delete("/{client_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_client(client_id: str) -> None:
+    """Borra cliente, campañas, fuentes y biblioteca cuando no hay trabajo vivo."""
+
+    _brand_or_404(client_id)
+    active: list[str] = []
+    for campaign in campaign_store.list_campaigns(client_id):
+        jobs = campaign_store.list_production_jobs(
+            client_id, campaign.campaign_id, states={"PENDING", "STARTED", "PROGRESS"}
+        )
+        if jobs:
+            active.append(campaign.name)
+    if active:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "No se puede borrar el cliente mientras hay producción en curso: "
+            + ", ".join(active[:4]) + ".",
+        )
+    if not template_store.delete_brand(client_id):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "No existe ese cliente.")
 
 
 @router.post(
