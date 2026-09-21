@@ -855,6 +855,12 @@ def deterministic_brief(
         for source in campaign.sources
         if CampaignSourceRole.TYPOGRAPHY in source.roles
     ]
+    fonts.extend(
+        str(asset.get("name"))
+        for source in campaign.sources
+        for asset in source.meta.get("font_assets", [])
+        if isinstance(asset, dict) and asset.get("name")
+    )
     fonts.extend(_brand_catalogue_typography(brand))
     if brand.fonts.regular:
         fonts.insert(0, brand.fonts.regular)

@@ -10,6 +10,7 @@ import io
 import math
 import posixpath
 import re
+import shutil
 import unicodedata
 import zipfile
 from pathlib import Path
@@ -29,6 +30,7 @@ from .security import FileValidationError
 
 SUPPORTED_CAMPAIGN_EXTENSIONS = {
     ".pdf",
+    ".ai",
     ".pptx",
     ".psd",
     ".psb",
@@ -50,6 +52,7 @@ SUPPORTED_CAMPAIGN_EXTENSIONS = {
     ".rtf",
     ".ttf",
     ".otf",
+    ".zip",
 }
 
 _IMAGE_EXTENSIONS = {
@@ -130,7 +133,7 @@ def source_kind(extension: str) -> CampaignSourceKind:
         return CampaignSourceKind.PDF
     if extension == ".pptx":
         return CampaignSourceKind.PRESENTATION
-    if extension in {".psd", ".psb"}:
+    if extension in {".psd", ".psb", ".ai"}:
         return CampaignSourceKind.LAYERED_DESIGN
     if extension in _IMAGE_EXTENSIONS:
         return CampaignSourceKind.IMAGE
@@ -175,6 +178,8 @@ def inspect_source(
 
     if kind == CampaignSourceKind.PDF:
         _extract_pdf(client_id, campaign_id, original_path, source)
+    elif extension == ".ai":
+        _extract_illustrator(client_id, campaign_id, original_path, source)
     elif kind == CampaignSourceKind.PRESENTATION:
         _extract_pptx(client_id, campaign_id, original_path, source)
     elif kind == CampaignSourceKind.LAYERED_DESIGN:
@@ -183,6 +188,8 @@ def inspect_source(
         _extract_image(client_id, campaign_id, original_path, source)
     elif kind == CampaignSourceKind.FONT:
         _inspect_font(original_path, source)
+    elif extension == ".zip":
+        _extract_font_archive(client_id, campaign_id, original_path, source)
     elif extension == ".docx":
         _extract_docx(client_id, campaign_id, original_path, source)
     elif extension == ".xlsx":
@@ -299,7 +306,51 @@ def _extract_pdf(
         )
 
 
-def _safe_zip(path: Path, expected_prefix: str) -> zipfile.ZipFile:
+def _extract_illustrator(
+    client_id: str, campaign_id: str, path: Path, source: CampaignSource
+) -> None:
+    """Analiza un Illustrator PDF-compatible sin fingir capas de Photoshop.
+
+    Illustrator puede guardar un PDF completo dentro del `.ai`. Ese contenido
+    conserva la composición, texto y vectores suficientes para que la IA vea
+    el arte. Los AI nativos sin PDF también se aceptan: se registran como
+    contexto, pero se explica que para capas reutilizables se necesita PSD.
+    """
+
+    with path.open("rb") as handle:
+        head = handle.read(4 * 1024 * 1024)
+    offset = head.find(b"%PDF-")
+    if offset < 0:
+        visible = re.sub(rb"[^\x20-\x7e\n\r\t]+", b" ", head).decode("latin-1", errors="ignore")
+        source.extracted_text = _clean_text(visible)
+        source.page_count = 0
+        source.meta["illustrator_pdf_compatible"] = False
+        source.warnings.append(
+            "El AI se guardó sin compatibilidad PDF: quedó como contexto de texto, "
+            "pero para analizar el arte exporta PDF compatible o añade el PSD con capas."
+        )
+        return
+    if offset == 0:
+        _extract_pdf(client_id, campaign_id, path, source)
+    else:
+        # MuPDF abre de forma fiable el PDF aislado, no el encabezado PostScript
+        # que Illustrator deja antes. Se escribe dentro de la fuente y se borra
+        # al terminar; nunca se expone como archivo del usuario.
+        temporary = _source_folder(client_id, campaign_id, source) / ".illustrator-preview.pdf"
+        with path.open("rb") as original, temporary.open("wb") as target:
+            original.seek(offset)
+            shutil.copyfileobj(original, target, length=1024 * 1024)
+        try:
+            _extract_pdf(client_id, campaign_id, temporary, source)
+        finally:
+            temporary.unlink(missing_ok=True)
+    source.meta["illustrator_pdf_compatible"] = True
+    source.warnings.append(
+        "AI PDF-compatible analizado como referencia visual; para conservar capas editables usa PSD."
+    )
+
+
+def _safe_zip(path: Path, expected_prefix: str | None) -> zipfile.ZipFile:
     try:
         archive = zipfile.ZipFile(path)
     except (zipfile.BadZipFile, OSError) as exc:
@@ -317,10 +368,51 @@ def _safe_zip(path: Path, expected_prefix: str) -> zipfile.ZipFile:
     if expanded > limit:
         archive.close()
         raise FileValidationError("El documento comprimido declara demasiado contenido interno.")
-    if not any(item.filename.startswith(expected_prefix) for item in entries):
+    if expected_prefix and not any(item.filename.startswith(expected_prefix) for item in entries):
         archive.close()
         raise FileValidationError("La extension no coincide con el contenido del documento.")
     return archive
+
+
+def _extract_font_archive(
+    client_id: str, campaign_id: str, path: Path, source: CampaignSource
+) -> None:
+    """Extrae únicamente fuentes reales de un ZIP sin aceptar rutas internas."""
+
+    from .security import validate_font_bytes
+
+    accepted: list[dict[str, str]] = []
+    skipped = 0
+    with _safe_zip(path, None) as archive:
+        members = [
+            item for item in archive.infolist()
+            if not item.is_dir() and Path(item.filename).suffix.casefold() in {".ttf", ".otf"}
+            and ".." not in Path(item.filename).parts
+        ]
+        if not members:
+            raise FileValidationError("El ZIP no contiene tipografías .ttf u .otf.")
+        if len(members) > 80:
+            raise FileValidationError("El ZIP contiene demasiadas tipografías; divídelo en archivos menores.")
+        folder = _source_folder(client_id, campaign_id, source) / "fonts"
+        for index, member in enumerate(sorted(members, key=lambda item: item.filename.casefold()), 1):
+            try:
+                payload = archive.read(member)
+                suffix = validate_font_bytes(payload, member.filename)
+                target = folder / f"font-{index:03d}{suffix}"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
+                relative = _relative(client_id, campaign_id, target)
+                source.asset_files.append(relative)
+                accepted.append({"name": Path(member.filename).name[:240], "path": relative})
+            except Exception:  # noqa: BLE001 - un archivo basura no descarta toda la familia
+                skipped += 1
+    if not accepted:
+        raise FileValidationError("No se pudo validar ninguna tipografía dentro del ZIP.")
+    source.page_count = 0
+    source.meta["font_assets"] = accepted
+    source.extracted_text = _clean_text("\n".join(item["name"] for item in accepted))
+    if skipped:
+        source.warnings.append(f"Se ignoraron {skipped} archivos que no eran tipografías válidas.")
 
 
 def _xml_text(payload: bytes) -> str:
@@ -1028,6 +1120,8 @@ def classify_roles(source: CampaignSource) -> list[CampaignSourceRole]:
             roles.append(role)
 
     if source.kind == CampaignSourceKind.FONT:
+        add(CampaignSourceRole.TYPOGRAPHY)
+    if source.meta.get("font_assets"):
         add(CampaignSourceRole.TYPOGRAPHY)
     if source.kind == CampaignSourceKind.LAYERED_DESIGN:
         add(CampaignSourceRole.KEY_VISUAL)

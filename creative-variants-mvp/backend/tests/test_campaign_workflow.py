@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from app.models.campaign_production import ProductionJob
 from app.services import campaign_store
+from app.services import client_fonts
 
 
 def _client_and_campaign(client: TestClient) -> tuple[dict, dict]:
@@ -69,6 +70,32 @@ def test_cliente_con_produccion_activa_no_se_puede_borrar(client: TestClient):
     response = client.delete(f"/clients/{profile['client_id']}")
     assert response.status_code == 409
     assert "producción en curso" in response.json()["detail"]
+
+
+def test_acepta_ai_y_zip_de_tipografias_como_contexto(client: TestClient):
+    profile, campaign = _client_and_campaign(client)
+    font = next(item for item in client_fonts.catalog() if item["id"] == "marcimex")["fonts"][0]
+    payload, _suffix = client_fonts.read_font("marcimex", font["id"])
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        zipped.writestr("familia/Marca-Regular.otf", payload)
+        zipped.writestr("__MACOSX/ruido.txt", b"no es fuente")
+
+    uploaded = client.post(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources",
+        files=[
+            ("files", ("diseno.ai", b"%!PS-Adobe-3.0\n%%Title: Arte AI", "application/postscript")),
+            ("files", ("Fonts-credifest.zip", archive.getvalue(), "application/zip")),
+        ],
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    sources = uploaded.json()["sources"]
+    ai = next(item for item in sources if item["filename"] == "diseno.ai")
+    fonts = next(item for item in sources if item["filename"] == "Fonts-credifest.zip")
+    assert ai["kind"] == "layered_design"
+    assert any("compatibilidad PDF" in warning for warning in ai["warnings"])
+    assert "typography" in fonts["roles"]
+    assert fonts["meta"]["font_assets"][0]["name"] == "Marca-Regular.otf"
 
 
 def _pptx_two_slides(image: bytes) -> bytes:

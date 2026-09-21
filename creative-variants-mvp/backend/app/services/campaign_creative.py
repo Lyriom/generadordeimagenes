@@ -161,22 +161,33 @@ def _catalogue_font_path(campaign: Campaign, *, bold: bool) -> str | None:
 
 
 def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
-    font_sources = [source for source in campaign.sources if source.kind.value == "font"]
-    if font_sources:
-        preference = ("bold", "black", "semi", "heavy") if bold else ("regular", "medium", "book", "light")
-        ranked = sorted(
-            font_sources,
-            key=lambda source: not any(token in source.filename.casefold() for token in preference),
-        )
-        for source in ranked:
+    font_candidates: list[tuple[str, Path]] = []
+    for source in campaign.sources:
+        if source.kind.value == "font":
             try:
-                path = campaign_store.campaign_path(
+                font_candidates.append((source.filename, campaign_store.campaign_path(
                     campaign.client_id, campaign.campaign_id, source.stored_path
-                )
-                if path.is_file():
-                    return str(path)
+                )))
             except Exception:  # noqa: BLE001
                 continue
+        for asset in source.meta.get("font_assets", []):
+            if not isinstance(asset, dict) or not isinstance(asset.get("path"), str):
+                continue
+            try:
+                font_candidates.append((str(asset.get("name") or asset["path"]), campaign_store.campaign_path(
+                    campaign.client_id, campaign.campaign_id, asset["path"]
+                )))
+            except Exception:  # noqa: BLE001
+                continue
+    if font_candidates:
+        preference = ("bold", "black", "semi", "heavy") if bold else ("regular", "medium", "book", "light")
+        ranked = sorted(
+            font_candidates,
+            key=lambda item: not any(token in item[0].casefold() for token in preference),
+        )
+        for _name, path in ranked:
+            if path.is_file():
+                return str(path)
     catalogue_font = _catalogue_font_path(campaign, bold=bold)
     if catalogue_font:
         return catalogue_font
