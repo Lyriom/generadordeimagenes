@@ -934,7 +934,10 @@ async function renderCampaign(): Promise<void> {
     ),
     campaignPhaseRail(),
     ready ? activeCampaignHtml() : campaignBriefHtml(false),
-    ready ? stepFooter("campaign", "Revisar brief y activos") : "",
+    // La campaña activa ya tiene acciones dentro de su panel de contexto.
+    // Repetir aquí un pie completo dejaba una franja verde y un botón aislado
+    // debajo de las tarjetas, visualmente desconectado del flujo.
+    "",
     '<div class="spacer"></div>',
     savedProjectsHtml(saved),
   ].join("");
@@ -1822,7 +1825,10 @@ function bindUpload(): void {
     saveSession();
     busy("Creando la campaña", "Preparando la biblioteca del cliente…", 4);
     try {
-      const workspace = await createCampaign(state.activeClientId, {
+      // Si una subida anterior fue rechazada por una puerta externa (413), la
+      // campaña ya existe pero los File siguen en esta cola. Reutilizarla evita
+      // crear campañas vacías cada vez que se pulsa "reintentar".
+      const workspace = state.campaignWorkspace || await createCampaign(state.activeClientId, {
         name: state.campaignBrief.name,
         objective: state.campaignBrief.objective,
         social_urls: socialUrls,
@@ -1874,8 +1880,11 @@ function bindUpload(): void {
       toast("Campaña entendida: brief listo y " + String(analysis.template_candidates.length) + " plantillas propuestas.", "success");
       await navigate("layers");
     } catch (error) {
+      // No se vuelve a pintar la pantalla activa aquí. Un 413 sucede antes de
+      // que la API reciba los bytes: cambiar de pantalla borraba la cola local
+      // y aparentaba que el material se había perdido. La misma cola queda
+      // lista para pulsar reintentar tras actualizar el servidor.
       toast(errorMessage(error), "error");
-      if (state.campaignWorkspace) await renderCampaign();
     } finally {
       idle();
     }

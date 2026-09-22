@@ -2301,15 +2301,16 @@ td.truncate { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white
 
 .toast-region {
   position: fixed;
-  right: 20px;
-  bottom: 20px;
+  top: 84px;
+  right: 24px;
   z-index: 120;
   display: grid;
   gap: 10px;
-  max-width: calc(100vw - 40px);
+  width: min(390px, calc(100vw - 48px));
+  pointer-events: none;
 }
 .toast {
-  max-width: 400px;
+  max-width: 100%;
   padding: 13px 16px;
   color: #fff;
   border-radius: var(--radius);
@@ -2397,7 +2398,7 @@ details .inventory { margin-top: 14px; }
   .project-grid, .result-grid, .product-grid, .format-grid {
     grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
   }
-  .toast-region { right: 12px; left: 12px; bottom: 12px; }
+  .toast-region { top: auto; right: 12px; bottom: 12px; left: 12px; width: auto; }
   .toast { max-width: none; }
 }
 

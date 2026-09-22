@@ -23,6 +23,10 @@ services:
       # un valor viejo se quedaba mandando y no había forma de moverlo sin
       # entrar por SSH. `environment` gana a `env_file`, así que esto manda.
       MAX_UPLOAD_MB: "4096"
+      # Una fuente puede ser un PSD/AI pesado. El backend conserva el control
+      # del límite y responde con detalle, en vez de que un proxy corte el POST.
+      CAMPAIGN_MAX_SOURCE_MB: "2048"
+      CAMPAIGN_MAX_REQUEST_MB: "4096"
       MAX_IMAGE_MEGAPIXELS: "400"
       # Lo mismo con el OCR y con SAM: van dentro de la imagen, y aquí se fija
       # que se usen. Si esto viviera solo en el .env del servidor, un valor
@@ -103,6 +107,8 @@ services:
       # un valor viejo se quedaba mandando y no había forma de moverlo sin
       # entrar por SSH. `environment` gana a `env_file`, así que esto manda.
       MAX_UPLOAD_MB: "4096"
+      CAMPAIGN_MAX_SOURCE_MB: "2048"
+      CAMPAIGN_MAX_REQUEST_MB: "4096"
       MAX_IMAGE_MEGAPIXELS: "400"
       # Lo mismo con el OCR y con SAM: van dentro de la imagen, y aquí se fija
       # que se usen. Si esto viviera solo en el .env del servidor, un valor

@@ -13,6 +13,14 @@
 }
 
 {$CV_SITE_ADDRESS::8014} {
+	# Los archivos de campaña (PSD, AI, PDFs y paquetes de tipografías) pueden
+	# ser grandes. Caddy no debe rechazar la petición antes de que la API pueda
+	# guardarla y devolver un error útil; el límite real se aplica por archivo en
+	# el backend. Este valor debe ser igual o mayor que CAMPAIGN_MAX_REQUEST_MB.
+	request_body {
+		max_size 4GB
+	}
+
 	# Contraseña de acceso, quitada a petición del equipo el 01/09/2026.
 	# Para volver a ponerla: descomente estas tres líneas, compruebe que
 	# CV_PASSWORD_HASH está en el .env del servidor y reinicie el proxy.

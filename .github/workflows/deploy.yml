@@ -150,6 +150,55 @@ jobs:
           echo "build-context correcto: $P"
           REMOTO
 
+      # Plesk queda delante de Docker. Si este virtual host conserva el límite
+      # por defecto, nginx devuelve 413 antes de que Caddy/API puedan recibir
+      # siquiera un PDF; desde la interfaz parecía que el material se guardaba
+      # y después desaparecía. Se corrige de forma acotada a este subdominio.
+      #
+      # El archivo es precisamente el que Plesk usa para las "Additional nginx
+      # directives". No se reemplaza: si ya existe el location del proxy se
+      # ajusta solo client_max_body_size; si no existe se crea el bloque mínimo
+      # que conecta este subdominio al puerto interno de Creative Studio.
+      - name: Permitir archivos grandes en el proxy de Plesk
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            bash -s <<'REMOTO'
+          set -eu
+          DOMAIN=generador.misiva.com.ec
+          CONF="/var/www/vhosts/system/$DOMAIN/conf/vhost_nginx.conf"
+          mkdir -p "$(dirname "$CONF")"
+          touch "$CONF"
+
+          if grep -q 'location ~ \^/' "$CONF"; then
+            if grep -q 'client_max_body_size' "$CONF"; then
+              sed -i 's/client_max_body_size[[:space:]][^;]*/client_max_body_size 0/' "$CONF"
+            else
+              sed -i '/location ~ \^\//a\    client_max_body_size 0;' "$CONF"
+            fi
+          else
+            cat >> "$CONF" <<'NGINX'
+
+          # Managed by Creative Studio deploy: large PSD/AI/PDF uploads must reach API.
+          location ~ ^/ {
+              client_max_body_size 0;
+              proxy_pass http://127.0.0.1:8014;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_read_timeout 600s;
+              proxy_send_timeout 600s;
+          }
+          NGINX
+          fi
+
+          nginx -t
+          systemctl reload nginx
+          REMOTO
+
       # --delete deja la carpeta espejo del repo, así que hay dos exclusiones
       # que NO se pueden quitar:
       #   .env   la clave de Magnific y la contraseña de acceso viven solo ahí
