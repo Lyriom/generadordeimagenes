@@ -193,6 +193,14 @@ Tres cosas de ahí no son opcionales:
   regex, así que Let's Encrypt puede seguir emitiendo el certificado.
 - **`proxy_read_timeout 600s`**: una tanda de generación tarda minutos.
 
+Este bloque ya no depende de que alguien se acuerde. Cada despliegue comprueba
+las tres directivas que deciden si una carga grande llega a la API
+(`client_max_body_size 0`, y los dos timeouts de 600s), las ajusta si hacen
+falta y no toca nada más del vhost. Si la configuración resultante no validara,
+restaura la copia previa y falla el despliegue en vez de recargar nginx. Sigue
+haciendo falta hacer este paso a mano la primera vez, para que el subdominio
+llegue al 8014 antes del primer despliegue.
+
 Después, el certificado: SSL/TLS Certificates → **Let's Encrypt**.
 
 ## Paso 6 · Los secretos de GitHub

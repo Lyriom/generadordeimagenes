@@ -150,55 +150,6 @@ jobs:
           echo "build-context correcto: $P"
           REMOTO
 
-      # Plesk queda delante de Docker. Si este virtual host conserva el límite
-      # por defecto, nginx devuelve 413 antes de que Caddy/API puedan recibir
-      # siquiera un PDF; desde la interfaz parecía que el material se guardaba
-      # y después desaparecía. Se corrige de forma acotada a este subdominio.
-      #
-      # El archivo es precisamente el que Plesk usa para las "Additional nginx
-      # directives". No se reemplaza: si ya existe el location del proxy se
-      # ajusta solo client_max_body_size; si no existe se crea el bloque mínimo
-      # que conecta este subdominio al puerto interno de Creative Studio.
-      - name: Permitir archivos grandes en el proxy de Plesk
-        run: |
-          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
-            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
-            bash -s <<'REMOTO'
-          set -eu
-          DOMAIN=generador.misiva.com.ec
-          CONF="/var/www/vhosts/system/$DOMAIN/conf/vhost_nginx.conf"
-          mkdir -p "$(dirname "$CONF")"
-          touch "$CONF"
-
-          if grep -q 'location ~ \^/' "$CONF"; then
-            if grep -q 'client_max_body_size' "$CONF"; then
-              sed -i 's/client_max_body_size[[:space:]][^;]*/client_max_body_size 0/' "$CONF"
-            else
-              sed -i '/location ~ \^\//a\    client_max_body_size 0;' "$CONF"
-            fi
-          else
-            cat >> "$CONF" <<'NGINX'
-
-          # Managed by Creative Studio deploy: large PSD/AI/PDF uploads must reach API.
-          location ~ ^/ {
-              client_max_body_size 0;
-              proxy_pass http://127.0.0.1:8014;
-              proxy_http_version 1.1;
-              proxy_set_header Upgrade $http_upgrade;
-              proxy_set_header Connection "upgrade";
-              proxy_set_header Host $host;
-              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-              proxy_set_header X-Forwarded-Proto $scheme;
-              proxy_read_timeout 600s;
-              proxy_send_timeout 600s;
-          }
-          NGINX
-          fi
-
-          nginx -t
-          systemctl reload nginx
-          REMOTO
-
       # --delete deja la carpeta espejo del repo, así que hay dos exclusiones
       # que NO se pueden quitar:
       #   .env   la clave de Magnific y la contraseña de acceso viven solo ahí
@@ -349,4 +300,160 @@ jobs:
               echo "ERROR: OpenAPI no contiene las rutas campaign-first"; exit 1; }
           printf '%s' "$openapi" | grep -q '"/clients/{client_id}/campaigns/{campaign_id}/production/assets"' || {
               echo "ERROR: OpenAPI no contiene la carga persistente de imágenes de producción"; exit 1; }
+          REMOTO
+
+      # Plesk queda delante de Docker: es su nginx el que atiende el 443 de
+      # generador.misiva.com.ec y hace proxy a 127.0.0.1:8014. Si ese virtual
+      # host conserva el límite de cuerpo por defecto, nginx devuelve 413 y
+      # corta la subida ANTES de que Caddy o la API vean un solo byte; desde la
+      # interfaz parecía que el material se guardaba y luego desaparecía.
+      #
+      # Va al final a propósito: el vhost es infraestructura de la casa, no de
+      # esta aplicación, y un problema aquí no debe impedir que el código nuevo
+      # llegue al servidor. Pero sí falla el despliegue, porque una carga rota
+      # en el proxy es exactamente el fallo que este paso existe para evitar, y
+      # dejarlo en verde lo escondería hasta la próxima campaña.
+      #
+      # El archivo es el que Plesk usa para las "Additional nginx directives".
+      # NO se reescribe: se ajustan únicamente las tres directivas que deciden
+      # si una carga grande llega a la API, respetando el resto del bloque y
+      # todo lo que haya fuera de él. Antes de instalar nada se guarda una copia
+      # y, si la configuración resultante no valida, se restaura.
+      - name: Abrir el límite de carga en el vhost de Plesk
+        run: |
+          ssh -i ~/.ssh/deploy_key -p ${{ secrets.DEPLOY_SSH_PORT }} -o StrictHostKeyChecking=accept-new \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            bash -s <<'REMOTO'
+          set -eu
+          DOMAIN=generador.misiva.com.ec
+          CONF="/var/www/vhosts/system/$DOMAIN/conf/vhost_nginx.conf"
+
+          # Plesk escribe este archivo como root. Sin privilegios el paso no
+          # puede hacer su trabajo, y callarlo dejaría el 413 vivo en producción
+          # con el despliegue en verde.
+          if [ "$(id -u)" -eq 0 ]; then
+            SUDO=""
+          elif sudo -n true 2>/dev/null; then
+            SUDO="sudo -n"
+          else
+            echo "ERROR: hace falta root para tocar el vhost de Plesk y este usuario no lo tiene."
+            echo "Dé sudo sin contraseña al usuario de despliegue, o aplique a mano el bloque de DESPLIEGUE.md."
+            exit 1
+          fi
+
+          [ -d "/var/www/vhosts/system/$DOMAIN/conf" ] || {
+            echo "ERROR: Plesk no tiene el vhost $DOMAIN. Cree el subdominio antes de desplegar."; exit 1; }
+          $SUDO touch "$CONF"
+
+          ACTUAL=$(mktemp); NUEVO=$(mktemp); PROG=$(mktemp); VIGENTE=$(mktemp)
+          trap 'rm -f "$ACTUAL" "$NUEVO" "$PROG" "$VIGENTE"' EXIT
+          $SUDO cat "$CONF" > "$ACTUAL"
+
+          # awk y no sed: hay que entrar en el bloque correcto y respetar sus
+          # llaves. Sustituye cada directiva donde ya esté —conservando su sitio
+          # y su sangría— y añade solo la que falte, justo antes del cierre.
+          cat > "$PROG" <<'AWK'
+          BEGIN { dentro = 0; hecho = 0; hondo = 0; sangria = "    " }
+
+          !dentro && !hecho && /location[ \t]*~[ \t]*\^\// {
+              hondo = gsub(/\{/, "{") - gsub(/\}/, "}")
+              print
+              # Un bloque escrito entero en una línea no tiene dónde insertar:
+              # seguir metería las directivas fuera del location, que es válido
+              # para nginx y silenciosamente inútil aquí.
+              if (hondo <= 0) { suelto = 1; exit }
+              dentro = 1
+              next
+          }
+
+          dentro {
+              cierra = (hondo + gsub(/\{/, "{") - gsub(/\}/, "}") <= 0)
+              if (!cierra && match($0, /^[ \t]+[^ \t]/)) sangria = substr($0, 1, RLENGTH - 1)
+              if (cierra) {
+                  if (!visto_tam) printf "%sclient_max_body_size 0;\n", sangria
+                  if (!visto_lee) printf "%sproxy_read_timeout 600s;\n", sangria
+                  if (!visto_env) printf "%sproxy_send_timeout 600s;\n", sangria
+                  dentro = 0; hecho = 1
+                  print
+                  next
+              }
+              hondo += gsub(/\{/, "{") - gsub(/\}/, "}")
+              if ($0 ~ /^[ \t]*client_max_body_size[ \t]/) { visto_tam = 1; printf "%sclient_max_body_size 0;\n", sangria; next }
+              if ($0 ~ /^[ \t]*proxy_read_timeout[ \t]/)   { visto_lee = 1; printf "%sproxy_read_timeout 600s;\n", sangria; next }
+              if ($0 ~ /^[ \t]*proxy_send_timeout[ \t]/)   { visto_env = 1; printf "%sproxy_send_timeout 600s;\n", sangria; next }
+          }
+
+          { print }
+
+          END { if (suelto) exit 5; if (dentro) exit 4; if (!hecho) exit 3 }
+          AWK
+
+          set +e
+          awk -f "$PROG" "$ACTUAL" > "$NUEVO"
+          RC=$?
+          set -e
+          case "$RC" in
+            0) echo "bloque del proxy encontrado: se ajustan límite y timeouts" ;;
+            3)
+              # Todavía no hay proxy: se escribe el bloque mínimo que conecta
+              # este subdominio con Creative Studio.
+              echo "no había bloque de proxy: se añade uno nuevo"
+              cat "$ACTUAL" > "$NUEVO"
+              cat >> "$NUEVO" <<'NGINX'
+
+          # Creative Studio · gestionado por .github/workflows/deploy.yml
+          location ~ ^/ {
+              client_max_body_size 0;
+              proxy_pass http://127.0.0.1:8014;
+              proxy_http_version 1.1;
+              proxy_set_header Upgrade $http_upgrade;
+              proxy_set_header Connection "upgrade";
+              proxy_set_header Host $host;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+              proxy_read_timeout 600s;
+              proxy_send_timeout 600s;
+          }
+          NGINX
+              ;;
+            4)
+              echo "ERROR: el bloque 'location ~ ^/' de $CONF tiene las llaves sin cerrar."
+              echo "No se tocó nada: revíselo a mano antes de volver a desplegar."; exit 1 ;;
+            5)
+              echo "ERROR: el 'location ~ ^/' de $CONF está escrito en una sola línea."
+              echo "No se tocó nada: ábralo en varias líneas y vuelva a desplegar."; exit 1 ;;
+            *)
+              echo "ERROR: no se pudo procesar $CONF (awk salió con $RC)."; exit 1 ;;
+          esac
+
+          if cmp -s "$ACTUAL" "$NUEVO"; then
+            echo "el vhost ya estaba como debe; no se toca ni se recarga nginx"
+          else
+            COPIA="$CONF.previo-$(date -u +%Y%m%d%H%M%S)"
+            $SUDO cp -p "$CONF" "$COPIA"
+            $SUDO cp "$NUEVO" "$CONF"
+            if $SUDO nginx -t; then
+              $SUDO systemctl reload nginx
+              echo "vhost actualizado y nginx recargado; copia previa en $COPIA"
+            else
+              # Nunca dejar el servidor con una configuración que no valida: el
+              # siguiente reinicio de nginx tumbaría TODOS los sitios de la casa.
+              $SUDO cp -p "$COPIA" "$CONF"
+              echo "ERROR: la configuración resultante no valida. Se restauró $COPIA y no se recargó nginx."
+              exit 1
+            fi
+          fi
+
+          # Que el archivo esté bien no basta: manda la configuración que nginx
+          # tiene cargada. Se lee de vuelta el bloque de este vhost tal y como lo
+          # ve el servidor ahora mismo.
+          $SUDO nginx -T 2>/dev/null | awk -v archivo="$CONF" '
+            $0 == "# configuration file " archivo ":" { dentro = 1; next }
+            /^# configuration file / { dentro = 0 }
+            dentro { print }
+          ' > "$VIGENTE"
+          grep -q 'client_max_body_size 0;' "$VIGENTE" || {
+            echo "ERROR: nginx no tiene cargado 'client_max_body_size 0' para $DOMAIN."
+            echo "El 413 seguiría cortando las subidas. Bloque vigente:"; cat "$VIGENTE"; exit 1; }
+          echo "correcto: $DOMAIN admite cargas sin tope antes de llegar a la API"
           REMOTO

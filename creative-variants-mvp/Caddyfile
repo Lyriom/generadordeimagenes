@@ -17,8 +17,13 @@
 	# ser grandes. Caddy no debe rechazar la petición antes de que la API pueda
 	# guardarla y devolver un error útil; el límite real se aplica por archivo en
 	# el backend. Este valor debe ser igual o mayor que CAMPAIGN_MAX_REQUEST_MB.
+	#
+	# 5GB y no 4GB porque las unidades no son las mismas a los dos lados: aquí
+	# GB son 10^9 bytes, y los 4096 MB del backend son 2^20 cada uno, o sea
+	# 4,29·10^9. Con 4GB justo, una carga entre ambas cifras moría en un 413 de
+	# Caddy en vez de recibir el mensaje explicativo de la API.
 	request_body {
-		max_size 4GB
+		max_size 5GB
 	}
 
 	# Contraseña de acceso, quitada a petición del equipo el 01/09/2026.
