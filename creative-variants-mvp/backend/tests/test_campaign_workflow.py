@@ -598,3 +598,47 @@ def test_se_pueden_corregir_varias_redes_sin_recrear_la_campana(client: TestClie
     assert updated.json()["brief"] is None
     assert updated.json()["template_candidates"] == []
     assert updated.json()["status"] == "ready_for_brief"
+
+
+def test_resubir_el_mismo_material_no_borra_lo_que_ya_estaba(client: TestClient):
+    """Contrato que la interfaz usa para no enseñar "0 fuentes" tras reintentar.
+
+    Cuando una carga se repite —porque el análisis falló, o porque un proxy de
+    delante devolvió 413 y la persona pulsó reintentar— el servidor reconoce los
+    archivos por su sha256 y responde con ``sources`` vacío y un aviso. Esa
+    respuesta NO es la lista de la campaña: el manifiesto sigue teniendo todo, y
+    quien pregunte por la campaña tiene que verlo.
+    """
+    profile, campaign = _client_and_campaign(client)
+    sources_url = (
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}/sources"
+    )
+    font = next(item for item in client_fonts.catalog() if item["id"] == "marcimex")["fonts"][0]
+    payload, _suffix = client_fonts.read_font("marcimex", font["id"])
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as zipped:
+        zipped.writestr("Marca-Regular.otf", payload)
+    envio = [
+        ("files", ("Tipografias.zip", archive.getvalue(), "application/zip")),
+        ("files", ("manual.txt", b"Manual de marca: tono cercano", "text/plain")),
+    ]
+
+    primera = client.post(sources_url, files=envio)
+    assert primera.status_code == 201, primera.text
+    assert len(primera.json()["sources"]) == 2
+
+    segunda = client.post(sources_url, files=envio)
+    assert segunda.status_code == 201, segunda.text
+    assert segunda.json()["sources"] == []
+    assert any("no se duplico" in aviso for aviso in segunda.json()["warnings"])
+
+    # El manifiesto es la única fuente de verdad, y conserva las dos fuentes.
+    detalle = client.get(
+        f"/clients/{profile['client_id']}/campaigns/{campaign['campaign_id']}"
+    )
+    assert detalle.status_code == 200, detalle.text
+    guardadas = detalle.json()["sources"]
+    assert len(guardadas) == 2
+    fuente_zip = next(item for item in guardadas if item["filename"] == "Tipografias.zip")
+    assert "typography" in fuente_zip["roles"]
+    assert fuente_zip["meta"]["font_assets"]

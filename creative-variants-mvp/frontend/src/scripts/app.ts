@@ -1730,7 +1730,11 @@ function bindUpload(): void {
     const campaignName = query<HTMLInputElement>("#campaign-name")?.value.trim() || "";
     const objective = query<HTMLInputElement>("#campaign-objective")?.value.trim() || "";
     const urls = socialUrlsFromField();
-    const hasEvidence = queuedFiles.length > 0 || Boolean(objective) || urls.length > 0;
+    // El material ya guardado en el servidor también es evidencia. Sin esto, un
+    // reintento tras una subida correcta pero un análisis fallido se quedaba con
+    // el botón apagado, aunque la campaña tuviera todo su material dentro.
+    const hasEvidence = queuedFiles.length > 0 || state.campaignSources.length > 0
+      || Boolean(objective) || urls.length > 0;
     button.disabled = !hasEvidence || !state.activeClientId || !campaignName;
     button.innerHTML = queuedFiles.length
       ? "Analizar " + String(queuedFiles.length) + (queuedFiles.length === 1 ? " fuente" : " fuentes") + " con IA <span>→</span>"
@@ -1827,12 +1831,20 @@ function bindUpload(): void {
     try {
       // Si una subida anterior fue rechazada por una puerta externa (413), la
       // campaña ya existe pero los File siguen en esta cola. Reutilizarla evita
-      // crear campañas vacías cada vez que se pulsa "reintentar".
-      const workspace = state.campaignWorkspace || await createCampaign(state.activeClientId, {
-        name: state.campaignBrief.name,
-        objective: state.campaignBrief.objective,
-        social_urls: socialUrls,
-      });
+      // crear campañas vacías cada vez que se pulsa "reintentar"; el formulario
+      // manda, porque entre un intento y otro se suele corregir el nombre, el
+      // objetivo o las redes, y esos cambios no pueden perderse al reintentar.
+      const workspace = state.campaignWorkspace
+        ? await updateCampaignContext(state.activeClientId, state.campaignWorkspace.campaign_id, {
+            name: state.campaignBrief.name,
+            objective: state.campaignBrief.objective,
+            social_urls: socialUrls,
+          })
+        : await createCampaign(state.activeClientId, {
+            name: state.campaignBrief.name,
+            objective: state.campaignBrief.objective,
+            social_urls: socialUrls,
+          });
       if (!workspace) {
         throw new Error("El servidor todavía no tiene el nuevo espacio de campañas. Actualiza el despliegue y vuelve a intentar.");
       }
@@ -1852,12 +1864,24 @@ function bindUpload(): void {
         if (!uploaded) {
           throw new Error("El servidor todavía no puede guardar documentos como fuentes de campaña.");
         }
-        state.campaignSources = uploaded.sources;
         uploaded.warnings.forEach((warning) => toast(warning, "info"));
-      } else {
-        state.campaignSources = [];
       }
+      // La respuesta de la subida solo trae lo que se añadió EN ESTA petición.
+      // Al reintentar, el servidor reconoce cada archivo por su sha256 y
+      // contesta con la lista vacía y un aviso de "ya estaba en la campaña":
+      // asignarla tal cual dejaba el contador en "0 fuentes" con todo el
+      // material intacto en el servidor. El manifiesto de la campaña es la
+      // única fuente de verdad, así que se relee después de subir.
+      const stored = await loadCampaignState(state.activeClientId, workspace.campaign_id);
+      state.campaignWorkspace = stored.workspace;
+      state.campaignSources = stored.sources;
       saveSession();
+      // Con el material ya en el manifiesto, la cola local ha cumplido. Vaciarla
+      // aquí —y no antes— evita volver a mandar 300 MB por el cable si lo que
+      // falla después es el análisis, sin perder la red de seguridad del 413:
+      // cuando la subida no llega, esta línea no se ejecuta y la cola sigue viva.
+      queuedFiles = [];
+      renderQueue();
       busyProgress(82, "Construyendo el brief y las plantillas sin productos…");
       const analysis = await generateCampaignBrief(state.activeClientId, workspace.campaign_id);
       if (!analysis) {
