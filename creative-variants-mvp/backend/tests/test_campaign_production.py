@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from psd_tools import PSDImage
 
 from app.models.campaign import (
     Campaign,
@@ -19,7 +20,7 @@ from app.models.campaign import (
     TemplateSlotProposal,
 )
 from app.models.project import utcnow
-from app.models.formats import DEFAULT_SAFE_AREA
+from app.models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS
 from app.services import campaign_creative
 from app.services.campaign_analysis import _canonical_candidate_payload, deterministic_candidates
 from app.services.campaign_creative import (
@@ -352,6 +353,28 @@ def test_matriz_produce_formatos_cantidad_zip_csv_y_psd(
     psd = client.get(psd_url)
     assert psd.status_code == 200
     assert psd.content.startswith(b"8BPS")
+    # Los tres entregables son el mismo arte: el PSD editable y el JPG tienen
+    # que medir exactamente lo que pidio la matriz, no solo abrir sin error.
+    documento = PSDImage.open(io.BytesIO(psd.content))
+    assert (documento.width, documento.height) == (first["width"], first["height"])
+    jpg_url = (
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/{batch['batch_id']}"
+        f"/files/{first['jpg']}"
+    )
+    jpg = client.get(jpg_url)
+    assert jpg.status_code == 200
+    with Image.open(io.BytesIO(jpg.content)) as imagen:
+        assert imagen.size == (first["width"], first["height"])
+
+    # Y todas las piezas de la tanda, no solo la primera.
+    for piece in batch["pieces"]:
+        descarga = client.get(
+            f"/clients/{client_id}/campaigns/{campaign_id}/production/"
+            f"{batch['batch_id']}/files/{piece['png']}"
+        )
+        assert descarga.status_code == 200
+        with Image.open(io.BytesIO(descarga.content)) as imagen:
+            assert imagen.size == (piece["width"], piece["height"]), piece["png"]
 
     archive = client.get("/clients" + batch["zip_url"].split("/clients", 1)[1])
     assert archive.status_code == 200
@@ -929,3 +952,57 @@ def test_combo_de_openai_sin_rango_explicito_acepta_varios_productos():
     assert candidate.supported_product_count.minimum == 2
     assert candidate.supported_product_count.maximum >= 2
     assert score_template(row, candidate) > float("-inf")
+
+
+def test_previsualizaciones_conservan_la_proporcion_y_el_area_segura_reales(
+    client: TestClient, artwork_png: bytes, monkeypatch: pytest.MonkeyPatch
+):
+    """Una previsualizacion es una ubicacion real reducida, no un rectangulo.
+
+    La proporcion debe ser la del preset del catalogo, y el area segura la suya:
+    en Stories la interfaz de Instagram cubre 14 % arriba y 20 % abajo, asi que
+    aprobar una plantilla con el margen generico del 3,5 % dejaba el titular o
+    el legal debajo del nombre de la cuenta.
+    """
+    client_id, campaign_id, candidates = _ready_campaign(client, artwork_png)
+    esperado = {
+        "portrait": "meta_feed_4_5",
+        "square": "meta_feed_square",
+        "story": "meta_stories",
+        "landscape": "meta_feed_landscape",
+    }
+    for aspect, preset_id in esperado.items():
+        preset = FORMAT_PRESETS[preset_id]
+        respuesta = client.get(
+            f"/clients/{client_id}/campaigns/{campaign_id}/template-candidates/"
+            f"{candidates[0]['candidate_id']}/preview?aspect={aspect}"
+        )
+        assert respuesta.status_code == 200, respuesta.text
+        with Image.open(io.BytesIO(respuesta.content)) as imagen:
+            ancho, alto = imagen.size
+        real = preset["width"] / preset["height"]
+        # Una diferencia de medio pixel al reducir es redondeo; una proporcion
+        # distinta significa que la previsualizacion enseña otro encuadre.
+        assert abs(ancho / alto - real) < 0.002, f"{aspect}: {ancho}x{alto} vs {real}"
+
+    # Y el area segura que se usa al dibujarlas es la del preset, no el margen
+    # generico: es lo que decide donde puede caer el copy en cada ubicacion.
+    usados: dict[tuple[int, int], dict[str, float]] = {}
+    original = campaign_creative._render
+
+    def espia(*args, **kwargs):
+        usados[(kwargs["width"], kwargs["height"])] = dict(kwargs["safe"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(campaign_creative, "_render", espia)
+    campaign = campaign_store.load_campaign(client_id, campaign_id)
+    campaign_creative.render_candidate_previews(
+        campaign, "Marca", campaign.template_candidates[:1]
+    )
+    assert usados[(540, 960)] == FORMAT_PRESETS["meta_stories"]["safe_area"]
+    assert usados[(720, 900)] == FORMAT_PRESETS["meta_feed_4_5"]["safe_area"]
+    assert usados[(720, 720)] == FORMAT_PRESETS["meta_feed_square"]["safe_area"]
+    assert usados[(960, 503)] == FORMAT_PRESETS["meta_feed_landscape"]["safe_area"]
+    # Stories reserva de verdad, no es el margen por defecto disfrazado.
+    assert usados[(540, 960)]["top"] > DEFAULT_SAFE_AREA["top"]
+    assert usados[(540, 960)]["bottom"] > DEFAULT_SAFE_AREA["bottom"]

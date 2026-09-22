@@ -1190,22 +1190,29 @@ def render_candidate_previews(
 ) -> None:
     folder = campaign_store.ensure_campaign_dirs(campaign.client_id, campaign.campaign_id) / "analysis" / "templates"
     folder.mkdir(parents=True, exist_ok=True)
+    # Cada previsualización es una ubicación real reducida, no un rectángulo
+    # decorativo: la medida conserva la proporción exacta del preset y el área
+    # segura sale del propio catálogo. Importa sobre todo en story: Stories
+    # reserva 14 % arriba y 20 % abajo para su interfaz, y con el margen
+    # genérico del 3,5 % se aprobaba una plantilla cuyo titular o legal quedaba
+    # justo debajo del nombre de la cuenta o del botón de enviar mensaje.
     formats = {
-        "portrait": (720, 900),
-        "square": (720, 720),
-        "story": (540, 960),
-        "landscape": (960, 503),
+        "portrait": (720, 900, "meta_feed_4_5"),
+        "square": (720, 720, "meta_feed_square"),
+        "story": (540, 960, "meta_stories"),
+        "landscape": (960, 503, "meta_feed_landscape"),
     }
     for index, candidate in enumerate(candidates, 1):
         candidate.preview_urls = {}
-        for aspect, (width, height) in formats.items():
+        for aspect, (width, height, preset_id) in formats.items():
+            safe = FORMAT_PRESETS.get(preset_id, {}).get("safe_area", DEFAULT_SAFE_AREA)
             image, layers = _render(
                 campaign,
                 brand_name,
                 candidate,
                 width=width,
                 height=height,
-                safe=dict(DEFAULT_SAFE_AREA),
+                safe={name: float(amount) for name, amount in safe.items()},
                 proposal=index,
             )
             target = folder / f"{candidate.candidate_id}-{aspect}.png"
