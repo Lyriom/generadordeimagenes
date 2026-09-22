@@ -163,7 +163,10 @@ def _catalogue_font_path(campaign: Campaign, *, bold: bool) -> str | None:
 def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
     font_candidates: list[tuple[str, Path]] = []
     for source in campaign.sources:
-        if source.kind.value == "font":
+        # Una cara de prueba estampa «DEMO» sobre el texto del arte. Se ignora
+        # aquí y no en la subida: el archivo sigue siendo evidencia válida del
+        # lenguaje de la marca, lo que no puede es dibujar el entregable.
+        if source.kind.value == "font" and not source.meta.get("font_trial"):
             try:
                 font_candidates.append((source.filename, campaign_store.campaign_path(
                     campaign.client_id, campaign.campaign_id, source.stored_path
@@ -172,6 +175,8 @@ def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
                 continue
         for asset in source.meta.get("font_assets", []):
             if not isinstance(asset, dict) or not isinstance(asset.get("path"), str):
+                continue
+            if asset.get("trial"):
                 continue
             try:
                 font_candidates.append((str(asset.get("name") or asset["path"]), campaign_store.campaign_path(
@@ -218,67 +223,15 @@ def _gradient(width: int, height: int, colours: list[tuple[int, int, int]], seed
     return Image.fromarray(array, "RGB").convert("RGBA")
 
 
-def _reference_texture(
-    campaign: Campaign,
-    candidate: TemplateCandidate,
-    width: int,
-    height: int,
-    seed: int,
-) -> Image.Image | None:
-    """Traslada la atmosfera de los artes fuente sin hornear su copy/producto.
-
-    La referencia se reduce y desenfoca de forma deliberada: conserva masas,
-    contraste y ritmo cromatico, pero no deja reutilizable un precio, titular o
-    producto que estuviera en el KV original.
-    """
-
-    preferred = set(candidate.source_ids)
-    sources = sorted(
-        campaign.sources,
-        key=lambda source: (source.source_id not in preferred, not source.preview_files),
-    )
-    paths: list[Path] = []
-    for source in sources:
-        role_names = {role.value for role in source.roles}
-        if not role_names.intersection(
-            {"background", "key_visual", "visual_reference", "final_art"}
-        ):
-            continue
-        for relative in _representative_paths(source.preview_files, 4):
-            try:
-                path = campaign_store.campaign_path(
-                    campaign.client_id, campaign.campaign_id, relative
-                )
-            except Exception:  # noqa: BLE001
-                continue
-            if path.exists():
-                paths.append(path)
-    if not paths:
-        return None
-    path = paths[seed % len(paths)]
-    try:
-        with Image.open(path) as image:
-            fitted = ImageOps.fit(
-                ImageOps.exif_transpose(image).convert("RGB"),
-                (width, height),
-                method=Image.Resampling.LANCZOS,
-            )
-        # Pixelar antes de desenfocar borra copy y objetos concretos incluso
-        # cuando la referencia era una pieza pequeña.
-        tiny = fitted.resize(
-            (max(36, width // 24), max(36, height // 24)),
-            Image.Resampling.BILINEAR,
-        )
-        texture = tiny.resize((width, height), Image.Resampling.BICUBIC)
-        texture = texture.filter(ImageFilter.GaussianBlur(max(8, min(width, height) // 34)))
-        texture = ImageEnhance.Color(texture).enhance(.72)
-        texture = ImageEnhance.Contrast(texture).enhance(.88).convert("RGBA")
-        texture.putalpha(72)
-        fitted.close()
-        tiny.close()
-        return texture
-    except Exception:  # noqa: BLE001 - una referencia rota no bloquea produccion
-        return None
+# El "ambiente de campaña" —una copia pixelada y desenfocada del arte fuente
+# puesta de fondo— se retiró el 2026-09-22. La intención era heredar el color
+# de la marca sin reutilizar su copy, pero en pantalla lo único que se veía era
+# una mancha borrosa detrás de cada pieza, y la queja era literal: "los fondos
+# no se reconstruyen, solo salen borrosos". Lo que hereda el color ahora es la
+# placa (el arte real con su texto borrado y el fondo reconstruido) y, cuando
+# no hay placa, la paleta del brief sobre un fondo limpio. Un degradado sobrio
+# en los colores de la marca se lee como una pieza diseñada; un anuncio ajeno
+# desenfocado se lee como un error.
 
 
 def _fixed_brand_background(
@@ -459,6 +412,70 @@ def _background(
 def _box(width: int, height: int, values: tuple[float, float, float, float]) -> tuple[int, int, int, int]:
     x, y, w, h = values
     return int(x * width), int(y * height), max(1, int(w * width)), max(1, int(h * height))
+
+
+#: Contraste mínimo texto/fondo. 3.0 es el umbral de la WCAG para texto grande;
+#: por debajo de eso el precio está escrito pero no se lee.
+MIN_CONTRAST = 3.0
+#: Tinta oscura de reserva. No negro puro: sobre un arte de marca canta.
+DARK_INK = (17, 19, 34)
+
+
+def _relative_luminance(rgb: tuple[int, int, int]) -> float:
+    canal = []
+    for valor in rgb[:3]:
+        c = valor / 255
+        canal.append(c / 12.92 if c <= .03928 else ((c + .055) / 1.055) ** 2.4)
+    return .2126 * canal[0] + .7152 * canal[1] + .0722 * canal[2]
+
+
+def _contrast(uno: tuple[int, int, int], otro: tuple[int, int, int]) -> float:
+    a, b = _relative_luminance(uno), _relative_luminance(otro)
+    claro, oscuro = max(a, b), min(a, b)
+    return (claro + .05) / (oscuro + .05)
+
+
+def _ink_for(
+    backdrop: Image.Image,
+    box: tuple[int, int, int, int],
+    preferred: str = "",
+) -> tuple[int, int, int, int]:
+    """Color de texto que de verdad se lee sobre lo que hay debajo.
+
+    El renderer escribía siempre en blanco. Con un degradado oscuro detrás eso
+    funcionaba; con la placa del arte real, no: el propio diseño trae pastillas
+    claras bajo el precio, y en blanco sobre blanco la pieza salía sin precio y
+    solo se notaba al abrir el PNG.
+
+    Se mide el fondo bajo la caja y se elige entre el color que el arte usaba
+    ahí, el blanco y una tinta oscura, el que más contraste dé. Medir es
+    barato; entregar cincuenta artes con el precio invisible, no.
+    """
+
+    izq, arriba, ancho, alto = box
+    recorte = backdrop.crop(
+        (
+            max(0, izq), max(0, arriba),
+            max(1, min(backdrop.width, izq + max(1, ancho))),
+            max(1, min(backdrop.height, arriba + max(1, alto))),
+        )
+    ).convert("RGB")
+    pequeno = recorte.resize((1, 1), Image.Resampling.BILINEAR)
+    fondo = pequeno.getpixel((0, 0))
+    recorte.close()
+    pequeno.close()
+
+    opciones: list[tuple[int, int, int]] = []
+    if preferred:
+        opciones.append(_colour(preferred, (255, 255, 255)))
+    opciones.extend([(255, 255, 255), DARK_INK])
+    # El primero que pase el umbral gana: así se respeta la decisión del arte
+    # original mientras sea legible, y solo se corrige cuando no lo es.
+    for tinta in opciones:
+        if _contrast(tinta, fondo) >= MIN_CONTRAST:
+            return (*tinta, 245)
+    mejor = max(opciones, key=lambda tinta: _contrast(tinta, fondo))
+    return (*mejor, 245)
 
 
 def _layout(
@@ -1188,16 +1205,6 @@ def _render(
     fixed_psd_layers = _fixed_psd_asset_layers(campaign, candidate, canvas)
     for index, (_name, layer) in enumerate(fixed_psd_layers, 1):
         layers.append((f"01.{index + 1:02d} · {_name}", layer))
-    texture = (
-        _reference_texture(campaign, candidate, width, height, proposal)
-        if blueprint.background_style == "campaign"
-        and not fixed_psd_layers
-        and branding_background is None
-        and plate is None
-        else None
-    )
-    if texture is not None:
-        layers.append(("01 · Atmósfera de campaña", texture))
     # Si el PSD ya trajo sus marcos/ornamentos fijos, esa identidad es más
     # valiosa que añadir tarjetas, líneas o brillos genéricos encima.
     decoration_style = "minimal" if (fixed_psd_layers or plate is not None) else blueprint.accent_style
@@ -1215,6 +1222,12 @@ def _render(
     if has_product_slot and show_product:
         layers.extend(_product_layers(canvas, regions["product"], products or []))
 
+    # Lo que ya está pintado, para poder medir el contraste de cada texto
+    # contra el fondo real —placa incluida— y no contra una suposición.
+    backdrop = Image.new("RGBA", canvas, (0, 0, 0, 255))
+    for _name, layer in layers:
+        backdrop.alpha_composite(layer)
+
     text_specs = [
         ("Titular", "headline", "titular", bold, True, 3, False, False),
         ("Subtitulo", "subheadline", "subtitulo", regular, False, 2, False, False),
@@ -1223,7 +1236,9 @@ def _render(
         ("Precio anterior", "previous_price", "precio_anterior", regular, False, 1, False, True),
         ("Cuota", "installment", "cuota", bold, True, 1, False, False),
         ("Descuento", "discount", "descuento", bold, True, 1, True, False),
-        ("CTA", "cta", "cta", bold, True, 1, True, False),
+        # Dos líneas: "Visita tu tienda más cercana" en una sola se cortaba
+        # a "Visita tu", que es peor que un badge de dos renglones.
+        ("CTA", "cta", "cta", bold, True, 2, True, False),
         ("Vigencia", "validity", "vigencia", regular, False, 1, False, False),
         ("Legal", "legal", "legal", regular, False, 3, False, False),
     ]
@@ -1231,7 +1246,13 @@ def _render(
         value = values.get(value_key, "").strip()
         if slot_key not in keys or not value:
             continue
-        colour = (255, 255, 255, 245)
+        # El color que el diseñador le dio a ese texto en el arte original. Si
+        # no se midió, blanco, como siempre. Importa donde el propio arte pone
+        # una pastilla clara bajo el precio: en blanco sobre blanco la pieza
+        # salía sin precio y solo se notaba al abrir el PNG.
+        colour = _ink_for(
+            backdrop, regions[value_key], blueprint.text_colors.get(value_key, "")
+        )
         layer = _text_layer(
             canvas, regions[value_key], value, font_path, colour=colour,
             bold=is_bold, max_lines=lines, align=blueprint.text_alignment,
@@ -1257,6 +1278,7 @@ def _render(
     if logo_path is None and not lleva_logo_propio:
         layers.append(("Marca", _text_layer(canvas, regions["logo"], brand_name, bold, max_lines=1)))
 
+    backdrop.close()
     final = Image.new("RGBA", canvas, (0, 0, 0, 0))
     for _name, layer in layers:
         final.alpha_composite(layer)

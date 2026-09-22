@@ -189,6 +189,10 @@ class TemplateBlueprint(BaseModel):
     density: Literal["airy", "balanced", "compact"] = "balanced"
     mirror_variants: bool = True
     placements: dict[str, dict[str, NormalizedPlacement]] = Field(default_factory=dict)
+    #: Color de cada texto tal como estaba en el arte original, por hueco. El
+    #: renderer pintaba siempre en blanco, y un precio en blanco sobre la
+    #: pastilla blanca del propio arte no se ve. Vacío = blanco, como antes.
+    text_colors: dict[str, str] = Field(default_factory=dict)
 
 
 class TemplateCandidate(BaseModel):

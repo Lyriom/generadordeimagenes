@@ -559,6 +559,23 @@ def generate_brief(
     )
     campaign.brief = brief
     campaign.template_candidates = candidates
+    # La placa se construye aqui, no al subir cada archivo: aqui se ve la
+    # campana entera y se puede elegir el arte maestro, en vez de pagar un OCR
+    # y una reconstruccion por cada foto de producto que alguien suelte.
+    try:
+        warnings.extend(
+            campaign_ingestion.ensure_template_plates(
+                client_id, campaign_id, campaign, brand.name
+            )
+        )
+    except Exception:  # noqa: BLE001 - sin placa la campana sigue produciendo
+        warnings.append(
+            "No se pudo preparar la placa de plantilla a partir del arte de la campana."
+        )
+    try:
+        campaign_ingestion.apply_plate_placements(campaign, candidates)
+    except Exception:  # noqa: BLE001 - la reticula sigue sirviendo
+        pass
     try:
         campaign_creative.render_candidate_previews(campaign, brand.name, candidates)
     except Exception:  # noqa: BLE001 - el brief sigue siendo util sin preview
@@ -799,6 +816,18 @@ def revise_candidate(
     )
     campaign.brief = brief
     campaign.template_candidates = candidates
+    try:
+        warnings.extend(
+            campaign_ingestion.ensure_template_plates(
+                client_id, campaign_id, campaign, brand.name
+            )
+        )
+    except Exception:  # noqa: BLE001 - sin placa la campana sigue produciendo
+        pass
+    try:
+        campaign_ingestion.apply_plate_placements(campaign, candidates)
+    except Exception:  # noqa: BLE001 - la reticula sigue sirviendo
+        pass
     try:
         campaign_creative.render_candidate_previews(campaign, brand.name, candidates)
     except Exception:  # noqa: BLE001

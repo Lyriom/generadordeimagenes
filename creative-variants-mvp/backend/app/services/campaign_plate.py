@@ -43,6 +43,13 @@ DILATE_PX = 6
 #: detectado es la escena, y quitarla no deja nada que reutilizar.
 PRODUCT_MIN_RATIO = .04
 PRODUCT_MAX_RATIO = .40
+#: Por debajo de esta confianza el OCR ya no esta leyendo texto: esta leyendo
+#: una textura. Borrar lo que cree ver ahi estropea el fondo.
+OCR_MIN_CONFIDENCE = .45
+#: Una caja de texto minuscula suele ser ruido de compresion; una que ocupa
+#: media pieza no es un titular, es que el OCR se comio el arte entero.
+TEXT_BOX_MIN_RATIO = .00012
+TEXT_BOX_MAX_RATIO = .30
 
 
 def _boxes_to_erase(
@@ -158,6 +165,186 @@ def _product_mask(
     return mask.filter(ImageFilter.MaxFilter(5)), ""
 
 
+def _normalizar(texto: str) -> str:
+    import unicodedata
+
+    plano = unicodedata.normalize("NFKD", texto or "")
+    return "".join(
+        char for char in plano.casefold()
+        if char.isalnum()
+    )
+
+
+def _es_marca(texto: str, marca: str) -> bool:
+    """¿Esta lectura del OCR es el wordmark de la marca?
+
+    Un logotipo escrito con letras lo lee el OCR como cualquier otro texto, y
+    borrarlo deja la plantilla sin la firma del cliente —justo lo contrario de
+    lo que se busca—. Se compara sin tildes ni mayúsculas, y solo con marcas de
+    tres letras o más: con "AJ" cualquier palabra daría positivo.
+    """
+
+    objetivo = _normalizar(marca)
+    if len(objetivo) < 3:
+        return False
+    leido = _normalizar(texto)
+    if not leido:
+        return False
+    return objetivo in leido or leido in objetivo
+
+
+def text_boxes(
+    artwork: Image.Image, provider=None, *, brand_name: str = ""
+) -> tuple[list[tuple[int, int, int, int]], list[dict[str, object]], str]:
+    """Cajas del texto impreso en el arte, leídas con OCR.
+
+    Un KV que llega como JPG, PDF o AI no trae capas: la única forma de saber
+    qué es contenido variable y qué es identidad de marca es leer dónde hay
+    texto. El wordmark de la marca se reconoce y **no** entra en las cajas a
+    borrar: es identidad, no contenido de la pieza.
+
+    Devuelve ``(cajas, lecturas, motivo)``; con ``motivo`` lleno no se llegó a
+    leer nada y quien llame debe abstenerse, no adivinar.
+    """
+
+    import tempfile
+
+    if provider is None:
+        from ..providers import get_ocr_provider
+
+        provider = get_ocr_provider()
+    if not provider.available():
+        return [], [], (
+            "el OCR no está disponible: sin saber dónde está el texto, borrarlo "
+            "sería adivinar."
+        )
+    ancho, alto = artwork.size
+    area_total = max(1, ancho * alto)
+    with tempfile.TemporaryDirectory() as carpeta:
+        ruta = Path(carpeta) / "arte.png"
+        artwork.convert("RGB").save(ruta)
+        try:
+            lectura = provider.read(str(ruta))
+        except Exception as exc:  # noqa: BLE001 - el arte sigue sirviendo sin placa
+            return [], [], f"el OCR falló ({type(exc).__name__})."
+    cajas: list[tuple[int, int, int, int]] = []
+    leidas: list[dict[str, object]] = []
+    for region in lectura.regions:
+        if float(getattr(region, "confidence", 0.0)) < OCR_MIN_CONFIDENCE:
+            continue
+        izq, arriba = max(0, int(region.x)), max(0, int(region.y))
+        der = min(ancho, izq + max(0, int(region.width)))
+        abajo = min(alto, arriba + max(0, int(region.height)))
+        if der <= izq or abajo <= arriba:
+            continue
+        proporcion = ((der - izq) * (abajo - arriba)) / area_total
+        if not TEXT_BOX_MIN_RATIO <= proporcion <= TEXT_BOX_MAX_RATIO:
+            continue
+        texto = str(getattr(region, "text", ""))[:200]
+        marca = _es_marca(texto, brand_name)
+        if not marca:
+            cajas.append((izq, arriba, der, abajo))
+        leidas.append({
+            "text": texto,
+            "bbox": [izq, arriba, der, abajo],
+            "confidence": round(float(getattr(region, "confidence", 0.0)), 3),
+            "role": "brand" if marca else "content",
+            # El color con el que estaba escrito. Sin esto el renderer pinta
+            # todo en blanco y un precio sobre una pastilla blanca del arte
+            # desaparece: se paga la pieza y no se ve el precio.
+            "color": str(getattr(region, "color", "") or "")[:9],
+        })
+    if not cajas:
+        return [], [], ""
+    return cajas, leidas, ""
+
+
+def build_plate_from_artwork(
+    artwork: Image.Image,
+    target: Path,
+    *,
+    preferred_provider: str | None = None,
+    ocr_provider=None,
+    segmentation_provider=None,
+    brand_name: str = "",
+) -> tuple[Path, str, list[str], list[dict[str, object]]] | None:
+    """Placa a partir de un arte plano: JPG, página de PDF o AI aplanado.
+
+    Es el mismo resultado que ``build_plate`` da con un PSD por capas, pero sin
+    capas: el texto lo encuentra el OCR y el producto la segmentación. Importa
+    porque casi ningún KV llega en PSD, y sin esto la plantilla se quedaba con
+    una copia desenfocada del anuncio anterior de fondo —que es exactamente lo
+    que no comunica la marca.
+
+    Devuelve también las lecturas del OCR: saber dónde puso el diseñador el
+    titular y el precio vale tanto como el fondo limpio.
+    """
+
+    warnings: list[str] = []
+    cajas, leidas, motivo = text_boxes(artwork, ocr_provider, brand_name=brand_name)
+    if motivo:
+        # Sin OCR no hay placa. Es deliberado: el mal resultado conocido es
+        # hornear el precio del anuncio viejo en todas las piezas nuevas.
+        logger.info("Sin placa desde arte plano: %s", motivo)
+        return None
+
+    canvas = artwork.size
+    mask = _mask(canvas, cajas) if cajas else None
+    if mask is None and cajas:
+        # El texto ocupa mas de lo que se puede reconstruir: no es un KV con
+        # zonas variables, es un cartel de puro texto.
+        return None
+    if mask is None:
+        mask = Image.new("L", canvas, 0)
+        warnings.append(
+            "El OCR no encontró texto impreso en este arte: la placa conserva "
+            "la composición tal cual."
+        )
+
+    silueta, motivo_producto = _producto_de_la_escena(
+        artwork, segmentation_provider
+    )
+    if silueta is not None:
+        combinada = Image.new("L", canvas, 0)
+        combinada.paste(mask, (0, 0))
+        combinada.paste(silueta, (0, 0), silueta)
+        cubierto = sum(1 for value in combinada.getdata() if value > 127)
+        if cubierto <= canvas[0] * canvas[1] * MAX_ERASE_RATIO:
+            mask.close()
+            mask = combinada
+        else:
+            combinada.close()
+            motivo_producto = (
+                "quitar el producto obligaría a reconstruir medio arte; se deja la escena."
+            )
+            silueta = None
+        silueta and silueta.close()
+    if silueta is None and motivo_producto:
+        warnings.append(
+            "La plantilla conserva el producto de la fotografía original porque "
+            + motivo_producto
+        )
+
+    hecho = _compose(artwork, mask, target, warnings, preferred_provider)
+    if hecho is None:
+        return None
+    ruta, motor, avisos = hecho
+    return ruta, motor, avisos, leidas
+
+
+def _producto_de_la_escena(artwork: Image.Image, provider=None):
+    """``_product_mask`` con el proveedor resuelto y sin dejar escapar fallos."""
+
+    try:
+        if provider is None:
+            from ..providers import get_segmentation_provider
+
+            provider = get_segmentation_provider()
+        return _product_mask(artwork, provider)
+    except Exception as exc:  # noqa: BLE001 - la placa vale igual sin recorte
+        return None, f"la segmentación falló ({type(exc).__name__})."
+
+
 def build_plate(
     artwork: Image.Image,
     manifest: list[dict],
@@ -211,6 +398,19 @@ def build_plate(
             + motivo
         )
 
+    return _compose(artwork, mask, target, warnings, preferred_provider)
+
+
+def _compose(
+    artwork: Image.Image,
+    mask: Image.Image,
+    target: Path,
+    warnings: list[str],
+    preferred_provider: str | None,
+) -> tuple[Path, str, list[str]] | None:
+    """Borra la máscara del arte y reconstruye lo que había debajo."""
+
+    canvas = artwork.size
     target.parent.mkdir(parents=True, exist_ok=True)
     base_path = target.with_name(target.stem + "-base.png")
     mask_path = target.with_name(target.stem + "-mask.png")
@@ -257,4 +457,4 @@ def build_plate(
     return target, motor, warnings
 
 
-__all__ = ["build_plate"]
+__all__ = ["build_plate", "build_plate_from_artwork", "text_boxes"]

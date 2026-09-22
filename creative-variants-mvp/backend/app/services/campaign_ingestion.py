@@ -7,6 +7,7 @@ KV activos.
 from __future__ import annotations
 
 import io
+import logging
 import math
 import posixpath
 import re
@@ -26,6 +27,8 @@ from ..models.campaign import (
 )
 from . import campaign_plate, campaign_store
 from .security import FileValidationError
+
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_CAMPAIGN_EXTENSIONS = {
@@ -409,7 +412,12 @@ def _extract_font_archive(
                 target.write_bytes(payload)
                 relative = _relative(client_id, campaign_id, target)
                 source.asset_files.append(relative)
-                accepted.append({"name": Path(member.filename).name[:240], "path": relative})
+                prueba = font_trial_name(target)
+                accepted.append({
+                    "name": Path(member.filename).name[:240],
+                    "path": relative,
+                    "trial": prueba,
+                })
             except Exception:  # noqa: BLE001 - un archivo basura no descarta toda la familia
                 skipped += 1
     if not accepted:
@@ -419,6 +427,37 @@ def _extract_font_archive(
     source.extracted_text = _clean_text("\n".join(item["name"] for item in accepted))
     if skipped:
         source.warnings.append(f"Se ignoraron {skipped} archivos que no eran tipografías válidas.")
+    de_prueba = [item["name"] for item in accepted if item.get("trial")]
+    if de_prueba:
+        source.warnings.append(
+            "Versión de prueba: " + ", ".join(de_prueba[:4])
+            + ". No se usa para componer los artes —esas caras estampan «DEMO» "
+            "sobre el texto—. Sube la licenciada o se usará la del cliente."
+        )
+
+
+#: Palabras con las que las fundiciones marcan una licencia de prueba. Muchas
+#: de esas caras sustituyen glifos por la palabra DEMO o TRIAL, y el arte sale
+#: firmado con ella sin que nadie haya escrito eso en ninguna casilla.
+_TRIAL_TOKENS = ("demo", "trial", "personal use", "personaluse", "unlicensed", "prueba")
+
+
+def font_trial_name(path: Path) -> str:
+    """Nombre de la tipografía si es una versión de prueba; "" si es de uso libre.
+
+    No se mira el nombre del archivo —se renombra en un segundo— sino la tabla
+    de nombres que lleva la propia fuente, que es la que la fundición firma.
+    """
+
+    try:
+        from PIL import ImageFont
+
+        familia, estilo = ImageFont.truetype(str(path), 24).getname()
+    except Exception:  # noqa: BLE001 - una fuente ilegible ya falla en su sitio
+        return ""
+    completo = f"{familia or ''} {estilo or ''}".strip()
+    plano = completo.casefold()
+    return completo if any(token in plano for token in _TRIAL_TOKENS) else ""
 
 
 def _xml_text(payload: bytes) -> str:
@@ -1219,6 +1258,11 @@ def _extract_psd(
                     "size": [frame_size[0], frame_size[1]],
                     "engine": motor,
                 })
+                if orden == 1:
+                    # El PSD no necesita OCR: ya sabe dónde está cada texto y
+                    # qué dice. Se reutiliza el mismo clasificador que el arte
+                    # plano para que las dos vías compongan igual de bien.
+                    _plate_layout_from_manifest(source, manifest, frame_box, frame_size)
                 source.warnings.extend(avisos[:1])
             except Exception:  # noqa: BLE001 - una placa fallida no anula el PSD
                 continue
@@ -1264,6 +1308,14 @@ def _inspect_font(path: Path, source: CampaignSource) -> None:
     except Exception as exc:  # noqa: BLE001
         raise FileValidationError("La tipografia no es valida.") from exc
     source.page_count = 0
+    prueba = font_trial_name(path)
+    if prueba:
+        source.meta["font_trial"] = prueba
+        source.warnings.append(
+            f"«{prueba}» es una versión de prueba. No se usa para componer los "
+            "artes: esas caras estampan «DEMO» sobre el texto. Sube la "
+            "licenciada o se usará la tipografía del cliente."
+        )
 
 
 def _extract_text(path: Path, source: CampaignSource) -> None:
@@ -1272,6 +1324,250 @@ def _extract_text(path: Path, source: CampaignSource) -> None:
         raise FileValidationError("El documento de texto contiene datos binarios.")
     source.extracted_text = _clean_text(payload.decode("utf-8", errors="replace"))
     source.page_count = 1
+
+
+#: Cuantas placas se construyen por campaña. Cada una cuesta una llamada de
+#: OCR y otra de reconstrucción: con dos artes maestros ya hay de dónde elegir
+#: por proporción, y una carpeta de treinta fotos no se convierte en factura.
+FLAT_PLATE_LIMIT = 2
+#: Lado largo de la placa. Por encima de esto solo se paga resolución que el
+#: renderer va a reducir a 1080 px de todas formas.
+FLAT_PLATE_MAX_SIDE = 1600
+_PLATE_ROLE_RANK = {
+    CampaignSourceRole.KEY_VISUAL: 0,
+    CampaignSourceRole.FINAL_ART: 0,
+    CampaignSourceRole.BACKGROUND: 1,
+    CampaignSourceRole.VISUAL_REFERENCE: 2,
+}
+_PLATE_KINDS = {
+    CampaignSourceKind.IMAGE,
+    CampaignSourceKind.LAYERED_DESIGN,
+    CampaignSourceKind.PDF,
+    CampaignSourceKind.PRESENTATION,
+}
+
+
+def _plate_layout_from_manifest(
+    source: CampaignSource,
+    manifest: list[dict],
+    frame_box: tuple[int, int, int, int],
+    frame_size: tuple[int, int],
+) -> None:
+    """Posiciones y tintas de una placa de PSD, desde sus capas de texto.
+
+    Un PSD trae lo que el OCR tiene que adivinar: el texto exacto y su caja.
+    Pasarlo por el mismo clasificador evita dos composiciones distintas según
+    el formato en que llegó el arte.
+    """
+
+    from . import campaign_layout_from_art as desde_arte
+    from ..models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS
+
+    lecturas: list[dict[str, object]] = []
+    for item in manifest:
+        if str(item.get("kind", "")) != "type":
+            continue
+        texto = str(item.get("text", "") or "").strip()
+        bbox = item.get("bbox")
+        if not texto or not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        x0, y0, x1, y1 = (int(valor) for valor in bbox)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        lecturas.append({
+            "text": texto[:200],
+            "bbox": [x0 - frame_box[0], y0 - frame_box[1], x1 - frame_box[0], y1 - frame_box[1]],
+            "confidence": 1.0,
+            "role": "content",
+        })
+    if not lecturas:
+        return
+    familia = desde_arte.aspect_key(frame_size)
+    preset = {
+        "portrait": "meta_feed_4_5", "square": "meta_feed_square",
+        "story": "meta_stories", "landscape": "meta_feed_landscape",
+    }[familia]
+    segura = FORMAT_PRESETS.get(preset, {}).get("safe_area", DEFAULT_SAFE_AREA)
+    posiciones = desde_arte.placements(lecturas, frame_size, segura)
+    if posiciones:
+        source.meta["plate_placements"] = {
+            familia: {
+                hueco: caja.model_dump(mode="json") for hueco, caja in posiciones.items()
+            }
+        }
+        source.meta["plate_text_reads"] = lecturas[:60]
+
+
+def _plate_artwork_path(
+    client_id: str, campaign_id: str, source: CampaignSource
+) -> Path | None:
+    """El archivo del que sacar la placa: el original si es imagen, si no su vista."""
+
+    candidatas: list[str] = []
+    if source.kind == CampaignSourceKind.IMAGE:
+        candidatas.append(source.stored_path)
+    candidatas.extend(source.preview_files[:1])
+    for relativa in candidatas:
+        try:
+            path = campaign_store.campaign_path(client_id, campaign_id, relativa)
+        except Exception:  # noqa: BLE001
+            continue
+        if path.is_file():
+            return path
+    return None
+
+
+def ensure_template_plates(
+    client_id: str, campaign_id: str, campaign, brand_name: str = ""
+) -> list[str]:
+    """Garantiza que la campaña tenga una placa real de la que partir.
+
+    El PSD por capas la produce en la ingesta, pero casi ningún KV llega en
+    PSD: llega como JPG, como página de PDF o como un AI aplanado. Sin placa el
+    renderer caía a una copia desenfocada del anuncio anterior —el fondo
+    borroso— y dibujaba su propia retícula encima. Aquí se construye igual, con
+    OCR para saber qué texto borrar y el motor de reconstrucción para rellenar.
+
+    Devuelve avisos. Nunca lanza: una campaña sin placa sigue produciendo.
+    """
+
+    avisos: list[str] = []
+    if any(source.meta.get("template_plates") for source in campaign.sources):
+        return avisos
+
+    ordenadas: list[tuple[int, int, CampaignSource]] = []
+    for source in campaign.sources:
+        if source.kind not in _PLATE_KINDS:
+            continue
+        rango = min(
+            (_PLATE_ROLE_RANK[role] for role in source.roles if role in _PLATE_ROLE_RANK),
+            default=None,
+        )
+        if rango is None:
+            continue
+        # Un arte de campaña es cuadrado o vertical; una lámina apaisada de
+        # 16:9 suele ser una presentación, no el KV.
+        proporcion = (source.width / source.height) if source.height else 1.0
+        forma = 0 if 0.5 <= proporcion <= 1.6 else 1
+        ordenadas.append((rango, forma, source))
+    ordenadas.sort(key=lambda item: (item[0], item[1]))
+
+    for _rango, _forma, source in ordenadas[:FLAT_PLATE_LIMIT]:
+        origen = _plate_artwork_path(client_id, campaign_id, source)
+        if origen is None:
+            continue
+        try:
+            with Image.open(origen) as probe:
+                if probe.width * probe.height > settings.campaign_max_source_pixels:
+                    continue
+                probe.verify()
+            with Image.open(origen) as imagen:
+                arte = ImageOps.exif_transpose(imagen).convert("RGB")
+                arte.thumbnail(
+                    (FLAT_PLATE_MAX_SIDE, FLAT_PLATE_MAX_SIDE), Image.Resampling.LANCZOS
+                )
+                medida = arte.size
+                destino = (
+                    _source_folder(client_id, campaign_id, source)
+                    / "assets" / "plate-01.png"
+                )
+                hecho = campaign_plate.build_plate_from_artwork(
+                    arte, destino, brand_name=brand_name
+                )
+                arte.close()
+        except Exception as exc:  # noqa: BLE001 - la campaña sigue sin placa
+            logger.info("No se pudo construir la placa de %s (%s)", source.filename, exc)
+            continue
+        if hecho is None:
+            continue
+        ruta, motor, propios, leidas = hecho
+        relativa = _relative(client_id, campaign_id, ruta)
+        if relativa not in source.asset_files:
+            source.asset_files.append(relativa)
+        source.meta["template_plates"] = [{
+            "name": source.filename,
+            "path": relativa,
+            "size": [medida[0], medida[1]],
+            "engine": motor,
+            "origin": "ocr",
+        }]
+        if leidas:
+            source.meta["plate_text_reads"] = leidas[:60]
+            # Donde el diseñador puso cada cosa. Vale tanto como el fondo
+            # limpio: sin esto la plantilla vuelve a ser una retícula genérica
+            # encima del arte de la marca.
+            from . import campaign_layout_from_art as desde_arte
+            from ..models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS
+
+            familia = desde_arte.aspect_key(medida)
+            preset = {
+                "portrait": "meta_feed_4_5", "square": "meta_feed_square",
+                "story": "meta_stories", "landscape": "meta_feed_landscape",
+            }[familia]
+            segura = FORMAT_PRESETS.get(preset, {}).get("safe_area", DEFAULT_SAFE_AREA)
+            posiciones = desde_arte.placements(leidas, medida, segura)
+            if posiciones:
+                source.meta["plate_placements"] = {
+                    familia: {
+                        hueco: caja.model_dump(mode="json")
+                        for hueco, caja in posiciones.items()
+                    }
+                }
+            tintas = desde_arte.colores(leidas, medida)
+            if tintas:
+                source.meta["plate_text_colors"] = tintas
+        avisos.extend(propios[:1])
+        break
+    return avisos
+
+
+def apply_plate_placements(campaign, candidates) -> int:
+    """Traslada a las candidatas las posiciones medidas sobre el arte real.
+
+    Solo se tocan los huecos que el arte declaró, y solo en la familia de
+    formato de la que salieron: adivinar un story a partir de un feed sería
+    inventar. El resto de las posiciones sigue viniendo de la retícula, que es
+    un resultado aceptable, no una mentira.
+
+    No pisa a una candidata que ya traiga posiciones propias —una corrección
+    humana o un sistema aprobado antes manda sobre la deducción automática—.
+    """
+
+    from ..models.campaign import NormalizedPlacement
+
+    medidas: dict[str, dict] = {}
+    tintas: dict[str, str] = {}
+    for source in campaign.sources:
+        crudo = source.meta.get("plate_placements")
+        if isinstance(crudo, dict):
+            for familia, huecos in crudo.items():
+                if isinstance(huecos, dict):
+                    medidas.setdefault(str(familia), huecos)
+        propias = source.meta.get("plate_text_colors")
+        if isinstance(propias, dict):
+            for hueco, color in propias.items():
+                tintas.setdefault(str(hueco), str(color))
+    if not medidas:
+        return 0
+
+    tocadas = 0
+    for candidate in candidates:
+        for familia, huecos in medidas.items():
+            propias = candidate.blueprint.placements.get(familia) or {}
+            if propias:
+                continue
+            convertidas: dict[str, NormalizedPlacement] = {}
+            for hueco, caja in huecos.items():
+                try:
+                    convertidas[str(hueco)] = NormalizedPlacement.model_validate(caja)
+                except Exception:  # noqa: BLE001 - una caja rota no anula el resto
+                    continue
+            if convertidas:
+                candidate.blueprint.placements[familia] = convertidas
+                tocadas += 1
+        if tintas and not candidate.blueprint.text_colors:
+            candidate.blueprint.text_colors = dict(tintas)
+    return tocadas
 
 
 def classify_roles(source: CampaignSource) -> list[CampaignSourceRole]:
