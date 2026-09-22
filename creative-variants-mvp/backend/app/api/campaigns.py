@@ -20,6 +20,7 @@ from ..models.campaign import (
     CampaignBrief,
     CampaignBriefPatchRequest,
     CampaignCreateRequest,
+    CampaignDeleteResponse,
     CampaignSource,
     CampaignSourceRoleUpdateRequest,
     CampaignUpdateRequest,
@@ -261,6 +262,56 @@ def update_campaign(
         campaign.status = "ready_for_brief"
     campaign_store.save_campaign(campaign)
     return campaign
+
+
+@router.delete(
+    "/{client_id}/campaigns/{campaign_id}", response_model=CampaignDeleteResponse
+)
+def delete_campaign(client_id: str, campaign_id: str) -> CampaignDeleteResponse:
+    """Borra una campana y todo lo que cuelga de ella. No hay papelera.
+
+    El cliente y sus reglas aprendidas se quedan: esa memoria es el producto.
+    Lo que sí se va con la campana es su plantilla aprobada, porque su vista
+    previa y el arte del que salió viven dentro de la carpeta que se borra, y
+    dejarla contaría plantillas que ya nadie puede abrir.
+    """
+
+    campaign = _campaign_or_404(client_id, campaign_id)
+    active_jobs = campaign_store.list_production_jobs(
+        client_id, campaign_id, states={"PENDING", "STARTED", "PROGRESS"}
+    )
+    if active_jobs:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Hay una produccion en curso en esta campana. Espera a que termine "
+            "antes de borrarla.",
+        )
+    batches = len(campaign_store.list_batches(client_id, campaign_id))
+    sources = len(campaign.sources)
+
+    knowledge = campaign_store.load_knowledge(client_id)
+    restante = [
+        item for item in knowledge.approved_candidates if item.campaign_id != campaign_id
+    ]
+    retiradas = len(knowledge.approved_candidates) - len(restante)
+
+    if not campaign_store.delete_campaign(client_id, campaign_id):
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "No existe esa campana dentro del cliente."
+        )
+    # Solo despues de que la carpeta se haya ido: si el borrado falla, la
+    # memoria del cliente no se queda mutilada apuntando a una campana viva.
+    if retiradas:
+        knowledge.approved_candidates = restante
+        campaign_store.save_knowledge(knowledge)
+    return CampaignDeleteResponse(
+        deleted=True,
+        campaign_id=campaign_id,
+        name=campaign.name,
+        sources_deleted=sources,
+        batches_deleted=batches,
+        approved_templates_removed=retiradas,
+    )
 
 
 async def _store_upload(
@@ -919,22 +970,41 @@ def _matrix_preview_plans(
             for field in fields
         ]
         description = ", ".join(content) or "el contenido de la fila"
+        sugerida = _auto_template_for_row(row, approved)
+        sin_hueco = _fields_without_slot(fields, approved)
         if not approved:
             plan_status = "needs_approval"
             message = (
                 "Aún no hay una plantilla aprobada. Revisa y aprueba una propuesta antes de producir."
             )
+        elif row.plantilla and sugerida is not None:
+            # El único problema es la plantilla forzada: decir cuál sirve evita
+            # mandar a alguien a probar una por una, o a buscar una alternativa
+            # que puede no existir.
+            plan_status = "incompatible"
+            message = (
+                f"La plantilla «{row.plantilla}» no admite {description}, pero "
+                f"«{sugerida.name}» sí. Déjala en automática y se usará esa."
+            )
+        elif sin_hueco:
+            etiquetas = ", ".join(_MATRIX_FIELD_LABELS[field] for field in sin_hueco)
+            plan_status = "incompatible"
+            message = (
+                f"Ninguna plantilla aprobada tiene hueco para {etiquetas}. "
+                "Vacía esas casillas o aprueba una plantilla que las incluya: "
+                "escribirlas sin sitio dejaría el arte incompleto."
+            )
         elif row.plantilla:
             plan_status = "incompatible"
             message = (
-                f"La plantilla solicitada «{row.plantilla}» no admite {description}. "
-                "Elige otra plantilla aprobada o corrige la fila."
+                f"La plantilla «{row.plantilla}» no admite esta combinación "
+                f"({description}) y ninguna otra aprobada la admite entera."
             )
         else:
             plan_status = "incompatible"
             message = (
-                f"Ninguna plantilla aprobada admite {description}. "
-                "Aprueba una propuesta compatible o ajusta la matriz."
+                f"Ninguna plantilla aprobada admite {description} a la vez. "
+                "Aprueba una propuesta compatible o divide la fila."
             )
         plans.append(
             {
@@ -945,9 +1015,50 @@ def _matrix_preview_plans(
                 "required_fields": fields,
                 "ai_fillable_fields": [],
                 "message": message,
+                "suggested_template": (
+                    {"candidate_id": sugerida.candidate_id, "name": sugerida.name}
+                    if sugerida is not None
+                    else None
+                ),
+                "blocking_fields": sin_hueco,
             }
         )
     return plans
+
+
+def _auto_template_for_row(row: production_matrix.MatrixRow, approved: list) -> object | None:
+    """La plantilla que se elegiría si la fila no forzara ninguna."""
+
+    if not row.plantilla:
+        return None
+    libre = row.model_copy(update={"plantilla": ""})
+    return production_matrix.select_template(libre, approved)
+
+
+def _fields_without_slot(fields: list[str], approved: list) -> list[str]:
+    """Campos escritos en la fila que ninguna plantilla aprobada sabe colocar.
+
+    Es la diferencia entre «prueba otra plantilla» y «esto no cabe en ninguna».
+    Lo segundo solo se arregla vaciando la casilla o aprobando otra propuesta,
+    y decirlo por su nombre ahorra el recorrido a ciegas por el desplegable.
+    """
+
+    # El mismo lector de slots que usa el selector: si divergen, la UI diría
+    # que un campo no cabe en una plantilla que sí lo acepta.
+    huecos = {
+        production_matrix._slot_id(slot)
+        for candidate in approved
+        for slot in getattr(candidate, "slots", []) or []
+    }
+    huecos.discard("")
+    sin_sitio: list[str] = []
+    for field in fields:
+        if field == "producto":
+            continue
+        alias = {field, "precio"} if field == "precio" else {field}
+        if not alias & huecos:
+            sin_sitio.append(field)
+    return sin_sitio
 
 
 def _save_matrix_draft(
@@ -1364,6 +1475,129 @@ async def preview_production_matrix(
         "matrix_draft_id": draft_id,
         "plans": _matrix_preview_plans(campaign, rows),
     }
+
+
+def _row_preview_path(campaign: Campaign, row_number: int) -> Path:
+    carpeta = campaign_store.production_root(campaign.client_id, campaign.campaign_id) / "row-previews"
+    carpeta.mkdir(parents=True, exist_ok=True)
+    return carpeta / f"fila-{max(0, min(9999, row_number)):04d}.jpg"
+
+
+@router.post("/{client_id}/campaigns/{campaign_id}/production/row-preview")
+async def preview_production_row(
+    client_id: str,
+    campaign_id: str,
+    matrix: UploadFile = File(...),
+    row_number: int = Form(...),
+    piece_format: str = Form(""),
+) -> dict[str, object]:
+    """Compone una sola fila para verla antes de lanzar la tanda.
+
+    Hasta ahora la unica forma de ver como queda un arte era producir la tanda
+    entera y abrir el ZIP. Esto usa el mismo renderer y las fotos ya cargadas
+    en la campana, a resolucion de pantalla, y dice en voz alta lo que la vista
+    no puede prometer: que el copy que la IA rellenara al producir aqui sale
+    vacio.
+    """
+
+    campaign = _campaign_or_404(client_id, campaign_id)
+    brand = _brand_or_404(client_id)
+    matrix_name, payload = await _matrix_payload(matrix)
+    try:
+        rows = production_matrix.parse_matrix(payload, matrix_name)
+    except production_matrix.MatrixParseError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    row = next((item for item in rows if item.row_number == row_number), None)
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, f"La matriz no trae una fila {row_number}."
+        )
+
+    approved = [item for item in campaign.template_candidates if item.approved]
+    if not approved:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Aprueba una plantilla antes de previsualizar: sin ella no hay composicion que mostrar.",
+        )
+    warnings: list[str] = []
+    candidate = production_matrix.select_template(row, approved)
+    if candidate is None and row.plantilla:
+        # La fila fuerza una plantilla que no le sirve. En vez de negarse, se
+        # ensena la que se usaria en automatica y se dice por que.
+        candidate = _auto_template_for_row(row, approved)
+        if candidate is not None:
+            warnings.append(
+                f"«{row.plantilla}» no admite esta fila; la vista usa «{candidate.name}», "
+                "que es la que se aplicaria dejando la plantilla en automatica."
+            )
+    if candidate is None:
+        plan = next(iter(_matrix_preview_plans(campaign, [row])), {})
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            str(plan.get("message") or "Ninguna plantilla aprobada admite esta fila."),
+        )
+
+    # Todas las fotos de la campana: la vista previa no debe obligar a marcar
+    # nada, solo a mirar. Si la que pide la fila no esta, se compone el arte
+    # sin producto y se avisa; ese hueco tambien es informacion util.
+    todas = _stored_product_assets(
+        campaign, [asset.asset_id for asset in campaign.production_assets]
+    )
+    esperadas = production_matrix.product_count(row)
+    product_paths = campaign_creative.match_product_paths(row, todas) if esperadas else []
+    if esperadas and len(product_paths) < esperadas:
+        warnings.append(
+            f"Faltan {esperadas - len(product_paths)} de {esperadas} fotos de esta fila: "
+            "la vista deja el hueco del producto vacio."
+        )
+    faltan_copy = sorted(
+        production_matrix.ai_fillable_fields(candidate)
+        & {
+            field
+            for field in ("titular", "subtitulo", "cta")
+            if getattr(row, field, None) in (None, "")
+        }
+    )
+    if faltan_copy:
+        warnings.append(
+            "Aqui se ve vacio " + ", ".join(faltan_copy)
+            + ": la IA lo redacta al producir, no en la vista previa."
+        )
+
+    target = _row_preview_path(campaign, row.row_number)
+    try:
+        format_id, width, height = await run_in_threadpool(
+            campaign_creative.render_row_preview,
+            campaign, brand.name, row, candidate, product_paths, target,
+            format_token=piece_format,
+        )
+    except campaign_creative.CampaignProductionError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return {
+        "row_number": row.row_number,
+        "template": {"candidate_id": candidate.candidate_id, "name": candidate.name},
+        "format": format_id,
+        "width": width,
+        "height": height,
+        "preview_url": (
+            f"/clients/{client_id}/campaigns/{campaign_id}/production/"
+            f"row-preview/{row.row_number}?v={int(target.stat().st_mtime)}"
+        ),
+        "warnings": warnings,
+    }
+
+
+@router.get("/{client_id}/campaigns/{campaign_id}/production/row-preview/{row_number}")
+def get_production_row_preview(
+    client_id: str, campaign_id: str, row_number: int
+) -> FileResponse:
+    campaign = _campaign_or_404(client_id, campaign_id)
+    target = _row_preview_path(campaign, row_number)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND, "Esa vista previa aun no se ha generado."
+        )
+    return FileResponse(target, media_type="image/jpeg")
 
 
 @router.post(

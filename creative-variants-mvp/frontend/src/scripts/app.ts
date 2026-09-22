@@ -15,6 +15,7 @@ import {
   createCampaign,
   createClient,
   deleteClient,
+  deleteCampaign,
   deleteCampaignSource,
   deleteCampaignProductAsset,
   decideTemplateCandidate,
@@ -28,6 +29,7 @@ import {
   normaliseMatrixProductionPlan,
   pollCampaignProductionTask,
   previewCampaignMatrix,
+  previewCampaignRow,
   produceCampaign,
   reviseCampaignBrief,
   reviseTemplateCandidate,
@@ -37,6 +39,7 @@ import {
   uploadCampaignProductAssets,
   uploadCampaignSources,
 } from "./campaign-api";
+import type { CampaignDeletion } from "./campaign-api";
 import type {
   ArtTextLayer,
   ArtTexts,
@@ -955,6 +958,64 @@ async function renderCampaign(): Promise<void> {
   });
   if (!ready) bindUpload();
   else bindActiveCampaign();
+  bindCampaignDeletion();
+}
+
+function deletionSummary(gone: CampaignDeletion): string {
+  const partes = [
+    gone.sources ? String(gone.sources) + (gone.sources === 1 ? " fuente" : " fuentes") : "",
+    gone.batches ? String(gone.batches) + (gone.batches === 1 ? " tanda" : " tandas") : "",
+    gone.approvedTemplates
+      ? String(gone.approvedTemplates) + (gone.approvedTemplates === 1 ? " plantilla aprobada" : " plantillas aprobadas")
+      : "",
+  ].filter(Boolean);
+  return "Campaña borrada" + (partes.length ? " · se fueron " + partes.join(", ") : "") + ".";
+}
+
+/** El botón vive en dos sitios: la lista de campañas guardadas y la cabecera
+ *  de la campaña abierta. Un solo enlace evita que uno de los dos se quede sin
+ *  confirmación o sin refrescar el contador del cliente. */
+function bindCampaignDeletion(): void {
+  queryAll<HTMLButtonElement>("[data-delete-campaign]").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const clientId = state.activeClientId;
+      const campaignId = button.dataset.deleteCampaign || "";
+      if (!clientId || !campaignId) return;
+      const known = state.clientCampaigns.find((item) => item.campaign_id === campaignId);
+      const nombre = known?.name || state.campaignWorkspace?.name || "esta campaña";
+      const confirmed = await confirmAction({
+        title: "¿Borrar " + nombre + "?",
+        lines: [
+          "Se eliminan sus archivos fuente, el brief, las plantillas propuestas y las tandas ya producidas.",
+          "El cliente y las correcciones que le enseñaste se conservan.",
+          "Esta acción no se puede deshacer.",
+        ],
+        confirm: "Sí, borrar campaña",
+        danger: true,
+      });
+      if (!confirmed) return;
+      busy("Borrando campaña", "Eliminando su material y sus entregables…", 55);
+      try {
+        const gone = await deleteCampaign(clientId, campaignId);
+        state.clientCampaigns = state.clientCampaigns.filter(
+          (item) => item.campaign_id !== campaignId,
+        );
+        if (state.campaignWorkspace?.campaign_id === campaignId) {
+          const client = state.clients.find((item) => item.client_id === clientId);
+          resetCampaignWork(client?.name || "");
+        }
+        // El contador de campañas del cliente vive en el servidor.
+        state.clients = await listClients();
+        saveSession();
+        await renderCampaign();
+        toast(deletionSummary(gone), "success");
+      } catch (error) {
+        toast(errorMessage(error), "error");
+      } finally {
+        idle();
+      }
+    });
+  });
 }
 
 function campaignPhaseRail(): string {
@@ -989,9 +1050,12 @@ function campaignBriefHtml(compact: boolean): string {
   ].join("")).join("");
   const pastCampaigns = state.activeClientId
     ? state.clientCampaigns.map((campaign) => [
+        '<div class="campaign-memory-row">',
         '<button class="campaign-memory-card" type="button" data-open-campaign="', attr(campaign.campaign_id), '">',
         '<span><strong>', esc(campaign.name), '</strong><small>', esc(campaign.objective || "Campaña guardada"),
         '</small></span><i>Continuar →</i></button>',
+        '<button class="campaign-delete-inline" type="button" data-delete-campaign="', attr(campaign.campaign_id),
+        '" aria-label="Borrar la campaña ', attr(campaign.name), '" title="Borrar esta campaña">Borrar</button></div>',
       ].join("")).join("")
     : "";
   return [
@@ -1271,7 +1335,9 @@ function activeCampaignHtml(): string {
     esc(workspace?.name || state.campaignBrief.name || "Campaña"), '</h2><p>',
     esc(state.campaignBrief.client || "Cliente"), state.campaignBrief.objective ? ' · ' + esc(state.campaignBrief.objective) : '',
     '</p></div><div class="campaign-summary-actions"><button class="ghost-button" id="reanalyze-campaign">',
-    state.campaignIntelligence ? "Volver a analizar" : "Generar brief con IA", '</button></div></section>',
+    state.campaignIntelligence ? "Volver a analizar" : "Generar brief con IA", '</button>',
+    workspace ? '<button class="campaign-delete-inline" type="button" data-delete-campaign="' + attr(workspace.campaign_id) + '">Borrar campaña</button>' : '',
+    '</div></section>',
     '<div class="stat-row knowledge-stats"><div class="stat"><strong>', String(state.campaignSources.length), '</strong><span>fuentes, no KV</span></div>',
     '<div class="stat"><strong>', String(social.length), '</strong><span>redes y sitios</span></div>',
     '<div class="stat"><strong>', state.campaignIntelligence ? "✓" : "—", '</strong><span>brief IA</span></div>',
@@ -4800,9 +4866,16 @@ function matrixPlanReviewHtml(rows: MatrixRow[]): string {
     const fillable = plan.ai_fillable_fields.length
       ? ' · IA puede completar: ' + esc(plan.ai_fillable_fields.join(", "))
       : '';
+    // Cuando el unico estorbo es la plantilla forzada, el arreglo cabe en un
+    // clic: nombrarla y dejar que la eligiera el selector, en vez de mandar a
+    // recorrer un desplegable que puede tener una sola opcion.
+    const fix = plan.suggested_template && row.template
+      ? '<button class="ghost-button small use-auto-template" type="button" data-row="' +
+        String(row.rowNumber) + '">Usar «' + esc(plan.suggested_template.name) + '»</button>'
+      : '';
     return '<li class="matrix-plan-' + esc(plan.status) + '"><strong>Fila ' +
       String(row.rowNumber) + ' · ' + status + '</strong>' + template + fillable +
-      '<small>' + esc(plan.message) + '</small></li>';
+      '<small>' + esc(plan.message) + '</small>' + fix + '</li>';
   }).join("");
   const remaining = rows.length - Math.min(rows.length, 12);
   const issues = matrixRowsNeedingPlan(rows).length;
@@ -5159,7 +5232,7 @@ function manualMatrixEditorHtml(
       "OPTIONS",
       templateOptions.replace('value="' + attr(row.template) + '"', 'value="' + attr(row.template) + '" selected'),
     );
-    return '<article class="manual-matrix-row"><div class="manual-matrix-row-head"><div><strong>Fila ' + String(row.rowNumber) + '</strong><span>Vacío = opcional · “no poner” = ocultar</span></div><button class="icon-button remove-manual-matrix-row" data-row="' + String(row.rowNumber) + '" title="Quitar fila" aria-label="Quitar fila ' + String(row.rowNumber) + '">×</button></div>' +
+    return '<article class="manual-matrix-row"><div class="manual-matrix-row-head"><div><strong>Fila ' + String(row.rowNumber) + '</strong><span>Vacío = opcional · “no poner” = ocultar</span></div><div class="manual-matrix-row-tools"><button class="ghost-button small preview-manual-matrix-row" type="button" data-row="' + String(row.rowNumber) + '">Ver composición</button><button class="icon-button remove-manual-matrix-row" data-row="' + String(row.rowNumber) + '" title="Quitar fila" aria-label="Quitar fila ' + String(row.rowNumber) + '">×</button></div></div>' +
       '<div class="manual-matrix-grid">' +
       input(row, "product", "Producto(s) / arte grupal", { placeholder: "Silla | Mesa | Lámpara" }) +
       input(row, "image", "Archivo(s) de imagen", { placeholder: "silla.png | mesa.png", list: "matrix-asset-names" }) +
@@ -5176,7 +5249,7 @@ function manualMatrixEditorHtml(
       input(row, "proposals", "Propuestas", { type: "number", min: 1, value: Math.max(1, row.proposals) }) +
       template +
       input(row, "notes", "Notas de composición", { placeholder: "Ej. producto principal a la derecha" }) +
-      '</div></article>';
+      '</div><div class="manual-matrix-composition" data-composition="' + String(row.rowNumber) + '"></div></article>';
   }).join("");
   return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Para un combo, separa productos y archivos con <strong>|</strong> en el mismo orden. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
 }
@@ -5292,6 +5365,42 @@ function bindProductionMatrix(): void {
     field.addEventListener("input", update);
     field.addEventListener("change", update);
   });
+  queryAll<HTMLButtonElement>(".preview-manual-matrix-row").forEach((button) => {
+    button.addEventListener("click", async () => {
+      if (!state.activeClientId || !state.campaignWorkspace) return;
+      const rowNumber = Number(button.dataset.row || 0);
+      const host = query<HTMLElement>('[data-composition="' + String(rowNumber) + '"]');
+      if (!host) return;
+      const label = button.textContent || "Ver composición";
+      button.disabled = true;
+      button.textContent = "Componiendo…";
+      host.innerHTML = '<p class="manual-matrix-composition-wait">Componiendo el arte con el mismo motor que produce la tanda…</p>';
+      try {
+        const shot = await previewCampaignRow(
+          state.activeClientId,
+          state.campaignWorkspace.campaign_id,
+          manualMatrixFile(),
+          rowNumber,
+        );
+        host.innerHTML = [
+          '<figure class="manual-matrix-composition-shot"><img src="', attr(shot.previewUrl),
+          '" alt="Composición del arte de la fila ', String(rowNumber), '">',
+          '<figcaption><strong>', esc(shot.templateName || "Plantilla automática"), '</strong>',
+          '<span>', esc(shot.format), ' · ', String(shot.width), '×', String(shot.height),
+          ' px al producir</span></figcaption></figure>',
+          shot.warnings.length
+            ? '<ul class="manual-matrix-composition-notes">' +
+              shot.warnings.map((warning) => '<li>' + esc(warning) + '</li>').join("") + '</ul>'
+            : '',
+        ].join("");
+      } catch (error) {
+        host.innerHTML = '<div class="notice warning compact">' + esc(errorMessage(error)) + '</div>';
+      } finally {
+        button.disabled = false;
+        button.textContent = label;
+      }
+    });
+  });
   queryAll<HTMLButtonElement>(".remove-manual-matrix-row").forEach((button) => {
     button.addEventListener("click", async () => {
       const rowNumber = Number(button.dataset.row || 0);
@@ -5303,7 +5412,7 @@ function bindProductionMatrix(): void {
       await renderGenerate();
     });
   });
-  query<HTMLButtonElement>("#validate-manual-matrix")?.addEventListener("click", async () => {
+  const validateManualMatrix = async (): Promise<void> => {
     if (!state.activeClientId || !state.campaignWorkspace || !state.productionMatrix.length) return;
     const file = manualMatrixFile();
     busy("Validando matriz manual", "Comprobando campos, combos y plantillas aprobadas…", 35);
@@ -5323,6 +5432,21 @@ function bindProductionMatrix(): void {
     } finally {
       idle();
     }
+  };
+  query<HTMLButtonElement>("#validate-manual-matrix")?.addEventListener(
+    "click", () => void validateManualMatrix(),
+  );
+  queryAll<HTMLButtonElement>(".use-auto-template").forEach((button) => {
+    button.addEventListener("click", async () => {
+      const rowNumber = Number(button.dataset.row || 0);
+      const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+      if (!row) return;
+      // Vaciar la casilla es exactamente lo que hace el modo automatico; el
+      // selector del servidor vuelve a elegir y la validacion lo confirma.
+      row.template = "";
+      saveSession();
+      await validateManualMatrix();
+    });
   });
   const addProductImages = async (incoming: File[]): Promise<void> => {
     const accepted = incoming.filter((file) => PRODUCT_IMAGE_EXTENSIONS.test(file.name));

@@ -1308,6 +1308,63 @@ def render_candidate_previews(
         )
 
 
+#: Una vista previa de fila se mira en pantalla; no se entrega. Con 720 px de
+#: lado largo se juzga la composición —si el titular cabe, dónde cae el precio,
+#: qué tapa el producto— sin pagar una tanda entera para descubrirlo.
+ROW_PREVIEW_MAX_SIDE = 720
+
+
+def render_row_preview(
+    campaign: Campaign,
+    brand_name: str,
+    row: MatrixRow,
+    candidate: TemplateCandidate,
+    product_paths: list[Path],
+    target: Path,
+    *,
+    format_token: str = "",
+    max_side: int = ROW_PREVIEW_MAX_SIDE,
+) -> tuple[str, int, int]:
+    """Compone **una** pieza a tamaño de pantalla y la guarda en ``target``.
+
+    Es el mismo ``_render`` que produce la tanda, con los mismos datos de la
+    fila y las mismas fotos: una maqueta aparte volvería a mentir en cuanto el
+    renderer cambiase. Solo baja la resolución, y el área segura viaja en
+    proporciones, así que la composición que se ve es la que se entregará.
+
+    Devuelve ``(format_id, ancho_real, alto_real)`` —las medidas del entregable,
+    no las del recorte de pantalla— para que la UI no prometa un tamaño falso.
+    """
+
+    peticion = format_token.strip() or (row.formatos[0] if row.formatos else "meta_feed_4_5")
+    format_id, width, height, safe = resolve_format(peticion)
+    factor = min(1.0, max_side / max(width, height))
+    preview_size = (max(160, round(width * factor)), max(160, round(height * factor)))
+
+    _validate_product_render_budget(row, product_paths)
+    opened: list[Image.Image] = []
+    layers: list[tuple[str, Image.Image]] = []
+    final: Image.Image | None = None
+    try:
+        for path in product_paths:
+            opened.append(_open_product_for_render(path))
+        final, layers = _render(
+            campaign, brand_name, candidate,
+            width=preview_size[0], height=preview_size[1], safe=safe,
+            proposal=1, row=row, products=opened,
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        final.convert("RGB").save(target, format="JPEG", quality=88, optimize=True)
+    finally:
+        for image in opened:
+            image.close()
+        if final is not None:
+            final.close()
+        for _name, layer in layers:
+            layer.close()
+    return format_id, width, height
+
+
 def _product_tokens(row: MatrixRow) -> list[str]:
     if row.imagen:
         return [item.strip() for item in re.split(r"[|;]", row.imagen) if item.strip()]
@@ -1791,5 +1848,6 @@ def produce_batch(
 
 __all__ = [
     "CampaignProductionError", "complete_copy_once", "match_product_paths",
-    "produce_batch", "render_candidate_previews", "resolve_format",
+    "produce_batch", "render_candidate_previews", "render_row_preview",
+    "resolve_format",
 ]

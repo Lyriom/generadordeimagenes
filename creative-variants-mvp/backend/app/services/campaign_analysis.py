@@ -35,7 +35,9 @@ from .public_references import PublicReferenceError, inspect_public_url
 
 logger = logging.getLogger(__name__)
 
-_AI_SOURCE_PREVIEW_LIMIT = 8
+# Cuatro vistas, no ocho: con ocho el analisis agotaba el tiempo de espera
+# y caia al brief local, que es peor que mirar la mitad del material.
+_AI_SOURCE_PREVIEW_LIMIT = 4
 _AI_SOCIAL_PREVIEW_LIMIT = 4
 # El prompt también incluye ejemplos, reglas aprendidas y previews. Un límite
 # total evita convertir una carpeta de PDFs en una petición lenta o imposible

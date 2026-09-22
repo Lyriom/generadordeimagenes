@@ -417,6 +417,22 @@ export interface MatrixProductionPlan {
   required_fields: string[];
   ai_fillable_fields: string[];
   message: string;
+  /** La plantilla que se usaría dejando la fila en automática. */
+  suggested_template: MatrixProductionPlanTemplate | null;
+  /** Campos escritos que ninguna plantilla aprobada sabe colocar. */
+  blocking_fields: string[];
+}
+
+/** Una sola pieza compuesta a resolución de pantalla, para mirarla antes de
+ *  lanzar la tanda. `width`/`height` son las del entregable, no las del JPG. */
+export interface MatrixRowComposition {
+  rowNumber: number;
+  templateName: string;
+  format: string;
+  width: number;
+  height: number;
+  previewUrl: string;
+  warnings: string[];
 }
 
 export interface CampaignMatrixPreview {

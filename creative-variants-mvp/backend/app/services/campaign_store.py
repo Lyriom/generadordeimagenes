@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -83,6 +84,21 @@ def list_campaigns(client_id: str) -> list[Campaign]:
         except Exception:  # noqa: BLE001 - una campana corrupta no rompe la biblioteca
             continue
     return sorted(campaigns, key=lambda item: item.created_at, reverse=True)
+
+
+def delete_campaign(client_id: str, campaign_id: str) -> bool:
+    """Borra la campana entera: fuentes, analisis, tandas y entregables.
+
+    No hay papelera, igual que en ``template_store.delete_brand``. Lo que sí
+    sobrevive es la memoria del cliente: sus reglas aprendidas viven en
+    ``knowledge.json``, fuera de esta carpeta.
+    """
+
+    base = campaign_dir(client_id, campaign_id)
+    if not base.exists():
+        return False
+    shutil.rmtree(base, ignore_errors=True)
+    return not base.exists()
 
 
 def source_dir(client_id: str, campaign_id: str, source_id: str) -> Path:

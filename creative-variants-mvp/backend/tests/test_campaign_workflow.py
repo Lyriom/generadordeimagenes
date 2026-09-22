@@ -72,6 +72,109 @@ def test_cliente_con_produccion_activa_no_se_puede_borrar(client: TestClient):
     assert "producción en curso" in response.json()["detail"]
 
 
+def test_borrar_una_campana_se_lleva_su_carpeta_pero_no_al_cliente(client: TestClient):
+    """Una campana de prueba se tira sin perder la biblioteca del cliente."""
+
+    profile, campaign = _client_and_campaign(client)
+    client_id, campaign_id = profile["client_id"], campaign["campaign_id"]
+    subida = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/sources",
+        files=[("files", ("nota.txt", b"Contexto de campana", "text/plain"))],
+    )
+    assert subida.status_code == 201, subida.text
+    carpeta = campaign_store.campaign_dir(client_id, campaign_id)
+    assert carpeta.exists()
+
+    borrada = client.delete(f"/clients/{client_id}/campaigns/{campaign_id}")
+
+    assert borrada.status_code == 200, borrada.text
+    cuerpo = borrada.json()
+    assert cuerpo["deleted"] is True
+    assert cuerpo["name"] == "Temporada escolar"
+    assert cuerpo["sources_deleted"] == 1
+    # En disco no queda nada de la campana...
+    assert not carpeta.exists()
+    assert client.get(f"/clients/{client_id}/campaigns/{campaign_id}").status_code == 404
+    assert client.get(f"/clients/{client_id}/campaigns").json() == []
+    # ...pero el cliente sigue en pie y su contador vuelve a cero.
+    ficha = client.get(f"/clients/{client_id}")
+    assert ficha.status_code == 200
+    assert ficha.json()["campaigns"] == 0
+
+
+def test_borrar_una_campana_conserva_las_reglas_aprendidas_del_cliente(client: TestClient):
+    """La memoria del cliente es el producto; la plantilla huerfana, no.
+
+    El snapshot aprobado apunta a una vista previa dentro de la carpeta que se
+    borra: dejarlo contaria plantillas que ya nadie puede abrir. Las reglas
+    aprendidas son texto y sobreviven a la campana que las origino.
+    """
+
+    from app.models.campaign import ApprovedCandidateMemory
+
+    profile, campaign = _client_and_campaign(client)
+    client_id, campaign_id = profile["client_id"], campaign["campaign_id"]
+    otra = client.post(
+        f"/clients/{client_id}/campaigns", json={"name": "Campana que se queda"}
+    ).json()
+
+    memoria = campaign_store.load_knowledge(client_id)
+    memoria.learned_rules = ["Evitar: el precio nunca tapa el producto"]
+    memoria.approved_candidates = [
+        ApprovedCandidateMemory(
+            campaign_id=campaign_id, candidate_id="a", name="Precio", category="price_promotion"
+        ),
+        ApprovedCandidateMemory(
+            campaign_id=otra["campaign_id"], candidate_id="b", name="Combo", category="combo"
+        ),
+    ]
+    campaign_store.save_knowledge(memoria)
+
+    borrada = client.delete(f"/clients/{client_id}/campaigns/{campaign_id}")
+
+    assert borrada.status_code == 200, borrada.text
+    assert borrada.json()["approved_templates_removed"] == 1
+    quedan = campaign_store.load_knowledge(client_id)
+    assert quedan.learned_rules == ["Evitar: el precio nunca tapa el producto"]
+    assert [item.candidate_id for item in quedan.approved_candidates] == ["b"]
+    # La campana hermana no se toca.
+    assert client.get(
+        f"/clients/{client_id}/campaigns/{otra['campaign_id']}"
+    ).status_code == 200
+
+
+def test_una_campana_produciendo_no_se_borra_a_media_tanda(client: TestClient):
+    """Borrar el contexto bajo un worker que ya empezo altera la tanda."""
+
+    profile, campaign = _client_and_campaign(client)
+    client_id, campaign_id = profile["client_id"], campaign["campaign_id"]
+    campaign_store.save_production_job(
+        ProductionJob(client_id=client_id, campaign_id=campaign_id, state="STARTED")
+    )
+
+    respuesta = client.delete(f"/clients/{client_id}/campaigns/{campaign_id}")
+
+    assert respuesta.status_code == 409
+    assert "produccion en curso" in respuesta.json()["detail"]
+    assert campaign_store.campaign_dir(client_id, campaign_id).exists()
+
+
+def test_borrar_una_campana_que_no_existe_no_finge_que_la_borro(client: TestClient):
+    profile, campaign = _client_and_campaign(client)
+    client_id = profile["client_id"]
+    otro = client.post("/clients", json={"name": "Cliente ajeno"}).json()
+
+    assert client.delete(
+        f"/clients/{client_id}/campaigns/00000000-0000-4000-8000-000000000000"
+    ).status_code == 404
+    # Y no se puede borrar la campana de un cliente desde otro.
+    cruzado = client.delete(
+        f"/clients/{otro['client_id']}/campaigns/{campaign['campaign_id']}"
+    )
+    assert cruzado.status_code == 404
+    assert campaign_store.campaign_dir(client_id, campaign["campaign_id"]).exists()
+
+
 def test_acepta_ai_y_zip_de_tipografias_como_contexto(client: TestClient):
     profile, campaign = _client_and_campaign(client)
     font = next(item for item in client_fonts.catalog() if item["id"] == "marcimex")["fonts"][0]

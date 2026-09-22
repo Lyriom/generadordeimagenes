@@ -1006,3 +1006,133 @@ def test_previsualizaciones_conservan_la_proporcion_y_el_area_segura_reales(
     # Stories reserva de verdad, no es el margen por defecto disfrazado.
     assert usados[(540, 960)]["top"] > DEFAULT_SAFE_AREA["top"]
     assert usados[(540, 960)]["bottom"] > DEFAULT_SAFE_AREA["bottom"]
+
+
+def _matrix_csv(**campos: str) -> tuple[str, bytes, str]:
+    """Misma matriz que arma el editor manual del navegador."""
+
+    cabeceras = [
+        "producto", "imagen", "titular", "subtitulo", "precio_actual", "precio_anterior",
+        "cuota", "descuento", "cta", "legal", "vigencia", "formatos",
+        "cantidad_propuestas", "notas", "plantilla",
+    ]
+    fila = [campos.get(nombre, "") for nombre in cabeceras]
+    contenido = ",".join(cabeceras) + "\n" + ",".join(f'"{valor}"' for valor in fila)
+    return ("pedido.csv", contenido.encode("utf-8"), "text/csv")
+
+
+def test_la_vista_previa_de_una_fila_compone_el_arte_antes_de_producir(
+    client: TestClient, artwork_png: bytes
+):
+    """El ask de fondo: ver la composición sin pagar la tanda entera.
+
+    Antes solo se podía ver un arte produciendo la tanda y abriendo el ZIP.
+    """
+
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+    client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/assets",
+        files=[("files", ("televisor.png", artwork_png, "image/png"))],
+    )
+
+    respuesta = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/row-preview",
+        files=[("matrix", _matrix_csv(
+            producto="Televisor", imagen="televisor.png", precio_actual="499",
+            cantidad_propuestas="1",
+        ))],
+        data={"row_number": "2", "piece_format": "meta_feed_4_5"},
+    )
+
+    assert respuesta.status_code == 200, respuesta.text
+    cuerpo = respuesta.json()
+    assert cuerpo["row_number"] == 2
+    assert cuerpo["template"]["name"]
+    # Las medidas anunciadas son las del entregable, no las del recorte que se
+    # mira en pantalla: prometer 720 px seria mentir sobre lo que se descarga.
+    assert (cuerpo["width"], cuerpo["height"]) == (1080, 1350)
+
+    imagen = client.get(cuerpo["preview_url"].split("?")[0])
+    assert imagen.status_code == 200
+    assert imagen.headers["content-type"].startswith("image/jpeg")
+    with Image.open(io.BytesIO(imagen.content)) as vista:
+        # Proporcion exacta del formato, reducida para la pantalla.
+        assert max(vista.size) <= campaign_creative.ROW_PREVIEW_MAX_SIDE
+        assert abs(vista.width / vista.height - 1080 / 1350) < 0.01
+        # Una composicion, no un lienzo en blanco.
+        assert len(vista.convert("RGB").getcolors(maxcolors=100000) or []) > 12
+
+
+def test_la_vista_previa_dice_lo_que_no_puede_ensenar(
+    client: TestClient, artwork_png: bytes
+):
+    """Un hueco vacío en la vista no es un arte que saldrá vacío."""
+
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+
+    respuesta = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/row-preview",
+        files=[("matrix", _matrix_csv(
+            producto="Televisor", imagen="televisor.png", precio_actual="499",
+        ))],
+        data={"row_number": "2"},
+    )
+
+    assert respuesta.status_code == 200, respuesta.text
+    avisos = respuesta.json()["warnings"]
+    assert any("fotos de esta fila" in aviso for aviso in avisos), avisos
+
+
+def test_una_plantilla_forzada_incompatible_no_deja_sin_vista_previa(
+    client: TestClient, artwork_png: bytes
+):
+    """El callejón sin salida de la captura: se ve la que sí sirve, y por qué."""
+
+    client_id, campaign_id, candidatos = _ready_campaign(client, artwork_png)
+    institucional = next(
+        (item for item in candidatos if item["category"] == "institutional"), None
+    )
+    if institucional is None:
+        pytest.skip("el analisis local no propuso una plantilla institucional")
+
+    respuesta = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/row-preview",
+        files=[("matrix", _matrix_csv(
+            producto="Televisor", imagen="televisor.png", precio_actual="499",
+            plantilla=institucional["name"],
+        ))],
+        data={"row_number": "2"},
+    )
+
+    assert respuesta.status_code == 200, respuesta.text
+    cuerpo = respuesta.json()
+    assert cuerpo["template"]["name"] != institucional["name"]
+    assert any("automatica" in aviso for aviso in cuerpo["warnings"]), cuerpo["warnings"]
+
+
+def test_el_plan_nombra_la_plantilla_que_si_sirve_en_vez_de_mandar_a_probar(
+    client: TestClient, artwork_png: bytes
+):
+    """«Elige otra plantilla aprobada» no es una instruccion si solo hay una."""
+
+    client_id, campaign_id, candidatos = _ready_campaign(client, artwork_png)
+    institucional = next(
+        (item for item in candidatos if item["category"] == "institutional"), None
+    )
+    if institucional is None:
+        pytest.skip("el analisis local no propuso una plantilla institucional")
+
+    respuesta = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/preview",
+        files=[("matrix", _matrix_csv(
+            producto="Televisor", imagen="televisor.png", precio_actual="499",
+            plantilla=institucional["name"],
+        ))],
+    )
+
+    assert respuesta.status_code == 200, respuesta.text
+    [plan] = respuesta.json()["plans"]
+    assert plan["status"] == "incompatible"
+    assert plan["suggested_template"], plan
+    assert plan["suggested_template"]["name"] in plan["message"]
+    assert "Elige otra plantilla aprobada" not in plan["message"]

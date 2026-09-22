@@ -315,6 +315,22 @@ class CampaignUpdateRequest(BaseModel):
     social_urls: list[str] | None = None
 
 
+class CampaignDeleteResponse(BaseModel):
+    """Recuento de lo que se fue con la campana.
+
+    Borrar no puede ser un 204 mudo: la carpeta se lleva fuentes, tandas y la
+    plantilla aprobada de esa campana. Quien pulsa el boton merece ver cuanto
+    desaparecio, y que las correcciones aprendidas del cliente siguen ahi.
+    """
+
+    deleted: bool
+    campaign_id: str
+    name: str = ""
+    sources_deleted: int = 0
+    batches_deleted: int = 0
+    approved_templates_removed: int = 0
+
+
 class CampaignSourceRoleUpdateRequest(BaseModel):
     """Decisión humana sobre el papel de un archivo de campaña.
 

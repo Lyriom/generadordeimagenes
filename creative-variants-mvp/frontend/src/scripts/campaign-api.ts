@@ -9,6 +9,7 @@ import type {
   CampaignProductionTask,
   ClientProfile,
   MatrixProductionPlan,
+  MatrixRowComposition,
   ProductionBatch,
   TemplateCandidate,
   TemplateCandidateField,
@@ -190,6 +191,30 @@ export async function updateCampaignContext(
     ),
     clientId,
   );
+}
+
+export interface CampaignDeletion {
+  name: string;
+  sources: number;
+  batches: number;
+  approvedTemplates: number;
+}
+
+/** Borra la campaña y todo su material. El cliente y sus reglas siguen. */
+export async function deleteCampaign(
+  clientId: string,
+  campaignId: string,
+): Promise<CampaignDeletion> {
+  const raw: any = await del(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId),
+  );
+  return {
+    name: String(raw?.name || ""),
+    sources: Number(raw?.sources_deleted || 0),
+    batches: Number(raw?.batches_deleted || 0),
+    approvedTemplates: Number(raw?.approved_templates_removed || 0),
+  };
 }
 
 export function normaliseSource(raw: any, index = 0, clientId = "", campaignId = ""): CampaignSource {
@@ -633,6 +658,9 @@ export function normaliseMatrixProductionPlan(raw: any): MatrixProductionPlan | 
     ? receivedStatus as MatrixProductionPlan["status"]
     : "incompatible";
   const rawTemplate = raw?.template && typeof raw.template === "object" ? raw.template : null;
+  const rawSuggested = raw?.suggested_template && typeof raw.suggested_template === "object"
+    ? raw.suggested_template
+    : null;
   const message = String(raw?.message || "").trim() || (
     status === "ready"
       ? "La fila tiene una plantilla compatible."
@@ -653,6 +681,41 @@ export function normaliseMatrixProductionPlan(raw: any): MatrixProductionPlan | 
     required_fields: strings(raw?.required_fields),
     ai_fillable_fields: strings(raw?.ai_fillable_fields),
     message,
+    suggested_template: rawSuggested
+      ? {
+        candidate_id: String(rawSuggested?.candidate_id || ""),
+        name: String(rawSuggested?.name || ""),
+      }
+      : null,
+    blocking_fields: strings(raw?.blocking_fields),
+  };
+}
+
+/** Compone una fila con el renderer de producción y devuelve dónde mirarla. */
+export async function previewCampaignRow(
+  clientId: string,
+  campaignId: string,
+  matrix: File,
+  rowNumber: number,
+  pieceFormat = "",
+): Promise<MatrixRowComposition> {
+  const form = new FormData();
+  form.append("matrix", matrix);
+  form.append("row_number", String(rowNumber));
+  form.append("piece_format", pieceFormat);
+  const payload: any = await upload(
+    "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
+      encodeURIComponent(campaignId) + "/production/row-preview",
+    form,
+  );
+  return {
+    rowNumber: Math.max(2, Math.trunc(Number(payload?.row_number) || rowNumber)),
+    templateName: String(payload?.template?.name || ""),
+    format: String(payload?.format || ""),
+    width: Math.max(0, Math.trunc(Number(payload?.width) || 0)),
+    height: Math.max(0, Math.trunc(Number(payload?.height) || 0)),
+    previewUrl: downloadUrl(String(payload?.preview_url || "")),
+    warnings: strings(payload?.warnings),
   };
 }
 
