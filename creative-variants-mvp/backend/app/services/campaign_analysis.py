@@ -629,24 +629,24 @@ def _collect_social_evidence(campaign: Campaign) -> list[str]:
                             "blocked_reason": str(result.get("blocked_reason") or "login_wall")[:80],
                         }
                         warnings.append(
-                            f"{url}: la red exige sesion iniciada para mostrar publicaciones. "
-                            "Sube capturas o los artes en Material de campaña: es la unica via "
-                            "que lee sus composiciones."
+                            f"{url}: el perfil exige sesion iniciada. Pega el enlace de una "
+                            "publicacion o reel concreto (instagram.com/p/... o /reel/...): "
+                            "esos si entregan su imagen."
                         )
                         continue
                     evidence[url] = result
                     if not result.get("posts"):
-                        # Ni el perfil ni el enlace a una publicacion concreta
-                        # entregan imagenes a quien no ha iniciado sesion: ambos
-                        # devuelven la aplicacion en JavaScript. Del perfil se
-                        # aprovecha nombre, biografia y comunidad; pedir "enlaces
-                        # directos a publicaciones" mandaba a un callejon sin
-                        # salida. Comprobado contra instagram.com y facebook.com
-                        # el 2026-09-22.
+                        # Un PERFIL de Instagram/Facebook no publica las imagenes
+                        # de su feed a quien no ha iniciado sesion: devuelve la
+                        # aplicacion en JavaScript y solo el avatar. El enlace a
+                        # una publicacion o reel concreto SI las entrega, con o
+                        # sin token de compartir. Comprobado el 2026-09-22 contra
+                        # instagram.com/reel/...: 12 imagenes leidas.
                         warnings.append(
-                            f"{url}: se leyo el perfil, pero la red no entrega sus imagenes "
-                            "sin sesion iniciada. Sube capturas o los artes en Material de "
-                            "campaña para que la IA lea las composiciones."
+                            f"{url}: se leyo el perfil (nombre, biografia y comunidad), pero un "
+                            "perfil no expone las imagenes de su feed. Pega el enlace de "
+                            "publicaciones o reels concretos, o sube los artes en Material de "
+                            "campaña."
                         )
                 except PublicReferenceError:
                     evidence[url] = {

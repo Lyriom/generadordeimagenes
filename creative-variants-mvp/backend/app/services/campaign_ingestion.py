@@ -24,7 +24,7 @@ from ..models.campaign import (
     CampaignSourceKind,
     CampaignSourceRole,
 )
-from . import campaign_store
+from . import campaign_plate, campaign_store
 from .security import FileValidationError
 
 
@@ -884,6 +884,23 @@ def _psd_fixed_asset_role(
     return None
 
 
+def _psd_artboard_frame_of(
+    artboard,
+) -> tuple[tuple[int, int, int, int], tuple[int, int]] | None:
+    """Marco de un artboard concreto, no el de la capa que lo contiene."""
+
+    raw = getattr(artboard, "bbox", None)
+    if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+        return None
+    try:
+        left, top, right, bottom = (int(value) for value in raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if right <= left or bottom <= top:
+        return None
+    return (left, top, right, bottom), (right - left, bottom - top)
+
+
 def _psd_clip_to_frame(
     bbox: tuple[int, int, int, int] | None,
     frame: tuple[int, int, int, int],
@@ -1147,6 +1164,67 @@ def _extract_psd(
             "fixed_backgrounds": sum(1 for item in layer_assets if item["role"] == "fixed_background"),
             "fixed_decorations": sum(1 for item in layer_assets if item["role"] == "fixed_decoration"),
         }
+        # Placa de plantilla: el arte real del artboard con su contenido
+        # variable borrado. Es lo que permite que la plantilla comunique la
+        # marca en vez de un degradado con "TITULAR DE CAMPAÑA" encima.
+        congelados = {str(item.get("name", "")) for item in layer_assets}
+        try:
+            piezas = [
+                capa for capa in document
+                if str(getattr(capa, "kind", "") or "").casefold() == "artboard"
+            ]
+        except TypeError:
+            # Un PSD sin capas de primer nivel iterables: se trata como una
+            # pieza única. Nunca debe costar la ingesta entera del documento.
+            piezas = []
+        placas: list[dict[str, object]] = []
+        for orden, pieza in enumerate(piezas or [None], 1):
+            marco = _psd_artboard_frame_of(pieza) if pieza is not None else None
+            frame_box = marco[0] if marco else (0, 0, source.width, source.height)
+            frame_size = marco[1] if marco else (source.width, source.height)
+            if frame_size[0] <= 0 or frame_size[1] <= 0:
+                continue
+            if frame_size[0] * frame_size[1] > settings.campaign_max_source_pixels:
+                continue
+            try:
+                recorte = composite.convert("RGB").crop(frame_box)
+                propio = [
+                    {
+                        "name": str(item["name"]),
+                        "visible": item["visible"],
+                        "bbox": [
+                            item["bbox"][0] - frame_box[0], item["bbox"][1] - frame_box[1],
+                            item["bbox"][2] - frame_box[0], item["bbox"][3] - frame_box[1],
+                        ],
+                    }
+                    for item in manifest
+                    if item["bbox"][2] > item["bbox"][0]
+                    and item["bbox"][0] >= frame_box[0] and item["bbox"][2] <= frame_box[2]
+                    and item["bbox"][1] >= frame_box[1] and item["bbox"][3] <= frame_box[3]
+                ]
+                destino = (
+                    _source_folder(client_id, campaign_id, source)
+                    / "assets" / f"psd-plate-{orden:02d}.png"
+                )
+                hecho = campaign_plate.build_plate(recorte, propio, congelados, destino)
+                recorte.close()
+                if hecho is None:
+                    continue
+                ruta, motor, avisos = hecho
+                relativa = _relative(client_id, campaign_id, ruta)
+                source.asset_files.append(relativa)
+                placas.append({
+                    "name": str(getattr(pieza, "name", "") or source.filename)[:240],
+                    "path": relativa,
+                    "size": [frame_size[0], frame_size[1]],
+                    "engine": motor,
+                })
+                source.warnings.extend(avisos[:1])
+            except Exception:  # noqa: BLE001 - una placa fallida no anula el PSD
+                continue
+        if placas:
+            source.meta["template_plates"] = placas
+
         source.extracted_text = _clean_text("\n".join(text_chunks))
         target = _source_folder(client_id, campaign_id, source) / "previews" / "composite.jpg"
         _save_thumbnail(composite, target)

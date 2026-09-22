@@ -154,7 +154,11 @@ def test_referencia_social_bloqueada_queda_visible_pero_no_se_usa_como_post(
     assert evidence["accessible"] is False
     assert evidence["posts"] == []
     assert evidence["blocked_reason"] == "login_wall"
-    assert any("capturas" in warning for warning in warnings)
+    # El aviso manda al camino que SI funciona. Comprobado el 2026-09-22: un
+    # perfil no entrega su feed sin sesion, pero instagram.com/reel/... si
+    # devuelve su imagen, con o sin token de compartir.
+    aviso = " ".join(warnings)
+    assert "/reel/" in aviso or "reel" in aviso
 
 
 def test_un_perfil_legible_sin_posts_no_manda_a_pegar_enlaces_de_publicacion(

@@ -321,6 +321,71 @@ def _fixed_brand_background(
     return None
 
 
+def _template_plate(
+    campaign: Campaign,
+    candidate: TemplateCandidate,
+    canvas: tuple[int, int],
+) -> tuple[str, Image.Image] | None:
+    """Placa de plantilla del PSD: el arte real, sin su contenido variable.
+
+    Es la diferencia entre una plantilla que comunica la marca y un degradado
+    con "TITULAR DE CAMPAÑA" encima. Entre varias placas se elige la del
+    artboard cuya proporción se parece más al formato de salida: adaptar un
+    story 9:16 a un feed 4:5 recortando es mejor que estirar un 1:1.
+    """
+
+    width, height = canvas
+    if width <= 0 or height <= 0:
+        return None
+    objetivo = width / height
+    preferidas = set(candidate.source_ids)
+    mejores: list[tuple[float, int, str, str]] = []
+    for source in campaign.sources:
+        placas = source.meta.get("template_plates", [])
+        if not isinstance(placas, list):
+            continue
+        for placa in placas:
+            if not isinstance(placa, dict) or not isinstance(placa.get("path"), str):
+                continue
+            medida = placa.get("size")
+            if not isinstance(medida, (list, tuple)) or len(medida) != 2:
+                continue
+            try:
+                ancho, alto = int(medida[0]), int(medida[1])
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if ancho <= 0 or alto <= 0:
+                continue
+            mejores.append((
+                abs(ancho / alto - objetivo),
+                0 if source.source_id in preferidas else 1,
+                str(placa.get("name", "PSD")),
+                placa["path"],
+            ))
+    if not mejores:
+        return None
+    _delta, _pref, nombre, relativa = min(mejores, key=lambda item: (item[1], item[0]))
+    try:
+        path = campaign_store.campaign_path(
+            campaign.client_id, campaign.campaign_id, relativa
+        )
+        if not path.exists() or not path.is_file():
+            return None
+        with Image.open(path) as probe:
+            if probe.width * probe.height > settings.campaign_max_source_pixels:
+                return None
+            probe.verify()
+        with Image.open(path) as image:
+            layer = ImageOps.fit(
+                ImageOps.exif_transpose(image).convert("RGBA"),
+                canvas,
+                method=Image.Resampling.LANCZOS,
+            ).copy()
+    except Exception:  # noqa: BLE001 - una placa rota no tumba la plantilla
+        return None
+    return f"Placa de plantilla · {nombre}", layer
+
+
 def _decorations(
     width: int,
     height: int,
@@ -1115,19 +1180,27 @@ def _render(
     branding_background = _fixed_brand_background(campaign, canvas)
     if branding_background is not None:
         layers.append(("01 · " + branding_background[0], branding_background[1]))
+    # La placa del PSD manda sobre todo lo demás: es el arte de la marca, no una
+    # aproximación. Solo cede ante un fondo que una persona marcó a mano.
+    plate = _template_plate(campaign, candidate, canvas) if branding_background is None else None
+    if plate is not None:
+        layers.append(("01 · " + plate[0], plate[1]))
     fixed_psd_layers = _fixed_psd_asset_layers(campaign, candidate, canvas)
     for index, (_name, layer) in enumerate(fixed_psd_layers, 1):
         layers.append((f"01.{index + 1:02d} · {_name}", layer))
     texture = (
         _reference_texture(campaign, candidate, width, height, proposal)
-        if blueprint.background_style == "campaign" and not fixed_psd_layers and branding_background is None
+        if blueprint.background_style == "campaign"
+        and not fixed_psd_layers
+        and branding_background is None
+        and plate is None
         else None
     )
     if texture is not None:
         layers.append(("01 · Atmósfera de campaña", texture))
     # Si el PSD ya trajo sus marcos/ornamentos fijos, esa identidad es más
     # valiosa que añadir tarjetas, líneas o brillos genéricos encima.
-    decoration_style = "minimal" if fixed_psd_layers else blueprint.accent_style
+    decoration_style = "minimal" if (fixed_psd_layers or plate is not None) else blueprint.accent_style
     layers.append(
         (
             "02 · Sistema visual",
@@ -1166,9 +1239,14 @@ def _render(
         )
         layers.append((label, layer))
 
+    # La placa del PSD ya trae el logo dibujado donde el diseñador lo puso.
+    # Añadir otro encima lo sacaba por duplicado y descuadrado.
+    lleva_logo_propio = plate is not None or any(
+        "logo" in name.casefold() for name, _layer in layers
+    )
     # Logo real si fue subido; de lo contrario la marca queda como wordmark,
     # nunca como icono de Instagram/Facebook.
-    logo_path = _logo_path(campaign)
+    logo_path = None if lleva_logo_propio else _logo_path(campaign)
     if logo_path is not None:
         try:
             with Image.open(logo_path) as image:
@@ -1176,7 +1254,7 @@ def _render(
             layers.append(("Logo", _full_canvas(logo, canvas)))
         except Exception:  # noqa: BLE001
             logo_path = None
-    if logo_path is None:
+    if logo_path is None and not lleva_logo_propio:
         layers.append(("Marca", _text_layer(canvas, regions["logo"], brand_name, bold, max_lines=1)))
 
     final = Image.new("RGBA", canvas, (0, 0, 0, 0))
