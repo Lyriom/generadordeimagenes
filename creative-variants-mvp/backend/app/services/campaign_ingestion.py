@@ -83,7 +83,7 @@ _PSD_DECORATION_MARKERS = {
 _PSD_EXCLUDED_MARKERS = {
     "producto", "product", "sku", "modelo", "pack", "combo", "precio",
     "price", "oferta", "promo", "promotion", "discount", "descuento",
-    "cuota", "titulo", "titular", "headline", "copy", "texto", "text",
+    "cuota", "titulo", "titular", "headline", "texto", "text",
     "legal", "cta", "llamado", "fecha", "date", "vigencia", "validity",
     "vencimiento", "vence", "codigo", "code", "qr", "url", "link", "web",
     "website", "instagram", "insta", "ig", "facebook", "fb", "tiktok", "youtube",
@@ -94,6 +94,12 @@ _PSD_EXCLUDED_MARKERS = {
 # cuando el logo está construido de varias formas. Es una señal tan fuerte
 # como "logo" y no debe terminar como una decoración genérica.
 _PSD_LOGO_MARKERS = {"logo", "logotipo", "isotipo", "marca", "brand", "wordmark"}
+# Photoshop bautiza cada duplicado añadiendo "copy" o "copia" al nombre, y los
+# PSD de agencia están llenos de ellos. Mientras "copy" estuvo en la lista de
+# exclusión, una capa llamada "logo copy" —un logotipo real— se descartaba, y
+# "logo cece copia" se conservaba solo porque el sufijo estaba en español. Estas
+# palabras no dicen nada del contenido: se quitan antes de clasificar.
+_PSD_DUPLICATE_TOKENS = {"copy", "copia", "copie", "kopie", "duplicado"}
 
 
 def _representative_indices(total: int, limit: int) -> list[int]:
@@ -834,33 +840,93 @@ def _psd_name_tokens(name: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", folded.casefold()))
 
 
-def _psd_fixed_asset_role(name: str, kind: str, is_group: bool) -> str | None:
+def _psd_fixed_asset_role(
+    name: str,
+    kind: str,
+    is_group: bool,
+    *,
+    bbox: tuple[int, int, int, int] | None = None,
+    canvas: tuple[int, int] | None = None,
+) -> str | None:
     """Devuelve un rol seguro para una capa PSD que puede congelarse.
 
-    Nunca interpretamos grupos: un grupo llamado ""fondo"" puede incluir el
-    titular, una foto o un precio. Tampoco se reutilizan capas de texto ni
-    nombres que indiquen contenido variable o iconografía de redes. Esta
-    restricción es la que evita que una plantilla copie un arte fuente entero.
+    Nunca se interpretan grupos: medido en un KV real, un grupo llamado ``BG``
+    contenía la foto del producto, el logo y el legal a la vez. Tampoco se
+    reutilizan capas de texto ni nombres que indiquen contenido variable o
+    iconografía de redes. Esa restricción es la que evita que una plantilla
+    copie el arte fuente entero con su producto dentro.
     """
 
-    tokens = _psd_name_tokens(name)
-    if not tokens or tokens.intersection(_PSD_EXCLUDED_MARKERS):
+    kind_folded = kind.casefold()
+    # El texto es variable por definición: es lo que cada fila de la matriz
+    # reescribe. Esto va primero para que ningún nombre lo rescate.
+    if kind_folded == "type":
+        return None
+    tokens = _psd_name_tokens(name) - _PSD_DUPLICATE_TOKENS
+    if tokens.intersection(_PSD_EXCLUDED_MARKERS):
         return None
     if tokens.intersection(_PSD_LOGO_MARKERS):
         # Un logotipo real muchas veces es un grupo con letras, vectoriales y
         # máscaras dentro. Componer el grupo preserva sus proporciones y evita
-        # reemplazarlo por una "M" o por el icono de una red social. Para los
-        # demás grupos seguimos siendo conservadores: podrían contener precio,
-        # producto o copy variable.
-        if kind.casefold() == "type":
-            return None
+        # reemplazarlo por una "M" o por el icono de una red social.
         return "logo"
-    if is_group or kind.casefold() == "type":
+    # Un grupo NO se congela aunque se llame "fondo". Medido en el KV de
+    # muebles: su grupo "BG" contiene la foto del producto, el logo y el legal
+    # juntos, así que componerlo horneaba la mesa en todas las piezas y sacaba
+    # el logo por duplicado. El nombre del grupo describe su intención, no su
+    # contenido.
+    if is_group:
         return None
     if tokens.intersection(_PSD_BACKGROUND_MARKERS):
         return "fixed_background"
     if tokens.intersection(_PSD_DECORATION_MARKERS):
         return "fixed_decoration"
+    return None
+
+
+def _psd_clip_to_frame(
+    bbox: tuple[int, int, int, int] | None,
+    frame: tuple[int, int, int, int],
+) -> tuple[int, int, int, int] | None:
+    """Recorta una capa a su artboard, en coordenadas del documento."""
+
+    if bbox is None:
+        return None
+    left = max(bbox[0], frame[0])
+    top = max(bbox[1], frame[1])
+    right = min(bbox[2], frame[2])
+    bottom = min(bbox[3], frame[3])
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
+
+
+def _psd_artboard_frame(layer) -> tuple[tuple[int, int, int, int], tuple[int, int]] | None:
+    """Devuelve el artboard que contiene a esta capa, si lo hay.
+
+    Un PSD de agencia trae varias piezas en el MISMO documento: en el KV de
+    muebles conviven cuatro artboards —portada y producto, en post 1080x1080 y
+    en story 1080x1920— dentro de un lienzo de 2235x3100. Medir sus capas contra
+    el documento entero metía el fondo de una pieza en un cuadrante de la
+    plantilla y superponía dos artes distintos, con la costura a la vista.
+
+    El arte de verdad es el artboard, así que cada capa se mide contra el suyo.
+    """
+
+    actual = getattr(layer, "parent", None)
+    while actual is not None:
+        if str(getattr(actual, "kind", "") or "").casefold() == "artboard":
+            raw = getattr(actual, "bbox", None)
+            if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+                return None
+            try:
+                left, top, right, bottom = (int(value) for value in raw)
+            except (TypeError, ValueError, OverflowError):
+                return None
+            if right <= left or bottom <= top:
+                return None
+            return (left, top, right, bottom), (right - left, bottom - top)
+        actual = getattr(actual, "parent", None)
     return None
 
 
@@ -993,10 +1059,30 @@ def _extract_psd(
             if text_value:
                 text_chunks.append(text_value)
 
-            role = _psd_fixed_asset_role(name, kind, is_group)
+            # El marco de referencia de una capa es su artboard cuando lo
+            # tiene, y el documento solo cuando el PSD trae una sola pieza.
+            frame = _psd_artboard_frame(layer)
+            frame_box = frame[0] if frame else (0, 0, source.width, source.height)
+            frame_size = frame[1] if frame else (source.width, source.height)
+            raster_bbox = _psd_clip_to_frame(bounded_bbox, frame_box)
+            asset_bbox = (
+                None if raster_bbox is None
+                else (
+                    raster_bbox[0] - frame_box[0], raster_bbox[1] - frame_box[1],
+                    raster_bbox[2] - frame_box[0], raster_bbox[3] - frame_box[1],
+                )
+            )
+            role = _psd_fixed_asset_role(
+                name,
+                kind,
+                is_group,
+                bbox=asset_bbox,
+                canvas=frame_size,
+            )
             if (
                 role is None
-                or bounded_bbox is None
+                or raster_bbox is None
+                or asset_bbox is None
                 or not bool(getattr(layer, "visible", True))
             ):
                 continue
@@ -1018,12 +1104,12 @@ def _extract_psd(
             if same_role >= role_limit:
                 continue
             try:
-                layer_width = bounded_bbox[2] - bounded_bbox[0]
-                layer_height = bounded_bbox[3] - bounded_bbox[1]
+                layer_width = raster_bbox[2] - raster_bbox[0]
+                layer_height = raster_bbox[3] - raster_bbox[1]
                 if layer_width * layer_height > settings.campaign_max_source_pixels:
                     continue
                 rgba = _asset_rgba_from_psd_layer(
-                    layer, bounded_bbox, (source.width, source.height)
+                    layer, raster_bbox, (source.width, source.height)
                 )
                 if rgba is None:
                     continue
@@ -1043,8 +1129,8 @@ def _extract_psd(
                     "name": name[:240],
                     "role": role,
                     "path": relative,
-                    "bbox": list(bounded_bbox),
-                    "source_size": [source.width, source.height],
+                    "bbox": list(asset_bbox),
+                    "source_size": [frame_size[0], frame_size[1]],
                     "rendered_size": rendered_size,
                     "z_index": index,
                 })

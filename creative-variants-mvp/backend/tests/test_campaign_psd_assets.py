@@ -249,3 +249,67 @@ def test_psd_logo_group_is_preserved_instead_of_becoming_a_wordmark(
     logos = [item for item in source.meta["layer_assets"] if item["role"] == "logo"]
     assert len(logos) == 1
     assert logos[0]["name"] == "Marca gráfica"
+
+
+def test_un_sufijo_copy_de_photoshop_no_descarta_un_logotipo_real():
+    """"copy" es como Photoshop bautiza un duplicado, no el copy publicitario.
+
+    Medido en un PSD de Cyber real: la capa ``logo copy`` es un logotipo, y se
+    descartaba porque "copy" estaba en la lista de contenido variable. Su gemela
+    ``logo cece copia`` si se conservaba, solo porque el sufijo estaba en
+    español. Esa asimetria delataba el fallo.
+    """
+    from app.services.campaign_ingestion import _psd_fixed_asset_role
+
+    assert _psd_fixed_asset_role("logo copy", "smartobject", False) == "logo"
+    assert _psd_fixed_asset_role("logo cece copia", "group", True) == "logo"
+    assert _psd_fixed_asset_role("Fondo copy", "shape", False) == "fixed_background"
+    # Y el copy publicitario de verdad sigue siendo variable: es texto.
+    assert _psd_fixed_asset_role("Copy principal", "type", False) is None
+    assert _psd_fixed_asset_role("titular copy", "shape", False) is None
+
+
+def test_un_grupo_no_se_congela_aunque_se_llame_fondo():
+    """Medido en un KV real: el grupo "BG" traia foto, logo y legal dentro.
+
+    Componerlo horneaba el producto en todas las piezas y duplicaba el logo. El
+    nombre de un grupo describe su intencion, no su contenido.
+    """
+    from app.services.campaign_ingestion import _psd_fixed_asset_role
+
+    assert _psd_fixed_asset_role("BG", "group", True) is None
+    assert _psd_fixed_asset_role("fondo", "group", True) is None
+    # Una capa suelta con ese nombre si es fondo.
+    assert _psd_fixed_asset_role("fondo", "shape", False) == "fixed_background"
+
+
+def test_las_capas_se_miden_contra_su_artboard_y_no_contra_el_documento():
+    """Un PSD de agencia trae varias piezas en el mismo lienzo.
+
+    En el KV de muebles conviven cuatro artboards (post 1080x1080 y story
+    1080x1920) dentro de 2235x3100. Midiendo contra el documento, el logo de la
+    portada aterrizaba en un cuadrante diminuto de la plantilla.
+    """
+    from app.services.campaign_ingestion import _psd_artboard_frame, _psd_clip_to_frame
+
+    class _Falsa:
+        def __init__(self, kind, bbox, parent=None):
+            self.kind, self.bbox, self.parent = kind, bbox, parent
+
+    artboard = _Falsa("artboard", (0, 1180, 1080, 3100))
+    grupo = _Falsa("group", (0, 1180, 1080, 3100), artboard)
+    capa = _Falsa("smartobject", (320, 1363, 761, 1410), grupo)
+
+    marco = _psd_artboard_frame(capa)
+    assert marco == ((0, 1180, 1080, 3100), (1080, 1920))
+    # Recortada al artboard y trasladada a su origen.
+    recorte = _psd_clip_to_frame(capa.bbox, marco[0])
+    assert recorte == (320, 1363, 761, 1410)
+    relativa = (
+        recorte[0] - marco[0][0], recorte[1] - marco[0][1],
+        recorte[2] - marco[0][0], recorte[3] - marco[0][1],
+    )
+    assert relativa == (320, 183, 761, 230)
+
+    # Sin artboard, el marco es el documento entero.
+    assert _psd_artboard_frame(_Falsa("smartobject", (0, 0, 10, 10))) is None
