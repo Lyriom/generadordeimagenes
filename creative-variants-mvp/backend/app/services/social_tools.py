@@ -161,8 +161,11 @@ def instagram_catalog(*, refresh: bool = False) -> list[dict]:
         entradas.append({
             "id": numero,
             "name": str(fila.get("nom_page") or fila.get("Name") or "")[:240],
-            # El enlace se llama lien_page: de ahi sale el usuario con el que
-            # se empareja la URL que puso la persona en la campaña.
+            # Verificado contra la API real: GetPages trae el usuario ya
+            # separado en screenName_page y ademas el enlace en lien_page.
+            # Se guarda el usuario porque emparejar por el es exacto; parsear
+            # el enlace queda solo de respaldo.
+            "handle": str(fila.get("screenName_page") or "").casefold()[:80],
             "link": str(
                 fila.get("lien_page") or fila.get("Link") or fila.get("link") or ""
             )[:500],
@@ -180,8 +183,10 @@ def find_account(handle: str) -> dict | None:
     if not objetivo:
         return None
     for entrada in instagram_catalog():
-        enlace = str(entrada.get("link") or "")
-        usuario = instagram_handle(enlace) if enlace else None
+        usuario = str(entrada.get("handle") or "").casefold()
+        if not usuario:
+            enlace = str(entrada.get("link") or "")
+            usuario = instagram_handle(enlace) or "" if enlace else ""
         if usuario == objetivo:
             return entrada
     return None

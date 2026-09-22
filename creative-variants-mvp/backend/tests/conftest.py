@@ -24,6 +24,14 @@ os.environ["INPAINTING_PROVIDER"] = "opencv"
 # en un mock pueda llegar a gastar créditos de verdad.
 os.environ["MAGNIFIC_API_KEY"] = "clave-de-prueba"
 os.environ["MIN_IMAGE_SIDE"] = "64"
+# Social Tools se apaga a la fuerza, y esto NO es decorativo: `app.config` llama
+# a load_dotenv(), asi que un .env con las credenciales reales en la raiz del
+# proyecto —el que hace falta para probar en local— las mete en toda la suite.
+# Con ellas puestas, un test de evidencia social salia a la API de pago de
+# verdad y descargaba el feed de una cuenta ajena. Quien necesite ejercitar el
+# proveedor lo habilita en su propio test, como hace tests/test_social_tools.py.
+os.environ["SOCIALTOOLS_LOGIN"] = ""
+os.environ["SOCIALTOOLS_PASSWORD"] = ""
 os.environ["INGEST_DIR"] = str(pathlib.Path(_TMP_DATA) / "ingest")
 # Celery en memoria: las pruebas no dependen de Redis ni de un worker aparte.
 os.environ["CELERY_TASK_ALWAYS_EAGER"] = "true"

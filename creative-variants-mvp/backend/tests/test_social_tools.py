@@ -17,6 +17,20 @@ from app.services import campaign_analysis, social_tools
 from app.models.campaign import Campaign
 
 
+def test_la_suite_nace_con_social_tools_apagado():
+    """Protege el bolsillo y a las cuentas ajenas.
+
+    `app.config` llama a load_dotenv(), asi que un .env con las credenciales
+    reales -el que hace falta para probar en local- las metia en toda la suite:
+    un test de evidencia social salia a la API de pago y se descargaba el feed
+    de otra marca. conftest las vacia; esto lo deja fijado.
+    """
+    import os
+
+    assert os.environ.get("SOCIALTOOLS_LOGIN") == ""
+    assert os.environ.get("SOCIALTOOLS_PASSWORD") == ""
+
+
 @pytest.fixture(autouse=True)
 def _credenciales(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "socialtools_login", "equipo@misiva.com.ec")
@@ -46,10 +60,12 @@ CATALOGO = {
     "export": [
         {
             "id_page": 1, "nom_page": "Coca-Cola", "nom_pays": "INTERNATIONAL",
+            "screenName_page": "cocacola",
             "lien_page": "http://instagram.com/cocacola", "nbFollowers_page": 3342960,
         },
         {
             "id_page": 38790, "nom_page": "Marcimex", "nom_pays": "ECUADOR",
+            "screenName_page": "marcimexec",
             "lien_page": "http://instagram.com/marcimexec", "nbFollowers_page": 150202,
         },
     ]
