@@ -629,14 +629,24 @@ def _collect_social_evidence(campaign: Campaign) -> list[str]:
                             "blocked_reason": str(result.get("blocked_reason") or "login_wall")[:80],
                         }
                         warnings.append(
-                            f"{url}: la red mostro una pantalla de acceso y no entrego posts. "
-                            "Añade capturas o enlaces publicos a publicaciones."
+                            f"{url}: la red exige sesion iniciada para mostrar publicaciones. "
+                            "Sube capturas o los artes en Material de campaña: es la unica via "
+                            "que lee sus composiciones."
                         )
                         continue
                     evidence[url] = result
                     if not result.get("posts"):
+                        # Ni el perfil ni el enlace a una publicacion concreta
+                        # entregan imagenes a quien no ha iniciado sesion: ambos
+                        # devuelven la aplicacion en JavaScript. Del perfil se
+                        # aprovecha nombre, biografia y comunidad; pedir "enlaces
+                        # directos a publicaciones" mandaba a un callejon sin
+                        # salida. Comprobado contra instagram.com y facebook.com
+                        # el 2026-09-22.
                         warnings.append(
-                            f"{url}: se leyo el sitio, pero no expuso imagenes publicas de posts."
+                            f"{url}: se leyo el perfil, pero la red no entrega sus imagenes "
+                            "sin sesion iniciada. Sube capturas o los artes en Material de "
+                            "campaña para que la IA lea las composiciones."
                         )
                 except PublicReferenceError:
                     evidence[url] = {
@@ -1557,17 +1567,32 @@ def _openai_analysis(
     )
     content: list[dict] = [{"type": "text", "text": prompt}]
     content.extend(_preview_content(campaign))
-    with httpx.Client(timeout=min(settings.request_timeout, 60)) as client:
-        response = client.post(
-            settings.openai_vision_endpoint,
-            headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-            json={
-                "model": settings.openai_vision_model,
-                "response_format": {"type": "json_object"},
-                "messages": [{"role": "user", "content": content}],
-            },
-        )
-        response.raise_for_status()
+    # Un corte aquí no da un brief peor: da el brief local, sin haber mirado
+    # ninguna de las vistas. Por eso se reintenta una vez ante un timeout o un
+    # fallo de red —que en una llamada de varios minutos son el fallo normal—
+    # antes de renunciar. Un HTTP 4xx/5xx no se reintenta: repetirlo no cambia
+    # la respuesta y solo alarga la espera de quien está mirando la pantalla.
+    attempts = 2
+    for attempt in range(1, attempts + 1):
+        try:
+            with httpx.Client(timeout=settings.campaign_analysis_timeout) as client:
+                response = client.post(
+                    settings.openai_vision_endpoint,
+                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                    json={
+                        "model": settings.openai_vision_model,
+                        "response_format": {"type": "json_object"},
+                        "messages": [{"role": "user", "content": content}],
+                    },
+                )
+                response.raise_for_status()
+            break
+        except httpx.TransportError as exc:  # incluye TimeoutException
+            if attempt == attempts:
+                raise
+            logger.info(
+                "Reintentando el analisis de campana tras %s", type(exc).__name__
+            )
     body = response.json()
     raw = body["choices"][0]["message"]["content"]
     parsed = json.loads(raw)

@@ -2292,8 +2292,8 @@ function renderCampaignIntelligence(): void {
   const socialEvidence = evidence.map((item) => [
     '<article class="social-evidence"><strong>', esc(item.title || item.url), '</strong>',
     item.accessible === false
-      ? '<p class="muted"><strong>No se usó como post:</strong> la red bloqueó la lectura pública. '
-        + 'Pega enlaces públicos de posts concretos o sube capturas en “Material de campaña” si esta referencia es importante.</p>'
+      ? '<p class="muted"><strong>No se usó como post:</strong> la red exige sesión iniciada para mostrar publicaciones. '
+        + 'Sube capturas o los artes originales en “Material de campaña”: es la única vía que lee sus composiciones.</p>'
       : item.description ? '<p>' + esc(item.description) + '</p>' : '',
     item.accessible !== false && item.posts?.length
       ? '<p class="muted tiny"><strong>' + String(item.posts.length) + '</strong> imagen' + (item.posts.length === 1 ? '' : 'es') + ' de publicaciones públicas; se excluyeron avatar y logos de red.</p><div class="evidence-strip">' + item.posts.slice(0, 5).map((post) =>
@@ -2301,7 +2301,12 @@ function renderCampaignIntelligence(): void {
         '" alt="Post público de referencia" loading="lazy" referrerpolicy="no-referrer"></a>'
       ).join("") + '</div>'
       : item.accessible !== false
-        ? '<p class="muted">Se leyó la URL, pero no expuso imágenes públicas de posts. Prueba con enlaces directos a publicaciones o añade capturas.</p>'
+        // Instagram y Facebook no publican las imágenes de sus posts a quien no
+        // ha iniciado sesión, ni en el perfil ni en el enlace a una publicación
+        // concreta: ambos devuelven solo la app en JavaScript. Del perfil se
+        // aprovecha nombre, biografía y comunidad; las composiciones tienen que
+        // entrar como archivo.
+        ? '<p class="muted">Se leyó el perfil —nombre, biografía y comunidad—, pero la red no entrega sus imágenes sin sesión iniciada. Para que la IA lea las composiciones, sube capturas o los artes en “Material de campaña”.</p>'
         : '',
     '</article>',
   ].join("")).join("");

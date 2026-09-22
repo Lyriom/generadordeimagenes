@@ -246,6 +246,12 @@ class Settings:
             "CAMPAIGN_MAX_BATCH_MEGAPIXELS", 240
         )
         self.request_timeout: int = _env_int("PROVIDER_TIMEOUT", 180)
+        # El brief de campana es una sola llamada de vision con el prompt, el
+        # manifiesto de fuentes y hasta ocho vistas en base64. En una campana
+        # con varios PSD eso no cabe en un minuto, y al agotarse se cae al
+        # analisis local sin que nadie lo pida. Es su propio ajuste porque no
+        # se parece a ninguna otra llamada: las demas mandan una imagen.
+        self.campaign_analysis_timeout: int = _env_int("CAMPAIGN_ANALYSIS_TIMEOUT", 240)
 
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.ingest_dir.mkdir(parents=True, exist_ok=True)

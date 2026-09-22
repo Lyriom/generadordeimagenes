@@ -1,7 +1,12 @@
 """Las plantillas fallback deben seguir la evidencia, incluso sin OpenAI."""
 from __future__ import annotations
 
+import pytest
+
+from app.config import settings
 from app.models.campaign import Campaign, CampaignBrief, CampaignSource, CampaignSourceRole
+from app.models.template import Brand
+from app.models.campaign import ClientKnowledge
 from app.services import campaign_analysis
 from app.services.campaign_analysis import deterministic_candidates
 from app.services.production_matrix import MatrixRow, select_template
@@ -150,3 +155,148 @@ def test_referencia_social_bloqueada_queda_visible_pero_no_se_usa_como_post(
     assert evidence["posts"] == []
     assert evidence["blocked_reason"] == "login_wall"
     assert any("capturas" in warning for warning in warnings)
+
+
+def test_un_perfil_legible_sin_posts_no_manda_a_pegar_enlaces_de_publicacion(
+    monkeypatch,
+):
+    """El aviso no puede proponer un camino que no existe.
+
+    Ni el perfil ni el enlace a una publicacion concreta entregan imagenes a
+    quien no ha iniciado sesion: Instagram y Facebook devuelven la aplicacion en
+    JavaScript. Pedir "enlaces directos a publicaciones" mandaba a un callejon
+    sin salida; la unica via real es subir capturas o los artes.
+    """
+    campaign = Campaign(
+        client_id="cliente",
+        name="Campaña",
+        social_urls=["https://facebook.com/marca"],
+    )
+    monkeypatch.setattr(
+        campaign_analysis,
+        "inspect_public_url",
+        lambda _url, timeout: {
+            "url": "https://facebook.com/marca",
+            "title": "Marca",
+            "description": "422.458 followers · Conectamos la tecnologia a tus manos",
+            "posts": [],
+            "accessible": True,
+            "blocked_reason": "",
+        },
+    )
+
+    warnings = campaign_analysis._collect_social_evidence(campaign)
+
+    [evidence] = campaign.meta["social_evidence"]
+    # El perfil si aporta contexto: nombre, biografia y comunidad.
+    assert evidence["accessible"] is True
+    assert evidence["posts"] == []
+    aviso = " ".join(warnings)
+    assert "Material de campaña" in aviso
+    assert "enlaces directos" not in aviso
+    assert "enlaces publicos" not in aviso
+
+
+def test_el_analisis_reintenta_una_vez_antes_de_rendirse_al_brief_local(monkeypatch):
+    """Un corte no da un brief peor: da uno que no miro ninguna vista.
+
+    La llamada de vision dura minutos y manda varias imagenes; un timeout suelto
+    es el fallo normal, no una señal de que OpenAI no sirva. Se reintenta una vez
+    antes de caer al analisis local.
+    """
+    import httpx
+
+    intentos: list[int] = []
+
+    class RespuestaFalsa:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {"message": {"content": '{"brief": {}, "template_candidates": []}'}}
+                ]
+            }
+
+    class ClienteFalso:
+        def __init__(self, *_args, **kwargs):
+            self.timeout = kwargs.get("timeout")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            intentos.append(1)
+            if len(intentos) == 1:
+                raise httpx.ReadTimeout("tardo demasiado")
+            # El ajuste dedicado manda: sin el, el tope quedaba en 60 s.
+            assert self.timeout == settings.campaign_analysis_timeout
+            return RespuestaFalsa()
+
+    monkeypatch.setattr(campaign_analysis.httpx, "Client", ClienteFalso)
+    monkeypatch.setattr(settings, "openai_api_key", "clave-de-prueba")
+    campaign = Campaign(client_id="cliente", name="Campaña")
+    brand = Brand(name="Marca")
+    fallback = campaign_analysis.deterministic_brief(
+        campaign, brand, ClientKnowledge(client_id="cliente")
+    )
+
+    brief, candidatas = campaign_analysis._openai_analysis(
+        campaign,
+        brand,
+        ClientKnowledge(client_id="cliente"),
+        fallback,
+        deterministic_candidates(campaign, fallback),
+    )
+
+    assert len(intentos) == 2, "un timeout debe reintentarse una vez"
+    # Y el reintento sirve de algo: devuelve el analisis, no el de respaldo.
+    assert brief is not None
+    assert len(candidatas) >= 3
+
+
+def test_un_http_de_error_no_se_reintenta(monkeypatch):
+    """Repetir un 4xx/5xx no cambia la respuesta y alarga la espera."""
+    import httpx
+
+    intentos: list[int] = []
+
+    class ClienteFalso:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            intentos.append(1)
+            raise httpx.HTTPStatusError(
+                "429", request=httpx.Request("POST", "https://api.openai.com"),
+                response=httpx.Response(429),
+            )
+
+    monkeypatch.setattr(campaign_analysis.httpx, "Client", ClienteFalso)
+    monkeypatch.setattr(settings, "openai_api_key", "clave-de-prueba")
+    campaign = Campaign(client_id="cliente", name="Campaña")
+    brand = Brand(name="Marca")
+    fallback = campaign_analysis.deterministic_brief(
+        campaign, brand, ClientKnowledge(client_id="cliente")
+    )
+
+    with pytest.raises(httpx.HTTPStatusError):
+        campaign_analysis._openai_analysis(
+            campaign,
+            brand,
+            ClientKnowledge(client_id="cliente"),
+            fallback,
+            deterministic_candidates(campaign, fallback),
+        )
+
+    assert len(intentos) == 1, "un HTTP de error no debe reintentarse"
