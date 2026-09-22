@@ -122,6 +122,22 @@ defecto de Plesk dejan que la lea cualquier otro usuario del servidor.
 
 ## Paso 4 · Levantarlo a mano una vez
 
+> **Los dos archivos, siempre.** `docker compose up -d` a secas levanta solo el
+> modo local y rompe el sitio de tres formas a la vez: publica el 6379 de Redis
+> —que en este servidor ya lo tiene otro proyecto, así que falla—, deja
+> `cv-proxy` huérfano porque solo existe en el overlay, y recrea los
+> contenedores en la red por defecto en vez de en la subred fija, con lo que el
+> proxy deja de encontrar al frontend. Pasó el 22/09/2026.
+>
+> Para no depender de acordarse, ponga esta línea en el `.env` del servidor:
+>
+> ```
+> COMPOSE_FILE=docker-compose.yml:docker-compose.prod.yml
+> ```
+>
+> Con ella, `docker compose up -d` a secas ya hace lo correcto en esta máquina.
+> El despliegue automático pasa los dos `-f` explícitos y no le afecta.
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
@@ -323,4 +339,5 @@ guarda más de **60** (`MAX_PROJECTS_KEPT`).
 | La tanda muere a los 60 s | Falta `proxy_read_timeout 600s` |
 | `cv-proxy` en crash-loop | El `security_opt` comentado del Paso 4 |
 | El deploy falla con «error in libcrypto» | `DEPLOY_SSH_KEY` mal pegado: súbelo con `gh secret set` desde el archivo |
+| «Bind for 0.0.0.0:6379 failed: port is already allocated» y aviso de «orphan containers ([cv-proxy])» | Se levantó con `docker compose up -d` sin el overlay de producción. Repetir con los dos `-f` (Paso 4) y añadir `COMPOSE_FILE` al `.env` para que no vuelva a pasar |
 | «could not find an available, non-overlapping IPv4 address pool» | El pool de Docker está lleno (unos 31 huecos y este servidor tiene 39 redes). Ya está resuelto con la subred fija de `docker-compose.prod.yml`; si esa chocara con algo, `CV_SUBNET=10.x.y.0/24` en el `.env`. **No** reinicie el demonio: reiniciaría todos los proyectos del servidor |
