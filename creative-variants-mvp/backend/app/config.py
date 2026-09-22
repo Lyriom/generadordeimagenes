@@ -253,6 +253,22 @@ class Settings:
         # se parece a ninguna otra llamada: las demas mandan una imagen.
         self.campaign_analysis_timeout: int = _env_int("CAMPAIGN_ANALYSIS_TIMEOUT", 240)
 
+        # Social Tools (api.mysocialtools.net). Es la unica via que entrega las
+        # imagenes del feed de un perfil de Instagram: la red no las publica a
+        # quien no ha iniciado sesion. Solo lee; no escribe nada en la red.
+        # Sin credenciales la campaña sigue funcionando con los archivos y con
+        # los enlaces a publicaciones concretas.
+        self.socialtools_base_url: str = os.getenv(
+            "SOCIALTOOLS_BASE_URL", "https://api.mysocialtools.net"
+        ).rstrip("/")
+        self.socialtools_login: str | None = os.getenv("SOCIALTOOLS_LOGIN") or None
+        self.socialtools_password: str | None = os.getenv("SOCIALTOOLS_PASSWORD") or None
+        self.socialtools_timeout: int = _env_int("SOCIALTOOLS_TIMEOUT", 30)
+        # El catalogo de cuentas pasa de 65.000 entradas: se guarda en disco y
+        # se refresca cada pocos dias en vez de pedirlo en cada analisis.
+        self.socialtools_catalog_hours: int = _env_int("SOCIALTOOLS_CATALOG_HOURS", 72)
+        self.socialtools_days: int = _env_int("SOCIALTOOLS_DAYS", 30)
+
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.ingest_dir.mkdir(parents=True, exist_ok=True)
 

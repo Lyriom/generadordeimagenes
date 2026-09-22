@@ -27,6 +27,14 @@ services:
       # del límite y responde con detalle, en vez de que un proxy corte el POST.
       CAMPAIGN_MAX_SOURCE_MB: "2048"
       CAMPAIGN_MAX_REQUEST_MB: "4096"
+      # Social Tools: la unica via que entrega las imagenes del feed de un
+      # perfil de Instagram. Lo que no es secreto vive aqui y no en el .env del
+      # servidor, para que se vea en el diff quien lo movio. El login y la
+      # contraseña si van en el .env, como el resto de credenciales.
+      SOCIALTOOLS_BASE_URL: "https://api.mysocialtools.net"
+      SOCIALTOOLS_TIMEOUT: "30"
+      SOCIALTOOLS_CATALOG_HOURS: "72"
+      SOCIALTOOLS_DAYS: "30"
       MAX_IMAGE_MEGAPIXELS: "400"
       # Lo mismo con el OCR y con SAM: van dentro de la imagen, y aquí se fija
       # que se usen. Si esto viviera solo en el .env del servidor, un valor
@@ -109,6 +117,14 @@ services:
       MAX_UPLOAD_MB: "4096"
       CAMPAIGN_MAX_SOURCE_MB: "2048"
       CAMPAIGN_MAX_REQUEST_MB: "4096"
+      # Social Tools: la unica via que entrega las imagenes del feed de un
+      # perfil de Instagram. Lo que no es secreto vive aqui y no en el .env del
+      # servidor, para que se vea en el diff quien lo movio. El login y la
+      # contraseña si van en el .env, como el resto de credenciales.
+      SOCIALTOOLS_BASE_URL: "https://api.mysocialtools.net"
+      SOCIALTOOLS_TIMEOUT: "30"
+      SOCIALTOOLS_CATALOG_HOURS: "72"
+      SOCIALTOOLS_DAYS: "30"
       MAX_IMAGE_MEGAPIXELS: "400"
       # Lo mismo con el OCR y con SAM: van dentro de la imagen, y aquí se fija
       # que se usen. Si esto viviera solo en el .env del servidor, un valor

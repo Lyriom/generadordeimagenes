@@ -30,6 +30,7 @@ from ..models.campaign import (
 )
 from ..models.template import Brand
 from . import campaign_store, client_fonts
+from . import social_tools
 from .public_references import PublicReferenceError, inspect_public_url
 
 logger = logging.getLogger(__name__)
@@ -585,6 +586,46 @@ def _apply_brief_overrides(brief: CampaignBrief, campaign: Campaign) -> Campaign
     return CampaignBrief.model_validate({**brief.model_dump(mode="json"), **clean})
 
 
+def _social_tools_evidence(url: str) -> tuple[dict, str] | None:
+    """Evidencia del feed real de un perfil de Instagram, vía Social Tools.
+
+    Un perfil no publica sus imágenes a quien no ha iniciado sesión, así que
+    el lector público solo saca el avatar. Social Tools sí las entrega, y es
+    la diferencia entre analizar cómo compone la marca y no analizar nada.
+
+    Devuelve ``None`` cuando esta URL no es un perfil de Instagram: un enlace a
+    una publicación concreta ya funciona por ``og:image`` y no gasta una
+    llamada de API.
+    """
+
+    try:
+        lectura = social_tools.profile_posts(url)
+    except Exception as exc:  # noqa: BLE001 - un proveedor caído no corta el brief
+        logger.info("Social Tools no disponible (%s)", type(exc).__name__)
+        return None
+    if lectura is None:
+        return None
+    posts = lectura.get("posts") or []
+    handle = lectura.get("handle") or ""
+    if not posts:
+        # Sin cobertura no se inventa evidencia: se dice el motivo y el lector
+        # público sigue su curso para al menos sacar nombre y biografía.
+        return None, str(lectura.get("detail") or "")  # type: ignore[return-value]
+    cuenta = lectura.get("account") or {}
+    return (
+        {
+            "url": url,
+            "title": str(cuenta.get("name") or f"@{handle}")[:180],
+            "description": str(posts[0].get("text") or "")[:1000],
+            "posts": [str(item["media"]) for item in posts],
+            "accessible": True,
+            "blocked_reason": "",
+            "source": "socialtools",
+        },
+        f"{url}: se leyeron {len(posts)} publicaciones reales del feed vía Social Tools.",
+    )
+
+
 def _collect_social_evidence(campaign: Campaign) -> list[str]:
     """Lee varias URLs y deja trazabilidad aun cuando una red bloquee el acceso.
 
@@ -610,6 +651,24 @@ def _collect_social_evidence(campaign: Campaign) -> list[str]:
     }
     pending = [url for url in urls if url not in evidence]
     warnings: list[str] = []
+    # Los perfiles de Instagram se resuelven antes por Social Tools: es la única
+    # via que entrega las imagenes de su feed. Lo que no cubra —Facebook, otros
+    # sitios, enlaces a publicaciones sueltas— sigue por el lector publico.
+    if pending and social_tools.available():
+        resueltos: list[str] = []
+        for url in pending:
+            leido = _social_tools_evidence(url)
+            if leido is None:
+                continue
+            registro, aviso = leido
+            if registro is None:
+                if aviso:
+                    warnings.append(f"{url}: {aviso}")
+                continue
+            evidence[url] = registro
+            warnings.append(aviso)
+            resueltos.append(url)
+        pending = [url for url in pending if url not in resueltos]
     if pending:
         with ThreadPoolExecutor(max_workers=min(4, len(pending))) as pool:
             futures = {
