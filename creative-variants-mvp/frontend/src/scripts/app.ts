@@ -5236,22 +5236,24 @@ function manualMatrixEditorHtml(
       '<div class="manual-matrix-grid">' +
       input(row, "product", "Producto(s) / arte grupal", { placeholder: "Silla | Mesa | Lámpara" }) +
       input(row, "image", "Archivo(s) de imagen", { placeholder: "silla.png | mesa.png", list: "matrix-asset-names" }) +
+      // Cada casilla dice qué pasa si se deja vacía. Son catorce campos: sin
+      // esto hay que rellenarlos todos por si acaso, y la mitad no hace falta.
       input(row, "headline", "Titular", { placeholder: "Vacío = IA si la plantilla lo permite" }) +
-      input(row, "subtitle", "Subtítulo") +
-      input(row, "price", "Precio actual") +
-      input(row, "previousPrice", "Precio anterior") +
-      input(row, "installment", "Cuota") +
-      input(row, "discount", "Descuento") +
-      input(row, "cta", "CTA") +
-      input(row, "validity", "Vigencia") +
-      input(row, "legal", "Legal") +
+      input(row, "subtitle", "Subtítulo", { placeholder: "Vacío = IA si la plantilla lo permite" }) +
+      input(row, "price", "Precio actual", { placeholder: "Vacío = no se dibuja" }) +
+      input(row, "previousPrice", "Precio anterior", { placeholder: "Vacío = no se dibuja" }) +
+      input(row, "installment", "Cuota", { placeholder: "Vacío = no se dibuja" }) +
+      input(row, "discount", "Descuento", { placeholder: "Vacío = no se dibuja" }) +
+      input(row, "cta", "CTA", { placeholder: "Vacío = no se dibuja; nunca se inventa" }) +
+      input(row, "validity", "Vigencia", { placeholder: "Vacío = no se dibuja" }) +
+      input(row, "legal", "Legal", { placeholder: "Vacío = los legales del brief" }) +
       input(row, "formats", "Formatos", { placeholder: "feed | story | 1080x1350" }) +
       input(row, "proposals", "Propuestas", { type: "number", min: 1, value: Math.max(1, row.proposals) }) +
       template +
       input(row, "notes", "Notas de composición", { placeholder: "Ej. producto principal a la derecha" }) +
       '</div><div class="manual-matrix-composition" data-composition="' + String(row.rowNumber) + '"></div></article>';
   }).join("");
-  return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Para un combo, separa productos y archivos con <strong>|</strong> en el mismo orden. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
+  return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Para un combo, separa productos y archivos con <strong>|</strong> en el mismo orden. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Solo el producto y su imagen son obligatorios. Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
 }
 
 function blankManualMatrixRow(): MatrixRow {

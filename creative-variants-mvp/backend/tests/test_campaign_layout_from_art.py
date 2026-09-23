@@ -343,3 +343,102 @@ def test_una_placa_de_varias_mesas_no_recupera_posiciones_desfasadas():
     campaign_ingestion.ensure_template_plates("c", "k", campaign)
 
     assert "plate_placements" not in fuente.meta
+
+
+# ------------------------------------------------- reticula contra lo medido
+def _candidata_con_medidas(medidas):
+    from app.models.campaign import (
+        NormalizedPlacement, ProductCountRange, TemplateBlueprint,
+        TemplateCandidate, TemplateSlotProposal,
+    )
+
+    return TemplateCandidate(
+        name="Producto protagonista", category="single_product",
+        supported_product_count=ProductCountRange(minimum=1, maximum=1),
+        slots=[
+            TemplateSlotProposal(key=clave, label=clave, category="headline")
+            for clave in (
+                "producto", "titular", "subtitulo", "precio", "precio_anterior",
+                "cuota", "descuento", "cta", "vigencia", "legal", "logo",
+                "nombre_producto",
+            )
+        ],
+        blueprint=TemplateBlueprint(placements={"portrait": {
+            hueco: NormalizedPlacement(x=c[0], y=c[1], width=c[2], height=c[3])
+            for hueco, c in medidas.items()
+        }}),
+    )
+
+
+def _solapan(a, b):
+    return not (
+        a[0] + a[2] <= b[0] or b[0] + b[2] <= a[0]
+        or a[1] + a[3] <= b[1] or b[1] + b[3] <= a[1]
+    )
+
+
+def test_la_reticula_se_aparta_de_lo_que_se_midio_en_el_arte():
+    """Medido: el subtítulo genérico caía encima del sello de descuento real.
+
+    Cuando media composición sale del arte y media de la retícula, las dos no
+    se hablan y se dibujan una sobre otra.
+    """
+    from app.models.formats import FORMAT_PRESETS
+    from app.services.campaign_creative import _layout
+
+    medidas = {
+        "logo": (0.024, 0.015, 0.296, 0.038), "headline": (0.017, 0.118, 0.53, 0.071),
+        "discount": (0.021, 0.202, 0.46, 0.037), "price": (0.043, 0.631, 0.218, 0.073),
+        "previous_price": (0.603, 0.644, 0.173, 0.027),
+        "installment": (0.022, 0.826, 0.459, 0.034),
+        "legal": (0.022, 0.984, 0.655, 0.017),
+        "product": (0.026, 0.262, 0.947, 0.346),
+    }
+    segura = {k: float(v) for k, v in FORMAT_PRESETS["meta_feed_4_5"]["safe_area"].items()}
+
+    regiones = _layout(_candidata_con_medidas(medidas), 1080, 1350, segura, 1)
+
+    textos = [nombre for nombre in regiones if nombre != "product"]
+    choques = [
+        (a, b) for i, a in enumerate(textos) for b in textos[i + 1:]
+        if _solapan(regiones[a], regiones[b])
+    ]
+    assert choques == [], choques
+
+
+def test_lo_medido_no_se_mueve_para_dejar_sitio_a_la_reticula():
+    """La caja medida es donde el diseñador la puso: manda ella."""
+    from app.models.formats import FORMAT_PRESETS
+    from app.services.campaign_creative import _box, _layout
+
+    medidas = {
+        "discount": (0.021, 0.202, 0.46, 0.037),
+        "product": (0.026, 0.262, 0.947, 0.346),
+    }
+    segura = {k: float(v) for k, v in FORMAT_PRESETS["meta_feed_4_5"]["safe_area"].items()}
+
+    regiones = _layout(_candidata_con_medidas(medidas), 1080, 1350, segura, 1)
+
+    util_w = 1 - segura["left"] - segura["right"]
+    util_h = 1 - segura["top"] - segura["bottom"]
+    esperado = _box(1080, 1350, (
+        segura["left"] + 0.021 * util_w, segura["top"] + 0.202 * util_h,
+        0.46 * util_w, 0.037 * util_h,
+    ))
+    assert regiones["discount"] == esperado
+
+
+def test_sin_medidas_la_reticula_queda_exactamente_igual_que_antes():
+    """El apartado solo actúa cuando hay algo medido; si no, no toca nada."""
+    from app.models.formats import FORMAT_PRESETS
+    from app.services.campaign_creative import _layout
+
+    candidata = _candidata_con_medidas({})
+    candidata.blueprint.placements = {}
+    segura = {k: float(v) for k, v in FORMAT_PRESETS["meta_feed_4_5"]["safe_area"].items()}
+
+    antes = _layout(candidata, 1080, 1350, segura, 1)
+    despues = _layout(candidata, 1080, 1350, segura, 1)
+
+    assert antes == despues
+    assert antes["subheadline"][1] < antes["price"][1]

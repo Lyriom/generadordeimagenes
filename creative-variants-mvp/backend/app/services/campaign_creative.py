@@ -478,6 +478,60 @@ def _ink_for(
     return (*mejor, 245)
 
 
+#: Aire entre una caja medida del arte y una que se aparta para no pisarla.
+NUDGE_GAP = .012
+
+
+def _overlap(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> bool:
+    return not (
+        a[0] + a[2] <= b[0] or b[0] + b[2] <= a[0]
+        or a[1] + a[3] <= b[1] or b[1] + b[3] <= a[1]
+    )
+
+
+def _avoid_measured(
+    regions: dict[str, tuple[float, float, float, float]],
+    measured: set[str],
+) -> dict[str, tuple[float, float, float, float]]:
+    """Aparta las cajas de la retícula que pisan a una medida sobre el arte.
+
+    Cuando parte de la composición sale del arte real y parte de la retícula,
+    las dos mitades no se hablan: la retícula colocó el subtítulo donde el
+    diseñador había puesto el sello de descuento, y las dos cajas se dibujaban
+    encima. Medido sobre un KV real: un choque de 4 px entre ambas.
+
+    Manda lo medido —es donde el diseñador lo puso— y cede la retícula, que es
+    una suposición. El producto no se mueve: llevar texto encima es normal.
+    """
+
+    fijas = [regions[name] for name in measured if name in regions and name != "product"]
+    if not fijas:
+        return regions
+    moviles = sorted(
+        (name for name in regions if name not in measured and name != "product"),
+        key=lambda name: regions[name][1],
+    )
+    for name in moviles:
+        x, y, w, h = regions[name]
+        for _intento in range(4):
+            choque = next((caja for caja in fijas if _overlap((x, y, w, h), caja)), None)
+            if choque is None:
+                break
+            debajo = choque[1] + choque[3] + NUDGE_GAP
+            encima = choque[1] - h - NUDGE_GAP
+            if debajo + h <= 1:
+                y = debajo
+            elif encima >= 0:
+                y = encima
+            else:
+                # No cabe ni arriba ni abajo: se deja donde estaba. Encogerla
+                # hasta que quepa daría un texto ilegible, que es peor.
+                break
+        regions[name] = (x, y, w, h)
+        fijas.append((x, y, w, h))
+    return regions
+
+
 def _layout(
     candidate: TemplateCandidate,
     width: int,
@@ -673,6 +727,9 @@ def _layout(
             name: (1 - x - region_width, y, region_width, region_height)
             for name, (x, y, region_width, region_height) in regions.items()
         }
+
+    if explicit:
+        regions = _avoid_measured(regions, set(explicit))
 
     visible = visible_fields or set(regions)
     product_x, product_y, product_w, product_h = regions["product"]
