@@ -1345,6 +1345,35 @@ _PLATE_KINDS = {
     CampaignSourceKind.PDF,
     CampaignSourceKind.PRESENTATION,
 }
+#: Un arte exportado a PDF tiene una página; un manual o una presentación de
+#: estrategia, muchas. Es lo único que separa a un KV de un documento cuando el
+#: nombre del archivo no dice nada.
+_PLATE_MAX_PAGES = 2
+
+
+def _recover_psd_placements(source: CampaignSource) -> None:
+    """Rescata las posiciones de un PSD cuya placa se construyó antes.
+
+    Solo cuando la placa cubre el documento entero: en un PSD de varias mesas
+    de trabajo las cajas del manifiesto están en coordenadas del documento y
+    haría falta el desplazamiento de la mesa, que las placas antiguas no
+    guardaron. Colocar el precio con un desfase es peor que la retícula.
+    """
+
+    manifest = source.meta.get("layer_manifest")
+    placas = source.meta.get("template_plates")
+    if not isinstance(manifest, list) or not isinstance(placas, list) or not placas:
+        return
+    medida = placas[0].get("size") if isinstance(placas[0], dict) else None
+    if not isinstance(medida, (list, tuple)) or len(medida) != 2:
+        return
+    try:
+        ancho, alto = int(medida[0]), int(medida[1])
+    except (TypeError, ValueError, OverflowError):
+        return
+    if (ancho, alto) != (source.width, source.height):
+        return
+    _plate_layout_from_manifest(source, manifest, (0, 0, ancho, alto), (ancho, alto))
 
 
 def _plate_layout_from_manifest(
@@ -1432,7 +1461,15 @@ def ensure_template_plates(
     """
 
     avisos: list[str] = []
-    if any(source.meta.get("template_plates") for source in campaign.sources):
+    con_placa = [source for source in campaign.sources if source.meta.get("template_plates")]
+    if con_placa:
+        # Una campaña con la placa ya hecha por el PSD puede no tener las
+        # posiciones: si el PSD se subió antes de que existieran, se quedaría
+        # con la retícula genérica para siempre, porque la ingesta no se repite
+        # al regenerar el brief. Se recuperan aquí desde su propio manifiesto.
+        for source in con_placa:
+            if not source.meta.get("plate_placements"):
+                _recover_psd_placements(source)
         return avisos
 
     ordenadas: list[tuple[int, int, CampaignSource]] = []
@@ -1444,7 +1481,18 @@ def ensure_template_plates(
             default=None,
         )
         if rango is None:
-            continue
+            # Un KV exportado a PDF no trae ninguna palabra que lo delate y el
+            # clasificador lo deja en "other": sin esto, una campaña cuyo arte
+            # llegó en PDF se quedaba sin placa y volvía a la retícula. Se
+            # admite el último, y solo si parece un arte y no un documento.
+            if (
+                source.kind in {CampaignSourceKind.PDF, CampaignSourceKind.PRESENTATION}
+                and 0 < source.page_count <= _PLATE_MAX_PAGES
+                and CampaignSourceRole.BRAND_MANUAL not in source.roles
+            ):
+                rango = max(_PLATE_ROLE_RANK.values()) + 1
+            else:
+                continue
         # Un arte de campaña es cuadrado o vertical; una lámina apaisada de
         # 16:9 suele ser una presentación, no el KV.
         proporcion = (source.width / source.height) if source.height else 1.0

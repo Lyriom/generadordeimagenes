@@ -42,6 +42,11 @@ services:
       ENABLE_OCR: "true"
       OCR_LANG: "es"
       SEGMENTATION_PROVIDER: "auto"
+      # La placa de plantilla reconstruye el fondo bajo el texto borrado con
+      # este motor. "auto" es Magnific si hay clave, luego OpenAI, luego el
+      # local; queda escrito aquí para que se vea en el diff y no dependa de
+      # un valor olvidado en el .env del servidor.
+      INPAINTING_PROVIDER: "auto"
       SAM_VARIANT: "sam2"
       SAM_CHECKPOINT: /models/sam2.1_hiera_small.pt
       SAM_MODEL_TYPE: configs/sam2.1/sam2.1_hiera_s.yaml
@@ -132,6 +137,11 @@ services:
       ENABLE_OCR: "true"
       OCR_LANG: "es"
       SEGMENTATION_PROVIDER: "auto"
+      # La placa de plantilla reconstruye el fondo bajo el texto borrado con
+      # este motor. "auto" es Magnific si hay clave, luego OpenAI, luego el
+      # local; queda escrito aquí para que se vea en el diff y no dependa de
+      # un valor olvidado en el .env del servidor.
+      INPAINTING_PROVIDER: "auto"
       SAM_VARIANT: "sam2"
       SAM_CHECKPOINT: /models/sam2.1_hiera_small.pt
       SAM_MODEL_TYPE: configs/sam2.1/sam2.1_hiera_s.yaml

@@ -249,3 +249,97 @@ def test_una_cara_de_prueba_no_dibuja_el_arte(tmp_path):
     elegida = campaign_creative._font_path(campaign, bold=True)
 
     assert "sources/x/original.otf" not in elegida
+
+
+# ------------------------------------------------- elegibilidad y recuperación
+def _fuente(nombre, kind, *, paginas=1, roles=(), meta=None, ancho=1080, alto=1350):
+    from app.models.campaign import CampaignSource, CampaignSourceRole
+
+    from app.services.campaign_ingestion import classify_roles
+
+    fuente = CampaignSource(
+        filename=nombre, kind=kind, media_type="x", extension=".x",
+        size_bytes=1, sha256="a" * 64, stored_path=f"sources/{nombre}/original.x",
+        page_count=paginas, width=ancho, height=alto, meta=dict(meta or {}),
+    )
+    fuente.roles = list(roles) or classify_roles(fuente)
+    return fuente
+
+
+def test_un_kv_que_llega_en_pdf_tambien_puede_dar_placa(monkeypatch, tmp_path):
+    """El clasificador lo deja en "other": sin esto se quedaba sin plantilla."""
+
+    from app.models.campaign import Campaign, CampaignSourceKind
+    from app.services import campaign_ingestion
+
+    campaign = Campaign(client_id="c", name="Credifest")
+    campaign.sources = [
+        _fuente("manual de marca.pdf", CampaignSourceKind.PDF, paginas=60),
+        _fuente("credifest.pdf", CampaignSourceKind.PDF, paginas=1),
+    ]
+    intentadas: list[str] = []
+    monkeypatch.setattr(
+        campaign_ingestion, "_plate_artwork_path",
+        lambda _c, _k, source: intentadas.append(source.filename) or None,
+    )
+
+    campaign_ingestion.ensure_template_plates("c", "k", campaign)
+
+    # El arte de una página sí; el manual de 60, no.
+    assert intentadas == ["credifest.pdf"]
+
+
+def test_un_psd_ingerido_antes_recupera_sus_posiciones_al_regenerar():
+    """La ingesta no se repite: sin esto se quedaba con la retícula para siempre."""
+
+    from app.models.campaign import Campaign, CampaignSourceKind
+    from app.services import campaign_ingestion
+
+    manifiesto = [
+        {"name": "titular", "kind": "type", "visible": True, "text": "CREDIFEST",
+         "bbox": [55, 195, 587, 284]},
+        {"name": "precio", "kind": "type", "visible": True, "text": "$499",
+         "bbox": [81, 840, 300, 932]},
+        {"name": "legal", "kind": "type", "visible": True,
+         "text": "Aplican terminos y condiciones.", "bbox": [60, 1282, 718, 1309]},
+    ]
+    fuente = _fuente(
+        "arte.psd", CampaignSourceKind.LAYERED_DESIGN,
+        meta={
+            "layer_manifest": manifiesto,
+            "template_plates": [{"name": "arte", "path": "a/p.png", "size": [1080, 1350]}],
+        },
+    )
+    campaign = Campaign(client_id="c", name="Credifest")
+    campaign.sources = [fuente]
+
+    campaign_ingestion.ensure_template_plates("c", "k", campaign)
+
+    medidas = fuente.meta["plate_placements"]["portrait"]
+    assert {"headline", "price", "legal"} <= set(medidas)
+    assert medidas["headline"]["y"] < medidas["price"]["y"] < medidas["legal"]["y"]
+
+
+def test_una_placa_de_varias_mesas_no_recupera_posiciones_desfasadas():
+    """Sin el desplazamiento del artboard, el precio caería en otro sitio."""
+
+    from app.models.campaign import Campaign, CampaignSourceKind
+    from app.services import campaign_ingestion
+
+    fuente = _fuente(
+        "dos-mesas.psd", CampaignSourceKind.LAYERED_DESIGN, ancho=2160, alto=1350,
+        meta={
+            "layer_manifest": [
+                {"name": "t", "kind": "type", "visible": True, "text": "HOLA",
+                 "bbox": [1200, 100, 1600, 200]},
+            ],
+            # La placa es una sola mesa, más pequeña que el documento.
+            "template_plates": [{"name": "mesa 1", "path": "a/p.png", "size": [1080, 1350]}],
+        },
+    )
+    campaign = Campaign(client_id="c", name="X")
+    campaign.sources = [fuente]
+
+    campaign_ingestion.ensure_template_plates("c", "k", campaign)
+
+    assert "plate_placements" not in fuente.meta
