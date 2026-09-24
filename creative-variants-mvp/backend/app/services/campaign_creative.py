@@ -314,10 +314,15 @@ def _template_plate(
                 0 if source.source_id in preferidas else 1,
                 str(placa.get("name", "PSD")),
                 placa["path"],
+                # El editable vectorial da la placa exacta; el PSD, una
+                # reconstruida; el OCR sobre un arte plano, una adivinada.
+                {"vector": 0, "psd": 1}.get(str(placa.get("origin") or "psd"), 2),
             ))
     if not mejores:
         return None
-    _delta, _pref, nombre, relativa = min(mejores, key=lambda item: (item[1], item[0]))
+    _delta, _pref, nombre, relativa, _rango = min(
+        mejores, key=lambda item: (item[4], item[1], item[0])
+    )
     try:
         path = campaign_store.campaign_path(
             campaign.client_id, campaign.campaign_id, relativa
@@ -1240,6 +1245,33 @@ def _render(
             or (region not in {"product", "logo"} and values.get(region, "").strip())
         )
     }
+    # Sobre la placa del editable, la vista previa enseña solo los campos que
+    # el arte tiene: el nombre, el precio y la cuota en su pastilla, el
+    # producto en su hueco. Un "TITULAR DE CAMPAÑA" en la retícula genérica
+    # encima de un arte real era lo que hacía que la plantilla no sirviera.
+    familia = (
+        "story" if height / width >= 1.62 else "portrait" if height / width > 1.2
+        else "landscape" if width / height > 1.35 else "square"
+    )
+    medidas = set(candidate.blueprint.placements.get(familia, {}))
+    if row is None and candidate.meta.get("plate_measured") and medidas:
+        visible &= medidas | {"logo"}
+        values = {key: (value if key in visible else "") for key, value in values.items()}
+        # La pastilla del arte es de una sola línea: "$ PRECIO" partía en "$"
+        # y la vista previa enseñaba un símbolo suelto.
+        if values.get("price"):
+            values["price"] = "$ 000"
+    elif row is not None and candidate.meta.get("plate_measured") and medidas:
+        # En producción el titular se autocompleta desde el brief. Sobre un
+        # arte que no tiene sitio para titular, ese texto caía en la retícula
+        # genérica encima del logo de campaña. Solo se dibuja si la fila lo
+        # trae escrito: entonces es una decisión de alguien, no un relleno.
+        propios = {"headline": row.titular, "subheadline": row.subtitulo}
+        for clave, escrito in propios.items():
+            if clave not in medidas and not (escrito or "").strip():
+                values[clave] = ""
+                visible.discard(clave)
+        show_product = show_product and "product" in visible
     regions = _layout(candidate, width, height, safe, proposal, visible)
 
     blueprint = candidate.blueprint

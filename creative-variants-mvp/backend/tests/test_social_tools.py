@@ -241,3 +241,51 @@ def test_una_url_que_social_tools_no_cubre_sigue_por_el_lector_publico(monkeypat
     assert leidas == ["https://www.marcimex.com/"]
     [evidencia] = campaign.meta["social_evidence"]
     assert evidencia["posts"] == ["https://marcimex.com/banner.jpg"]
+
+
+def test_un_reel_no_entra_como_imagen_del_feed():
+    """Un reel trae un .mp4 en Url_media y en Thumbnail; OpenAI no lo admite.
+
+    Medido en @marcimexec el 2026-09-24: 4 de 24 posts eran vídeo, y una sola
+    de esas URLs en el mensaje tiraba el análisis entero con HTTP 400.
+    """
+
+    video = "https://scontent.cdninstagram.com/o1/v/t2/f2/m86/reel.mp4"
+    foto = "https://scontent.cdninstagram.com/v/t39/foto.jpg"
+    payload = {"account": [{"Dates": [{"Date": "2026-09-20", "Posts": [
+        {"type": "video", "Url_media": video, "Thumbnail": video, "Date": "10:00"},
+        {"type": "photo", "Url_media": foto, "Thumbnail": foto, "Date": "11:00"},
+    ]}]}]}
+
+    piezas = social_tools._post_images(payload)
+
+    assert [pieza["media"] for pieza in piezas] == [foto]
+
+
+def test_los_posts_viajan_incrustados_y_el_ilegible_se_omite(monkeypatch):
+    """Si OpenAI descarga la URL y una falla, rechaza el mensaje entero."""
+
+    import io
+
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (40, 40), (200, 10, 10)).save(buffer, format="JPEG")
+
+    def _descarga(url, timeout=8.0):
+        if "roto" in url:
+            raise campaign_analysis.PublicReferenceError("403")
+        return buffer.getvalue()
+
+    monkeypatch.setattr(campaign_analysis, "fetch_public_image", _descarga)
+    campaign = Campaign(client_id="cliente", name="Cyber")
+    campaign.meta["social_evidence"] = [{
+        "url": "https://instagram.com/marca",
+        "posts": ["https://cdn.example/roto.jpg", "https://cdn.example/bien.jpg"],
+    }]
+
+    contenido = campaign_analysis._preview_content(campaign)
+
+    imagenes = [parte for parte in contenido if parte["type"] == "image_url"]
+    assert len(imagenes) == 1
+    assert imagenes[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")

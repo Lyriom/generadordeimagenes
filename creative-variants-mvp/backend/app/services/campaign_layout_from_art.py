@@ -29,9 +29,15 @@ MAX_FIELD_RATIO = .28
 
 _MONEDA = re.compile(r"[$€]|\busd\b|\bs/\b", re.IGNORECASE)
 _DIGITO = re.compile(r"\d")
+#: Una cifra sola, con o sin símbolo: "359", "$9,99". Cuando la fuente no viaja
+#: incrustada en el PDF, el "$" se lee como "S" ("S359"); también es un precio.
+_SOLO_CIFRA = re.compile(r"^\s*[$S]?\s*\d[\d.,\s]*$")
 _PORCENTAJE = re.compile(r"\d\s*%|\bdto\b|\bdescuento\b|\boff\b", re.IGNORECASE)
 _ANTES = re.compile(r"\bantes\b|\bregular\b|\bde\s*\$|\bprecio\s+normal\b", re.IGNORECASE)
-_CUOTA = re.compile(r"\bcuota\b|\bal\s*mes\b|\bmensual\b|\bmeses\b|\bdesde\b", re.IGNORECASE)
+_CUOTA = re.compile(
+    r"\bcuotas?\b|\bal\s*mes\b|\bmensual(?:es)?\b|\bsemanal(?:es)?\b|\bmeses\b|\bdesde\b",
+    re.IGNORECASE,
+)
 _VIGENCIA = re.compile(
     r"\bvalid\w*\b|\bvigen\w*\b|\bhasta\s+el\b|\bdel\s+\d|\b\d{1,2}\s*/\s*\d{1,2}\b",
     re.IGNORECASE,
@@ -143,7 +149,7 @@ def clasificar(
     precios = [
         indice for indice, (_l, _caja_, _altura, texto) in enumerate(items)
         if indice not in usados and _DIGITO.search(texto)
-        and (_MONEDA.search(texto) or _ANTES.search(texto))
+        and (_MONEDA.search(texto) or _ANTES.search(texto) or _SOLO_CIFRA.match(texto))
     ]
     anteriores = [indice for indice in precios if _ANTES.search(items[indice][3])]
     if anteriores:
@@ -274,12 +280,6 @@ def placements(
     ancho, alto = size
     if ancho <= 0 or alto <= 0:
         return {}
-    izquierda, arriba = float(safe.get("left", .04)), float(safe.get("top", .04))
-    derecha, abajo = float(safe.get("right", .04)), float(safe.get("bottom", .04))
-    util_w, util_h = 1 - izquierda - derecha, 1 - arriba - abajo
-    if util_w <= 0 or util_h <= 0:
-        return {}
-
     cajas = clasificar(lecturas, size)
     todas = [
         caja for caja in (_caja(item) for item in lecturas if isinstance(item, dict))
@@ -288,7 +288,24 @@ def placements(
     hueco = product_box if product_box is not None else hueco_producto(todas, size)
     if hueco is not None:
         cajas.setdefault("product", hueco)
+    return normalize_boxes(cajas, size, safe)
 
+
+def normalize_boxes(
+    cajas: dict[str, tuple[int, int, int, int]],
+    size: tuple[int, int],
+    safe: dict[str, float],
+) -> dict[str, NormalizedPlacement]:
+    """Cajas en píxeles del lienzo convertidas a coordenadas del área segura."""
+
+    ancho, alto = size
+    if ancho <= 0 or alto <= 0:
+        return {}
+    izquierda, arriba = float(safe.get("left", .04)), float(safe.get("top", .04))
+    derecha, abajo = float(safe.get("right", .04)), float(safe.get("bottom", .04))
+    util_w, util_h = 1 - izquierda - derecha, 1 - arriba - abajo
+    if util_w <= 0 or util_h <= 0:
+        return {}
     resultado: dict[str, NormalizedPlacement] = {}
     for hueco, (x0, y0, x1, y1) in cajas.items():
         x = (x0 / ancho - izquierda) / util_w
@@ -322,4 +339,6 @@ def aspect_key(size: tuple[int, int]) -> str:
     return "square"
 
 
-__all__ = ["aspect_key", "clasificar", "colores", "hueco_producto", "placements"]
+__all__ = [
+    "aspect_key", "clasificar", "colores", "hueco_producto", "normalize_boxes", "placements",
+]

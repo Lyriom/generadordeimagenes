@@ -1,0 +1,1005 @@
+"""Plantillas a partir del editable vectorial: el `.ai` o el PDF con capas.
+
+El `.ai` se trataba como una foto: se rasterizaba la página, el OCR adivinaba
+dónde había texto, el inpainting rellenaba y encima se dibujaba la retícula.
+Con un desplegable de doce productos el resultado era el catálogo entero con
+"TITULAR DE CAMPAÑA" pegado encima: no era una plantilla.
+
+Pero el editable ya dice lo que el OCR adivina. Un PDF de Illustrator conserva
+cada imagen colocada con su caja y su canal alfa, y cada texto con su fuente,
+su cuerpo, su color y su posición exacta. Con eso:
+
+* **Piezas.** Una página de arte es una pieza. En un toolkit —una presentación
+  que enseña los KV dentro de diapositivas— cada KV es una imagen opaca
+  enmarcada dentro de la lámina, y la pieza es ese marco.
+* **Fijo frente a variable.** Lo que se repite entre piezas es identidad: el
+  logo de campaña, el sello, la tipografía de "CRÉDITO DIRECTO". Lo que solo
+  está en una pieza, o lleva cifras, es lo que cada fila de la matriz cambia:
+  el producto recortado, su nombre, el precio y la cuota.
+* **Placa.** Se renderiza la pieza desde el propio PDF con lo variable quitado
+  —el producto sustituido por transparente y el texto redactado sin tocar
+  vectores ni imágenes—. No hay inpainting: el fondo que queda es el que dibujó
+  el diseñador, con la pastilla del precio vacía esperando su cifra.
+* **Posiciones.** Las cajas de lo quitado son los huecos, con su color real.
+
+Una página con muchos productos es un catálogo, no una pieza: de ella no sale
+placa, porque una placa con doce huecos de producto no es una plantilla para
+redes y la alternativa —dejar el catálogo de fondo— es justo lo que se veía mal.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import unicodedata
+from dataclasses import dataclass, field
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+#: Un KV dentro de una lámina ocupa una parte franca de ella; por encima de
+#: esto es el fondo de la diapositiva, por debajo un icono.
+FRAME_MIN_RATIO = .10
+FRAME_MAX_RATIO = .85
+#: Proporciones en las que vive una pieza para redes o un arte impreso.
+MIN_ASPECT, MAX_ASPECT = .45, 2.3
+#: Un producto recortado ocupa una parte visible de la pieza, no un icono.
+PRODUCT_MIN_RATIO = .035
+PRODUCT_MAX_RATIO = .60
+#: Más productos que esto en una pieza es un catálogo.
+CATALOG_PRODUCTS = 4
+#: Lado largo de la placa, en píxeles.
+PLATE_MAX_SIDE = 1600
+#: Un documento enorme no se recorre entero: bastan las primeras láminas.
+MAX_PAGES = 40
+
+_ESPACIADO = re.compile(r"^(?:\S\s){4,}")
+
+
+@dataclass
+class Imagen:
+    xref: int
+    bbox: tuple[float, float, float, float]
+    alpha: bool
+
+
+@dataclass
+class Texto:
+    text: str
+    bbox: tuple[float, float, float, float]
+    size: float
+    color: str
+    font: str
+    #: Texto girado: casi siempre la trama del borde. Nunca se une a otro.
+    rotated: bool = False
+
+
+@dataclass
+class Pieza:
+    page: int
+    rect: tuple[float, float, float, float]
+    frame_xref: int = 0
+    images: list[Imagen] = field(default_factory=list)
+    texts: list[Texto] = field(default_factory=list)
+    products: list[Imagen] = field(default_factory=list)
+    variable_texts: list[Texto] = field(default_factory=list)
+    decorative_texts: list[Texto] = field(default_factory=list)
+
+    @property
+    def width(self) -> float:
+        return self.rect[2] - self.rect[0]
+
+    @property
+    def height(self) -> float:
+        return self.rect[3] - self.rect[1]
+
+    @property
+    def prices(self) -> int:
+        return sum(1 for texto in self.variable_texts if _es_precio(texto.text))
+
+    @property
+    def catalog(self) -> bool:
+        # Un desplegable trae decenas de precios; un KV, uno o dos.
+        return len(self.products) > CATALOG_PRODUCTS or self.prices > CATALOG_PRODUCTS
+
+
+def _fitz():
+    try:
+        import pymupdf as fitz
+    except ImportError:  # PyMuPDF < 1.24 conserva solo el alias histórico.
+        import fitz
+    return fitz
+
+
+def _area(box) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _inter(a, b) -> tuple[float, float, float, float]:
+    return (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+
+
+def _dentro(box, rect, tolerancia: float = .5) -> bool:
+    """El centro de la caja cae en el rect y al menos la mitad de ella también."""
+
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    if not (rect[0] <= cx <= rect[2] and rect[1] <= cy <= rect[3]):
+        return False
+    area = _area(box)
+    return area <= 0 or _area(_inter(box, rect)) / area >= tolerancia
+
+
+def _normal(texto: str) -> str:
+    plano = unicodedata.normalize("NFKD", texto or "")
+    plano = "".join(c for c in plano if not unicodedata.combining(c))
+    return re.sub(r"\s+", "", plano).casefold()
+
+
+def _hex(color: int) -> str:
+    return f"#{(color >> 16) & 255:02X}{(color >> 8) & 255:02X}{color & 255:02X}"
+
+
+def _textos(page) -> list[Texto]:
+    """Los campos de texto de la página, tal como los lee una persona.
+
+    Los bloques del PDF no sirven: Illustrator mete en uno solo la cuota y el
+    precio de la misma pastilla. Se parte de las líneas y se reagrupa: primero
+    lo que está en la misma altura ("$359" y el "00" volado), después las
+    líneas seguidas del mismo cuerpo y color (un nombre de producto a dos
+    renglones).
+    """
+
+    try:
+        datos = page.get_text("dict")
+    except Exception:  # noqa: BLE001 - una página ilegible no tumba el documento
+        return []
+    lineas: list[Texto] = []
+    for bloque in datos.get("blocks", []):
+        if bloque.get("type") != 0:
+            continue
+        for linea in bloque.get("lines", []):
+            tramos = [t for t in linea.get("spans", []) if str(t.get("text", "")).strip()]
+            if not tramos:
+                continue
+            direccion = linea.get("dir") or (1, 0)
+            girada = abs(float(direccion[0]) - 1) > .01
+            mayor = max(tramos, key=lambda t: float(t.get("size") or 0))
+            lineas.append(Texto(
+                text="".join(str(t.get("text", "")) for t in linea.get("spans", [])).strip()[:300],
+                bbox=(
+                    min(t["bbox"][0] for t in tramos), min(t["bbox"][1] for t in tramos),
+                    max(t["bbox"][2] for t in tramos), max(t["bbox"][3] for t in tramos),
+                ),
+                size=float(mayor.get("size") or 0),
+                color=_hex(int(mayor.get("color") or 0)),
+                font=str(mayor.get("font") or "")[:80],
+                rotated=girada,
+            ))
+
+    def unir(a: Texto, b: Texto, separador: str) -> Texto:
+        mayor = a if a.size >= b.size else b
+        return Texto(
+            text=(a.text + separador + b.text).strip()[:300],
+            bbox=(
+                min(a.bbox[0], b.bbox[0]), min(a.bbox[1], b.bbox[1]),
+                max(a.bbox[2], b.bbox[2]), max(a.bbox[3], b.bbox[3]),
+            ),
+            size=mayor.size, color=mayor.color, font=mayor.font,
+        )
+
+    # Misma altura y pegadas: una sola línea.
+    lineas.sort(key=lambda t: (t.bbox[1], t.bbox[0]))
+    hecho = True
+    while hecho:
+        hecho = False
+        for i in range(len(lineas)):
+            for j in range(i + 1, len(lineas)):
+                a, b = lineas[i], lineas[j]
+                if a.rotated or b.rotated:
+                    continue
+                alto = min(a.bbox[3] - a.bbox[1], b.bbox[3] - b.bbox[1])
+                solape = min(a.bbox[3], b.bbox[3]) - max(a.bbox[1], b.bbox[1])
+                hueco = max(a.bbox[0], b.bbox[0]) - min(a.bbox[2], b.bbox[2])
+                cuerpo = max(a.bbox[3] - a.bbox[1], b.bbox[3] - b.bbox[1])
+                if alto > 0 and solape >= alto * .5 and hueco < cuerpo * .6:
+                    izquierda, derecha = (a, b) if a.bbox[0] <= b.bbox[0] else (b, a)
+                    lineas[i] = unir(izquierda, derecha, "")
+                    del lineas[j]
+                    hecho = True
+                    break
+            if hecho:
+                break
+    # Renglones seguidos del mismo cuerpo y color: un solo campo.
+    lineas.sort(key=lambda t: (t.bbox[1], t.bbox[0]))
+    salida: list[Texto] = []
+    for linea in lineas:
+        # No basta con mirar el renglón anterior de la lista: en una lámina
+        # con dos KV lado a lado, ordenar por altura intercala los textos de
+        # uno y otro.
+        destino = None
+        for indice in range(len(salida) - 1, -1, -1):
+            previa = salida[indice]
+            if (
+                not previa.rotated and not linea.rotated
+                and previa.color == linea.color
+                and previa.size > 0
+                and abs(previa.size - linea.size) <= previa.size * .15
+                and min(previa.bbox[2], linea.bbox[2]) > max(previa.bbox[0], linea.bbox[0])
+                and 0 <= linea.bbox[1] - previa.bbox[3] < linea.size * .6
+                and not _ESPACIADO.match(linea.text)
+            ):
+                destino = indice
+                break
+        if destino is None:
+            salida.append(linea)
+        else:
+            salida[destino] = unir(salida[destino], linea, " ")
+    return salida
+
+
+def _alpha_de(doc, xref: int, cache: dict[int, bool]) -> bool:
+    if xref <= 0:
+        return False
+    if xref not in cache:
+        try:
+            cache[xref] = bool(doc.xref_get_key(xref, "SMask")[1] not in ("null", ""))
+        except Exception:  # noqa: BLE001
+            cache[xref] = False
+    return cache[xref]
+
+
+def find_pieces(doc) -> list[Pieza]:
+    """Las piezas del documento: marcos dentro de láminas, o páginas de arte."""
+
+    alfa: dict[int, bool] = {}
+    por_pagina: list[tuple[int, tuple, list[Imagen], list[Texto], list[tuple]]] = []
+    hay_marcos = False
+    for numero in range(min(len(doc), MAX_PAGES)):
+        page = doc[numero]
+        rect = tuple(page.rect)
+        area_pagina = _area(rect)
+        if area_pagina <= 0:
+            continue
+        try:
+            infos = page.get_image_info(xrefs=True)
+        except Exception:  # noqa: BLE001
+            infos = []
+        imagenes = [
+            Imagen(
+                xref=int(info.get("xref") or 0),
+                bbox=tuple(float(v) for v in info["bbox"]),
+                alpha=_alpha_de(doc, int(info.get("xref") or 0), alfa),
+            )
+            for info in infos
+            if info.get("bbox")
+        ]
+        marcos: list[tuple] = []
+        for imagen in imagenes:
+            x0, y0, x1, y1 = imagen.bbox
+            if imagen.alpha or imagen.xref <= 0:
+                continue
+            # Un KV enmarcado en la lámina cabe entero en ella; una foto que
+            # sangra por fuera del borde es el fondo recortado de un arte.
+            if x0 < rect[0] or y0 < rect[1] or x1 > rect[2] or y1 > rect[3]:
+                continue
+            ratio = _area(imagen.bbox) / area_pagina
+            if not FRAME_MIN_RATIO <= ratio <= FRAME_MAX_RATIO:
+                continue
+            ancho, alto = x1 - x0, y1 - y0
+            if alto <= 0 or not MIN_ASPECT <= ancho / alto <= MAX_ASPECT:
+                continue
+            if any(_area(_inter(imagen.bbox, otro[1])) > .5 * _area(imagen.bbox) for otro in marcos):
+                continue
+            marcos.append((imagen.xref, imagen.bbox))
+        hay_marcos = hay_marcos or bool(marcos)
+        por_pagina.append((numero, rect, imagenes, _textos(page), marcos))
+
+    piezas: list[Pieza] = []
+    for numero, rect, imagenes, textos, marcos in por_pagina:
+        if hay_marcos:
+            # Un toolkit: solo los KV enmarcados son piezas. Las láminas de
+            # texto —justificación, insight— no son arte.
+            zonas = [(xref, caja) for xref, caja in marcos]
+        else:
+            ancho, alto = rect[2] - rect[0], rect[3] - rect[1]
+            if alto <= 0 or not MIN_ASPECT <= ancho / alto <= MAX_ASPECT:
+                continue
+            if not imagenes and not textos:
+                continue
+            zonas = [(0, rect)]
+        for xref, caja in zonas:
+            pieza = Pieza(page=numero, rect=caja, frame_xref=xref)
+            pieza.images = [
+                imagen for imagen in imagenes
+                if imagen.xref != xref and _dentro(imagen.bbox, caja)
+            ]
+            pieza.texts = [texto for texto in textos if _dentro(texto.bbox, caja)]
+            piezas.append(pieza)
+    _clasificar(piezas, doc)
+    return piezas
+
+
+def _firma(doc, xref: int, cache: dict[int, tuple | None]) -> tuple | None:
+    """Huella visual de una imagen, para reconocerla aunque cambie de xref.
+
+    Illustrator incrusta el mismo logo una vez por mesa de trabajo: en el
+    toolkit de CrediFest el sello "Crédito Directo" tiene un xref distinto en
+    cada KV. Comparar xrefs lo tomaba por producto y lo borraba de la placa.
+
+    La huella junta forma (un dHash de 16x16), color medio y proporción: dos
+    refrigeradoras distintas tienen casi la misma silueta, y confundirlas
+    haría pasar el producto por un logo repetido.
+    """
+
+    if xref in cache:
+        return cache[xref]
+    firma = None
+    try:
+        import io
+
+        from PIL import Image, ImageStat
+
+        datos = doc.extract_image(xref)
+        with Image.open(io.BytesIO(datos["image"])) as imagen:
+            imagen.draft("RGB", (128, 128))
+            proporcion = round(imagen.width / max(1, imagen.height), 2)
+            color = imagen.convert("RGB").resize((32, 32), Image.Resampling.BILINEAR)
+            media = tuple(int(v) for v in ImageStat.Stat(color).mean)
+            gris = color.convert("L").resize((17, 16), Image.Resampling.BILINEAR)
+            pixeles = list(gris.getdata())
+        forma = 0
+        for fila in range(16):
+            for columna in range(16):
+                izquierda = pixeles[fila * 17 + columna]
+                derecha = pixeles[fila * 17 + columna + 1]
+                forma = (forma << 1) | (1 if izquierda > derecha else 0)
+        firma = (forma, media, proporcion)
+    except Exception:  # noqa: BLE001 - sin huella se compara por xref
+        firma = None
+    cache[xref] = firma
+    return firma
+
+
+def _misma(a: tuple | None, b: tuple | None) -> bool:
+    if a is None or b is None:
+        return False
+    forma_a, media_a, proporcion_a = a
+    forma_b, media_b, proporcion_b = b
+    return (
+        bin(forma_a ^ forma_b).count("1") <= 24
+        and max(abs(x - y) for x, y in zip(media_a, media_b)) <= 18
+        and abs(proporcion_a - proporcion_b) <= .06
+    )
+
+
+def _es_precio(texto: str) -> bool:
+    return bool(re.search(r"\d", texto)) and bool(
+        re.search(r"[$€]|\bcuotas?\b|\bsemanal|\bmensual|\bentrada\b", texto, re.IGNORECASE)
+    )
+
+
+def _clasificar(piezas: list[Pieza], doc=None) -> None:
+    """Separa en cada pieza lo que es identidad de lo que cambia por fila."""
+
+    varias = len(piezas) > 1
+
+    # Candidatas a producto: recortes con alfa de tamaño franco.
+    candidatas: dict[int, list[Imagen]] = {}
+    for indice, pieza in enumerate(piezas):
+        area = pieza.width * pieza.height
+        if area <= 0:
+            continue
+        for imagen in pieza.images:
+            if not imagen.alpha or imagen.xref <= 0:
+                continue
+            ratio = _area(_inter(imagen.bbox, pieza.rect)) / area
+            if PRODUCT_MIN_RATIO <= ratio <= PRODUCT_MAX_RATIO:
+                candidatas.setdefault(indice, []).append(imagen)
+    huellas: dict[int, tuple | None] = {}
+    firmas_por_pieza: dict[int, list[tuple[int, tuple | None]]] = {}
+    for indice, imagenes in candidatas.items():
+        firmas_por_pieza[indice] = [
+            (imagen.xref, _firma(doc, imagen.xref, huellas) if doc is not None else None)
+            for imagen in imagenes
+        ]
+    # Todas las imágenes alfa del documento cuentan para saber si algo se
+    # repite, no solo las de tamaño de producto: el logo pequeño de una lámina
+    # es el mismo que el grande de otra.
+    todas: list[tuple[int, int, tuple | None]] = []
+    if varias and doc is not None:
+        for indice, pieza in enumerate(piezas):
+            for imagen in pieza.images:
+                if imagen.alpha and imagen.xref > 0:
+                    todas.append((indice, imagen.xref, _firma(doc, imagen.xref, huellas)))
+
+    def repetida(indice: int, xref: int, firma: tuple | None) -> bool:
+        for otra, otro_xref, otra_firma in todas:
+            if otra == indice:
+                continue
+            if otro_xref == xref or _misma(firma, otra_firma):
+                return True
+        return False
+
+    for indice, pieza in enumerate(piezas):
+        productos: list[Imagen] = []
+        for imagen, (_xref, firma) in zip(
+            candidatas.get(indice, []), firmas_por_pieza.get(indice, [])
+        ):
+            # Lo que aparece en varias piezas es un logo o un sello de campaña.
+            if varias and repetida(indice, imagen.xref, firma):
+                continue
+            productos.append(imagen)
+        pieza.products = productos
+
+    # Un texto repetido es identidad solo si también sale en una pieza sin
+    # producto —la "layout base", un cierre— o en muchas. Dos KV de producto
+    # que comparten "REFRIGERADORA TOP MOUNT" comparten el ejemplo, no un
+    # rótulo fijo: ese nombre es lo primero que cambia la matriz.
+    en_piezas: dict[str, list[int]] = {}
+    for indice, pieza in enumerate(piezas):
+        for clave in {_normal(texto.text) for texto in pieza.texts}:
+            en_piezas.setdefault(clave, []).append(indice)
+
+    def rotulo_fijo(clave: str) -> bool:
+        donde = en_piezas.get(clave, [])
+        if len(donde) >= 3:
+            return True
+        return len(donde) >= 2 and any(not piezas[i].products for i in donde)
+
+    for pieza in piezas:
+        repetidos: dict[str, int] = {}
+        for texto in pieza.texts:
+            clave = _normal(texto.text)
+            repetidos[clave] = repetidos.get(clave, 0) + 1
+        variables: list[Texto] = []
+        decorativos: list[Texto] = []
+        for texto in pieza.texts:
+            clave = _normal(texto.text)
+            if not clave:
+                continue
+            # Tipografía usada como trama —"C R E D I F E S T • F E S T I V A L"
+            # repetido por el borde— es decoración, no un campo.
+            tiene_cifra = bool(re.search(r"\d", texto.text))
+            if texto.rotated or _ESPACIADO.match(texto.text) or (
+                repetidos.get(clave, 0) >= 3 and not tiene_cifra
+            ):
+                decorativos.append(texto)
+                continue
+            if varias and not tiene_cifra and rotulo_fijo(clave):
+                continue
+            variables.append(texto)
+        pieza.variable_texts = variables
+        pieza.decorative_texts = decorativos
+
+
+def best_pieces(piezas: list[Pieza]) -> list[Pieza]:
+    """Una pieza por familia de formato, la que mejor sirve de plantilla.
+
+    Se prefiere la que tiene producto y campos: es la que enseña dónde va cada
+    cosa. Una "layout base" vacía da la misma placa, pero ninguna posición.
+    """
+
+    from .campaign_layout_from_art import aspect_key
+
+    # Hace falta algo que la matriz rellene: un precio, o un producto con su
+    # nombre. Un KV de awareness o un rompetráfico troquelado sin campos no
+    # enseña dónde va nada, y su placa recortada engaña más que ayuda.
+    elegibles = [
+        pieza for pieza in piezas
+        if not pieza.catalog
+        and (pieza.prices or (pieza.products and pieza.variable_texts))
+    ]
+
+    def orden(pieza: Pieza):
+        campos = len(pieza.variable_texts)
+        return (
+            0 if pieza.products else 1,
+            # Un precio dice que es un KV de producto, que es lo que produce
+            # la matriz; un KV de awareness sin precio enseña menos huecos.
+            0 if pieza.prices else 1,
+            0 if 2 <= campos <= 12 else 1,
+            pieza.page,
+            pieza.rect[0],
+        )
+
+    mejores: dict[str, Pieza] = {}
+    for pieza in sorted(elegibles, key=orden):
+        familia = aspect_key((int(pieza.width), int(pieza.height)))
+        mejores.setdefault(familia, pieza)
+    return list(mejores.values())
+
+
+def render_plate(pdf_path: Path, pieza: Pieza, target: Path) -> tuple[int, int, float]:
+    """Renderiza la pieza sin su contenido variable. Devuelve (ancho, alto, escala).
+
+    Se abre una copia del documento en memoria para cada placa: quitar una
+    imagen la cambia en todo el documento y la siguiente placa la necesitaría.
+    """
+
+    fitz = _fitz()
+    doc = fitz.open(pdf_path)
+    try:
+        page = doc[pieza.page]
+        for imagen in pieza.products:
+            try:
+                page.delete_image(imagen.xref)
+            except Exception:  # noqa: BLE001 - una imagen protegida se queda
+                logger.info("No se pudo quitar la imagen %s de la placa", imagen.xref)
+        if pieza.variable_texts:
+            for texto in pieza.variable_texts:
+                x0, y0, x1, y1 = texto.bbox
+                # Un pelo hacia dentro: la caja de un tramo toca la del vecino
+                # fijo y la redacción se llevaría también a ese.
+                margen = min(.6, (y1 - y0) * .08)
+                page.add_redact_annot(
+                    fitz.Rect(x0 + margen, y0 + margen, x1 - margen, y1 - margen),
+                    fill=False, cross_out=False,
+                )
+            page.apply_redactions(
+                images=fitz.PDF_REDACT_IMAGE_NONE,
+                graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+                text=fitz.PDF_REDACT_TEXT_REMOVE,
+            )
+        escala = PLATE_MAX_SIDE / max(pieza.width, pieza.height)
+        pixmap = page.get_pixmap(
+            matrix=fitz.Matrix(escala, escala), clip=fitz.Rect(*pieza.rect), alpha=False
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pixmap.save(str(target))
+        return pixmap.width, pixmap.height, escala
+    finally:
+        doc.close()
+
+
+def reads_for(pieza: Pieza, escala: float) -> list[dict]:
+    """Los campos variables como lecturas, en píxeles de la placa."""
+
+    x0, y0 = pieza.rect[0], pieza.rect[1]
+    lecturas = []
+    for texto in pieza.variable_texts:
+        bx0, by0, bx1, by1 = texto.bbox
+        lecturas.append({
+            "text": texto.text[:200],
+            "bbox": [
+                int(round((bx0 - x0) * escala)), int(round((by0 - y0) * escala)),
+                int(round((bx1 - x0) * escala)), int(round((by1 - y0) * escala)),
+            ],
+            "confidence": 1.0,
+            "role": "content",
+            "color": texto.color,
+            "font": texto.font,
+            "size": round(texto.size * escala, 1),
+        })
+    return lecturas
+
+
+def product_box(pieza: Pieza, escala: float) -> tuple[int, int, int, int] | None:
+    if not pieza.products:
+        return None
+    x0, y0 = pieza.rect[0], pieza.rect[1]
+    cajas = [_inter(imagen.bbox, pieza.rect) for imagen in pieza.products]
+    return (
+        int(round((min(c[0] for c in cajas) - x0) * escala)),
+        int(round((min(c[1] for c in cajas) - y0) * escala)),
+        int(round((max(c[2] for c in cajas) - x0) * escala)),
+        int(round((max(c[3] for c in cajas) - y0) * escala)),
+    )
+
+
+def _fondos(pieza: Pieza, doc) -> list[int]:
+    """Imágenes que hacen de fondo: el marco del KV y la lámina que lo rodea."""
+
+    area = pieza.width * pieza.height
+    fondos = {pieza.frame_xref} if pieza.frame_xref > 0 else set()
+    page = doc[pieza.page]
+    try:
+        infos = page.get_image_info(xrefs=True)
+    except Exception:  # noqa: BLE001
+        infos = []
+    for info in infos:
+        xref = int(info.get("xref") or 0)
+        if xref <= 0 or not info.get("bbox"):
+            continue
+        cubre = _area(_inter(tuple(info["bbox"]), pieza.rect))
+        if area > 0 and cubre / area >= .80:
+            fondos.add(xref)
+    return sorted(fondos)
+
+
+def _fondo_imagen(doc, pieza: Pieza, xrefs: list[int], escala: float, size: tuple[int, int]):
+    """El fondo colocado donde estaba, al tamaño de la placa."""
+
+    import io
+
+    from PIL import Image
+
+    lienzo = Image.new("RGB", size, (0, 0, 0))
+    puesto = False
+    page = doc[pieza.page]
+    try:
+        infos = page.get_image_info(xrefs=True)
+    except Exception:  # noqa: BLE001
+        infos = []
+    # Se pintan en el orden del documento: la lámina primero, el marco encima.
+    for info in infos:
+        xref = int(info.get("xref") or 0)
+        if xref not in xrefs or not info.get("bbox"):
+            continue
+        try:
+            datos = doc.extract_image(xref)
+            with Image.open(io.BytesIO(datos["image"])) as crudo:
+                imagen = crudo.convert("RGB")
+        except Exception:  # noqa: BLE001
+            continue
+        x0, y0, x1, y1 = info["bbox"]
+        destino = (
+            int(round((x1 - x0) * escala)), int(round((y1 - y0) * escala))
+        )
+        if destino[0] <= 0 or destino[1] <= 0:
+            continue
+        colocada = imagen.resize(destino, Image.Resampling.LANCZOS)
+        lienzo.paste(
+            colocada,
+            (int(round((x0 - pieza.rect[0]) * escala)), int(round((y0 - pieza.rect[1]) * escala))),
+        )
+        puesto = True
+    return lienzo if puesto else None
+
+
+def _sin(page, textos: list[Texto]) -> None:
+    fitz = _fitz()
+    if not textos:
+        return
+    for texto in textos:
+        x0, y0, x1, y1 = texto.bbox
+        margen = min(.6, (y1 - y0) * .08)
+        page.add_redact_annot(
+            fitz.Rect(x0 + margen, y0 + margen, x1 - margen, y1 - margen),
+            fill=False, cross_out=False,
+        )
+    page.apply_redactions(
+        images=fitz.PDF_REDACT_IMAGE_NONE,
+        graphics=fitz.PDF_REDACT_LINE_ART_NONE,
+        text=fitz.PDF_REDACT_TEXT_REMOVE,
+    )
+
+
+def decompose(pdf_path: Path, pieza: Pieza, escala: float):
+    """Fondo y capa de identidad por separado, para recomponer otro formato.
+
+    La capa de identidad es la pieza sin fondo, sin producto y sin campos:
+    logos, sellos, pastillas de precio vacías. Sobre transparente, para poder
+    mover cada elemento por su cuenta.
+    """
+
+    import io
+
+    from PIL import Image
+
+    fitz = _fitz()
+    doc = fitz.open(pdf_path)
+    try:
+        fondos = _fondos(pieza, doc)
+        ancho = int(round(pieza.width * escala))
+        alto = int(round(pieza.height * escala))
+        fondo = _fondo_imagen(doc, pieza, fondos, escala, (ancho, alto))
+        page = doc[pieza.page]
+        for imagen in pieza.products:
+            try:
+                page.delete_image(imagen.xref)
+            except Exception:  # noqa: BLE001
+                continue
+        # La trama tipográfica del borde se dibuja para un marco concreto: en
+        # otra proporción quedaría cortada o estirada, así que no viaja.
+        _sin(page, [*pieza.variable_texts, *pieza.decorative_texts])
+        matriz, recorte = fitz.Matrix(escala, escala), fitz.Rect(*pieza.rect)
+        # Con fondo: se renderiza la pieza entera y la identidad se separa por
+        # diferencia contra el fondo solo. Renderizar sin el fondo sobre
+        # transparente no basta: una lámina de presentación trae debajo un
+        # rectángulo blanco a sangre, y todo salía opaco.
+        con_fondo = page.get_pixmap(matrix=matriz, clip=recorte, alpha=False)
+        entera = Image.open(io.BytesIO(con_fondo.tobytes("png"))).convert("RGB")
+        if entera.size != (ancho, alto):
+            entera = entera.resize((ancho, alto), Image.Resampling.LANCZOS)
+        if fondo is not None:
+            return fondo, _separar(entera, fondo)
+        for xref in fondos:
+            try:
+                page.delete_image(xref)
+            except Exception:  # noqa: BLE001
+                continue
+        pixmap = page.get_pixmap(matrix=matriz, clip=recorte, alpha=True)
+        capa = Image.open(io.BytesIO(pixmap.tobytes("png"))).convert("RGBA")
+        if capa.size != (ancho, alto):
+            capa = capa.resize((ancho, alto), Image.Resampling.LANCZOS)
+        return None, capa
+    finally:
+        doc.close()
+
+
+def _separar(entera, fondo):
+    """Lo que la pieza pinta encima de su fondo, con alfa suave en el borde."""
+
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    a = np.asarray(entera, dtype=np.int16)
+    b = np.asarray(fondo.resize(entera.size), dtype=np.int16)
+    diferencia = np.abs(a - b).max(axis=2).astype(np.uint8)
+    mascara = (diferencia > 28).astype(np.uint8) * 255
+    # Se cierra lo que el umbral deja a medias —el interior liso de una
+    # pastilla parecida al fondo— y se suaviza el borde para no recortar a
+    # sierra al moverlo.
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+    mascara = cv2.GaussianBlur(mascara, (0, 0), 1.2)
+    capa = entera.convert("RGBA")
+    capa.putalpha(Image.fromarray(mascara))
+    return capa
+
+
+def components(capa) -> list[tuple[int, int, int, int]]:
+    """Cajas de los elementos sueltos de la capa de identidad."""
+
+    import cv2
+    import numpy as np
+
+    alfa = np.asarray(capa.getchannel("A"))
+    alto, ancho = alfa.shape
+    factor = min(1.0, 320 / max(ancho, alto))
+    pequeño = cv2.resize(
+        alfa, (max(1, int(ancho * factor)), max(1, int(alto * factor))),
+        interpolation=cv2.INTER_AREA,
+    )
+    mascara = (pequeño > 20).astype(np.uint8)
+    # Las letras de un logo y su sombra son un mismo elemento: se unen antes
+    # de contarlos.
+    mascara = cv2.dilate(mascara, np.ones((5, 5), np.uint8))
+    total, _etiquetas, stats, _centros = cv2.connectedComponentsWithStats(mascara, connectivity=8)
+    cajas = []
+    minimo = mascara.size * .0006
+    for indice in range(1, total):
+        x, y, w, h, area = stats[indice]
+        if area < minimo:
+            continue
+        cajas.append((
+            int(x / factor), int(y / factor),
+            min(ancho, int((x + w) / factor) + 1), min(alto, int((y + h) / factor) + 1),
+        ))
+    return cajas
+
+
+def _ancla(inicio: float, fin: float, total: float) -> str:
+    centro = (inicio + fin) / 2 / total
+    return "start" if centro < 1 / 3 else "end" if centro > 2 / 3 else "center"
+
+
+def _mover(
+    caja: tuple[float, float, float, float],
+    origen: tuple[int, int],
+    zona: tuple[float, float, float, float],
+    escala: float,
+) -> tuple[float, float, float, float]:
+    """Lleva una caja de la pieza al formato nuevo, anclada a su borde cercano.
+
+    Un logo arriba a la derecha sigue arriba a la derecha y a la misma
+    distancia proporcional del borde; lo centrado sigue centrado.
+    """
+
+    ancho0, alto0 = origen
+    zx0, zy0, zx1, zy1 = zona
+    x0, y0, x1, y1 = caja
+    w, h = (x1 - x0) * escala, (y1 - y0) * escala
+
+    def eje(a0, a1, total0, z0, z1):
+        ancla = _ancla(a0, a1, total0)
+        if ancla == "start":
+            return z0 + a0 * escala
+        if ancla == "end":
+            return z1 - (total0 - a1) * escala - (a1 - a0) * escala
+        return (z0 + z1) / 2 + (a0 - total0 / 2) * escala
+
+    nx = eje(x0, x1, ancho0, zx0, zx1)
+    ny = eje(y0, y1, alto0, zy0, zy1)
+    return nx, ny, nx + w, ny + h
+
+
+def adapt(
+    fondo, capa, cajas_campo: dict[str, tuple[int, int, int, int]],
+    size: tuple[int, int], safe: dict[str, float],
+):
+    """Recompone la pieza en otra proporción. Devuelve (placa, cajas de campo).
+
+    El fondo cubre el lienzo; cada elemento de identidad se ancla a su borde y
+    se escala lo justo para que la pieza entera quepa en el área segura. Los
+    campos viajan con el elemento que los contiene —el precio con su
+    pastilla—, así no se separa la cifra de su fondo.
+    """
+
+    from PIL import Image, ImageOps
+
+    ancho, alto = size
+    origen = capa.size
+    zona = (
+        ancho * float(safe.get("left", .04)), alto * float(safe.get("top", .04)),
+        ancho * (1 - float(safe.get("right", .04))), alto * (1 - float(safe.get("bottom", .04))),
+    )
+    escala = min((zona[2] - zona[0]) / origen[0], (zona[3] - zona[1]) / origen[1])
+    if fondo is not None:
+        placa = ImageOps.fit(fondo, size, method=Image.Resampling.LANCZOS).convert("RGBA")
+    else:
+        placa = Image.new("RGBA", size, (0, 0, 0, 255))
+
+    elementos = components(capa)
+    destinos: list[tuple[tuple[int, int, int, int], tuple[float, float, float, float]]] = []
+    for caja in elementos:
+        nueva = _mover(caja, origen, zona, escala)
+        destinos.append((caja, nueva))
+        recorte = capa.crop(caja)
+        medida = (max(1, int(round(nueva[2] - nueva[0]))), max(1, int(round(nueva[3] - nueva[1]))))
+        recorte = recorte.resize(medida, Image.Resampling.LANCZOS)
+        placa.alpha_composite(recorte, (int(round(nueva[0])), int(round(nueva[1]))))
+
+    salida: dict[str, tuple[int, int, int, int]] = {}
+    for hueco, caja in cajas_campo.items():
+        area = _area(caja)
+        contenedor = None
+        if area > 0:
+            mejor = 0.0
+            for original, nueva in destinos:
+                parte = _area(_inter(caja, original)) / area
+                if parte > mejor:
+                    mejor, contenedor = parte, (original, nueva)
+            if mejor < .5:
+                contenedor = None
+        if contenedor is not None:
+            original, nueva = contenedor
+            x0 = nueva[0] + (caja[0] - original[0]) * escala
+            y0 = nueva[1] + (caja[1] - original[1]) * escala
+            movida = (x0, y0, x0 + (caja[2] - caja[0]) * escala, y0 + (caja[3] - caja[1]) * escala)
+        else:
+            movida = _mover(caja, origen, zona, escala)
+        salida[hueco] = tuple(int(round(v)) for v in movida)  # type: ignore[assignment]
+    return placa.convert("RGB"), salida
+
+
+def field_boxes(pieza: Pieza, escala: float) -> tuple[dict[str, tuple[int, int, int, int]], list[dict]]:
+    """Qué campo es cada caja variable, en píxeles de la placa."""
+
+    from .campaign_layout_from_art import clasificar
+
+    size = (int(round(pieza.width * escala)), int(round(pieza.height * escala)))
+    lecturas = reads_for(pieza, escala)
+    cajas = dict(clasificar(lecturas, size))
+    producto = product_box(pieza, escala)
+    if producto is not None:
+        cajas["product"] = producto
+        # Junto a un producto, el texto de cuerpo pequeño que el clasificador
+        # toma por titular es su nombre: "REFRIGERADORA TOP MOUNT".
+        titular = cajas.get("headline")
+        if titular is not None and "product_name" not in cajas:
+            lectura = next((l for l in lecturas if tuple(l["bbox"]) == tuple(titular)), None)
+            if lectura is not None and float(lectura.get("size") or 0) < size[1] * .06:
+                cajas["product_name"] = cajas.pop("headline")
+    return cajas, lecturas
+
+
+#: Medida de cada familia y el preset del que sale su área segura.
+FAMILIES = {
+    "portrait": ((1280, 1600), "meta_feed_4_5"),
+    "square": ((1600, 1600), "meta_feed_square"),
+    "story": ((900, 1600), "meta_stories"),
+    "landscape": ((1600, 838), "meta_feed_landscape"),
+}
+#: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
+VERSION = 1
+
+
+def build_templates(pdf_path: Path, folder: Path) -> dict:
+    """Placas y posiciones para las cuatro familias desde un editable.
+
+    Devuelve un resumen siempre; ``plates`` vacío cuando el documento no trae
+    ninguna pieza que sirva de plantilla (un catálogo, un manual).
+    """
+
+    from ..models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS
+    from .campaign_layout_from_art import aspect_key, normalize_boxes
+
+    fitz = _fitz()
+    doc = fitz.open(pdf_path)
+    try:
+        piezas = find_pieces(doc)
+    finally:
+        doc.close()
+    resumen: dict = {
+        "version": VERSION,
+        "pieces": len(piezas),
+        "catalog_pieces": sum(1 for pieza in piezas if pieza.catalog),
+        "plates": [],
+        "placements": {},
+        "text_colors": {},
+        "text_reads": [],
+    }
+    elegidas = best_pieces(piezas)
+    if not elegidas:
+        return resumen
+
+    def seguro(preset: str) -> dict[str, float]:
+        crudo = FORMAT_PRESETS.get(preset, {}).get("safe_area", DEFAULT_SAFE_AREA)
+        return {clave: float(valor) for clave, valor in crudo.items()}
+
+    principal = elegidas[0]
+    propias: dict[str, Pieza] = {}
+    for pieza in elegidas:
+        propias.setdefault(aspect_key((int(pieza.width), int(pieza.height))), pieza)
+
+    descompuesta = None
+    for familia, (medida, preset) in FAMILIES.items():
+        safe = seguro(preset)
+        pieza = propias.get(familia)
+        destino = folder / f"vector-plate-{familia}.png"
+        if pieza is not None:
+            # La pieza dibujada para esta proporción: se renderiza tal cual.
+            ancho, alto, escala = render_plate(pdf_path, pieza, destino)
+            cajas, lecturas = field_boxes(pieza, escala)
+            size = (ancho, alto)
+            origen = "piece"
+        else:
+            # Ninguna pieza en esta proporción: se recompone la principal.
+            if descompuesta is None:
+                escala = PLATE_MAX_SIDE / max(principal.width, principal.height)
+                fondo, capa = decompose(pdf_path, principal, escala)
+                cajas_base, lecturas_base = field_boxes(principal, escala)
+                descompuesta = (fondo, capa, cajas_base, lecturas_base)
+            fondo, capa, cajas_base, lecturas = descompuesta
+            placa, cajas = adapt(fondo, capa, cajas_base, medida, safe)
+            destino.parent.mkdir(parents=True, exist_ok=True)
+            placa.save(destino, format="PNG", optimize=True)
+            size = medida
+            origen = "adapted"
+        posiciones = normalize_boxes(cajas, size, safe)
+        if posiciones:
+            resumen["placements"][familia] = {
+                hueco: caja.model_dump(mode="json") for hueco, caja in posiciones.items()
+            }
+        resumen["plates"].append({
+            "family": familia,
+            "file": destino.name,
+            "size": [size[0], size[1]],
+            "origin": origen,
+            "page": (pieza or principal).page + 1,
+        })
+        if familia == aspect_key((int(principal.width), int(principal.height))) or not resumen["text_reads"]:
+            resumen["text_reads"] = lecturas[:60]
+    # El color con que el diseñador escribió cada campo, desde el texto real.
+    escala = PLATE_MAX_SIDE / max(principal.width, principal.height)
+    cajas, lecturas = field_boxes(principal, escala)
+    por_caja = {tuple(l["bbox"]): l for l in lecturas}
+    for hueco, caja in cajas.items():
+        lectura = por_caja.get(tuple(caja))
+        if lectura and re.match(r"^#[0-9A-F]{6}$", str(lectura.get("color", ""))):
+            resumen["text_colors"][hueco] = lectura["color"]
+    resumen["fonts"] = {
+        hueco: por_caja[tuple(caja)]["font"]
+        for hueco, caja in cajas.items()
+        if tuple(caja) in por_caja and por_caja[tuple(caja)].get("font")
+    }
+    return resumen
+
+
+def is_vector_source(path: Path) -> int | None:
+    """Desplazamiento del PDF dentro del archivo, o ``None`` si no lo hay."""
+
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(4 * 1024 * 1024)
+    except OSError:
+        return None
+    offset = head.find(b"%PDF-")
+    return offset if offset >= 0 else None
+
+
+__all__ = [
+    "FAMILIES", "Pieza", "VERSION", "adapt", "best_pieces", "build_templates",
+    "decompose", "field_boxes", "find_pieces", "is_vector_source", "product_box",
+    "reads_for", "render_plate",
+]

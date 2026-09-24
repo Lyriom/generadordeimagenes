@@ -25,7 +25,7 @@ from ..models.campaign import (
     CampaignSourceKind,
     CampaignSourceRole,
 )
-from . import campaign_plate, campaign_store
+from . import campaign_plate, campaign_store, campaign_vector
 from .security import FileValidationError
 
 logger = logging.getLogger(__name__)
@@ -1446,6 +1446,106 @@ def _plate_artwork_path(
     return None
 
 
+_VECTOR_EXTENSIONS = {".ai", ".pdf"}
+
+
+def _plate_origin(source: CampaignSource) -> str:
+    placas = source.meta.get("template_plates")
+    if not isinstance(placas, list) or not placas or not isinstance(placas[0], dict):
+        return ""
+    return str(placas[0].get("origin") or "psd")
+
+
+def _drop_plate(source: CampaignSource) -> None:
+    for clave in ("template_plates", "plate_placements", "plate_text_colors", "plate_text_reads"):
+        source.meta.pop(clave, None)
+
+
+def _ensure_vector_templates(client_id: str, campaign_id: str, campaign) -> list[str]:
+    """Saca la plantilla del editable vectorial (`.ai`, PDF) cuando lo hay.
+
+    Se hace una vez por fuente y versión del extractor: un `.ai` de 400 MB
+    tarda medio minuto en recorrerse y no cambia entre un análisis y otro.
+    """
+
+    avisos: list[str] = []
+    catalogos: list[str] = []
+    for source in campaign.sources:
+        if Path(source.filename).suffix.casefold() not in _VECTOR_EXTENSIONS:
+            continue
+        if source.meta.get("vector_version") == campaign_vector.VERSION:
+            if source.meta.get("vector_catalog"):
+                catalogos.append(source.filename)
+            continue
+        try:
+            path = campaign_store.campaign_path(client_id, campaign_id, source.stored_path)
+        except Exception:  # noqa: BLE001
+            continue
+        offset = campaign_vector.is_vector_source(path) if path.is_file() else None
+        if offset is None:
+            source.meta["vector_version"] = campaign_vector.VERSION
+            continue
+        carpeta = _source_folder(client_id, campaign_id, source) / "assets"
+        temporal = None
+        try:
+            documento = path
+            if offset > 0:
+                temporal = carpeta / ".vector-source.pdf"
+                temporal.parent.mkdir(parents=True, exist_ok=True)
+                with path.open("rb") as original, temporal.open("wb") as destino:
+                    original.seek(offset)
+                    shutil.copyfileobj(original, destino, length=1024 * 1024)
+                documento = temporal
+            resumen = campaign_vector.build_templates(documento, carpeta)
+        except Exception as exc:  # noqa: BLE001 - sin plantilla vectorial se sigue
+            logger.info("No se pudo leer %s como editable (%s)", source.filename, exc)
+            source.meta["vector_version"] = campaign_vector.VERSION
+            continue
+        finally:
+            if temporal is not None:
+                temporal.unlink(missing_ok=True)
+        source.meta["vector_version"] = campaign_vector.VERSION
+        source.meta["vector_summary"] = {
+            "pieces": resumen["pieces"],
+            "catalog_pieces": resumen["catalog_pieces"],
+            "plates": [
+                {k: placa[k] for k in ("family", "origin", "page")} for placa in resumen["plates"]
+            ],
+        }
+        if resumen["plates"]:
+            placas = []
+            for placa in resumen["plates"]:
+                relativa = _relative(client_id, campaign_id, carpeta / placa["file"])
+                if relativa not in source.asset_files:
+                    source.asset_files.append(relativa)
+                placas.append({
+                    "name": f"{source.filename} · pág. {placa['page']}",
+                    "path": relativa,
+                    "size": placa["size"],
+                    "engine": "vector",
+                    "origin": "vector",
+                    "family": placa["family"],
+                })
+            source.meta["template_plates"] = placas
+            source.meta["plate_placements"] = resumen["placements"]
+            source.meta["plate_text_colors"] = resumen["text_colors"]
+            source.meta["plate_text_reads"] = resumen["text_reads"]
+            source.meta["plate_text_fonts"] = resumen.get("fonts", {})
+            source.meta.pop("vector_catalog", None)
+        elif resumen["catalog_pieces"]:
+            source.meta["vector_catalog"] = True
+            if _plate_origin(source) != "psd":
+                _drop_plate(source)
+            catalogos.append(source.filename)
+    if catalogos and not any(_plate_origin(s) == "vector" for s in campaign.sources):
+        avisos.append(
+            f"{', '.join(catalogos)} es un catálogo con muchos productos por página: "
+            "no sirve como plantilla de una pieza. Sube el KV de producto editable "
+            "(el toolkit en PDF, el .ai o el PSD de una pieza) para sacar la plantilla real."
+        )
+    return avisos
+
+
 def ensure_template_plates(
     client_id: str, campaign_id: str, campaign, brand_name: str = ""
 ) -> list[str]:
@@ -1460,7 +1560,15 @@ def ensure_template_plates(
     Devuelve avisos. Nunca lanza: una campaña sin placa sigue produciendo.
     """
 
-    avisos: list[str] = []
+    avisos: list[str] = list(_ensure_vector_templates(client_id, campaign_id, campaign))
+    if any(_plate_origin(source) == "vector" for source in campaign.sources):
+        # El editable ya dio la plantilla de verdad. Una placa sacada por OCR
+        # de otra fuente competiría con ella en el renderer y en las
+        # posiciones, así que se retira.
+        for source in campaign.sources:
+            if _plate_origin(source) == "ocr":
+                _drop_plate(source)
+        return avisos
     con_placa = [source for source in campaign.sources if source.meta.get("template_plates")]
     if con_placa:
         # Una campaña con la placa ya hecha por el PSD puede no tener las
@@ -1501,6 +1609,10 @@ def ensure_template_plates(
     ordenadas.sort(key=lambda item: (item[0], item[1]))
 
     for _rango, _forma, source in ordenadas[:FLAT_PLATE_LIMIT]:
+        if source.meta.get("vector_catalog"):
+            # Un desplegable de doce productos no es una pieza: su placa era
+            # el catálogo entero con la retícula encima.
+            continue
         origen = _plate_artwork_path(client_id, campaign_id, source)
         if origen is None:
             continue
@@ -1585,7 +1697,10 @@ def apply_plate_placements(campaign, candidates) -> int:
 
     medidas: dict[str, dict] = {}
     tintas: dict[str, str] = {}
-    for source in campaign.sources:
+    rango = {"vector": 0, "psd": 1, "ocr": 2}
+    fuentes = sorted(campaign.sources, key=lambda source: rango.get(_plate_origin(source), 3))
+    vectorial = bool(fuentes) and _plate_origin(fuentes[0]) == "vector"
+    for source in fuentes:
         crudo = source.meta.get("plate_placements")
         if isinstance(crudo, dict):
             for familia, huecos in crudo.items():
@@ -1600,9 +1715,16 @@ def apply_plate_placements(campaign, candidates) -> int:
 
     tocadas = 0
     for candidate in candidates:
+        # Las cajas del editable son las de la placa: la pastilla del precio
+        # está pintada ahí. Unas posiciones propuestas por la IA dejarían la
+        # cifra fuera de su pastilla, así que mandan las medidas, salvo en una
+        # candidata ya aprobada.
+        manda_la_placa = vectorial and not candidate.approved
+        if manda_la_placa:
+            candidate.meta["plate_measured"] = True
         for familia, huecos in medidas.items():
             propias = candidate.blueprint.placements.get(familia) or {}
-            if propias:
+            if propias and not manda_la_placa:
                 continue
             convertidas: dict[str, NormalizedPlacement] = {}
             for hueco, caja in huecos.items():
@@ -1613,7 +1735,7 @@ def apply_plate_placements(campaign, candidates) -> int:
             if convertidas:
                 candidate.blueprint.placements[familia] = convertidas
                 tocadas += 1
-        if tintas and not candidate.blueprint.text_colors:
+        if tintas and (manda_la_placa or not candidate.blueprint.text_colors):
             candidate.blueprint.text_colors = dict(tintas)
     return tocadas
 

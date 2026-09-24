@@ -31,7 +31,7 @@ from ..models.campaign import (
 from ..models.template import Brand
 from . import campaign_store, client_fonts
 from . import social_tools
-from .public_references import PublicReferenceError, inspect_public_url
+from .public_references import PublicReferenceError, fetch_public_image, inspect_public_url
 
 logger = logging.getLogger(__name__)
 
@@ -561,6 +561,10 @@ def generate(
         logger.info("Analisis de campana con OpenAI no disponible (%s)", type(exc).__name__)
         if isinstance(exc, httpx.HTTPStatusError):
             reason = f"HTTP {exc.response.status_code}"
+            # Sin el cuerpo, un 400 no dice qué parte del mensaje se rechazó.
+            logger.warning(
+                "OpenAI rechazo el analisis: %s", exc.response.text[:500]
+            )
         elif isinstance(exc, httpx.TimeoutException):
             reason = "tiempo de espera agotado"
         elif isinstance(exc, httpx.RequestError):
@@ -1546,14 +1550,41 @@ def _preview_content(campaign: Campaign) -> list[dict]:
         for url in evidence.get("posts", [])
         if isinstance(url, str) and url.startswith(("http://", "https://"))
     ]
-    for url in _representative_items(social_posts, _AI_SOCIAL_PREVIEW_LIMIT):
+    # Se bajan aquí y viajan incrustadas. Pasar la URL dejaba la descarga a
+    # OpenAI, y una sola que fallase —un reel que es .mp4, una URL del CDN
+    # caducada— devolvía HTTP 400 y tiraba el análisis entero al modo local.
+    # Se prueban más de las que caben para que una caída no deje el cupo vacío.
+    inlined = 0
+    for url in _representative_items(social_posts, _AI_SOCIAL_PREVIEW_LIMIT * 3):
+        if inlined >= _AI_SOCIAL_PREVIEW_LIMIT:
+            break
+        data_url = _inline_public_image(url)
+        if data_url is None:
+            continue
         content.append(
             {"type": "text", "text": "Post publico de referencia del cliente:"}
         )
         content.append(
-            {"type": "image_url", "image_url": {"url": url, "detail": "low"}}
+            {"type": "image_url", "image_url": {"url": data_url, "detail": "low"}}
         )
+        inlined += 1
     return content
+
+
+def _inline_public_image(url: str) -> str | None:
+    """Una imagen pública como data URL JPEG, o ``None`` si no es legible."""
+
+    try:
+        raw = fetch_public_image(url)
+        with Image.open(io.BytesIO(raw)) as image:
+            sample = image.convert("RGB")
+            sample.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            sample.save(buffer, format="JPEG", quality=82)
+    except Exception:  # noqa: BLE001 - un post ilegible solo se omite
+        logger.info("Post de referencia omitido: no se pudo leer como imagen")
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
 def _openai_analysis(

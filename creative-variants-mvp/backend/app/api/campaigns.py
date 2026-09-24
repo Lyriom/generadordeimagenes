@@ -586,7 +586,10 @@ def generate_brief(
     campaign.status = (
         "templates_approved" if any(item.approved for item in candidates) else "templates_proposed"
     )
-    campaign.warnings = list(dict.fromkeys([*campaign.warnings, *warnings]))
+    # Los avisos describen ESTE análisis. Acumularlos mezclaba el de hoy con
+    # los de todos los anteriores: "el perfil exige sesión" junto a "se leyeron
+    # 24 publicaciones", y un timeout viejo junto al HTTP 400 nuevo.
+    campaign.warnings = list(dict.fromkeys(warnings))
     campaign_store.save_campaign(campaign)
     return GenerateBriefResponse(
         campaign_id=campaign_id,
@@ -834,7 +837,10 @@ def revise_candidate(
         warnings.append("La correccion se guardo, pero no se pudieron redibujar los previews.")
     campaign.analysis_engine = engine
     campaign.status = "templates_proposed"
-    campaign.warnings = list(dict.fromkeys([*campaign.warnings, *warnings]))
+    # Los avisos describen ESTE análisis. Acumularlos mezclaba el de hoy con
+    # los de todos los anteriores: "el perfil exige sesión" junto a "se leyeron
+    # 24 publicaciones", y un timeout viejo junto al HTTP 400 nuevo.
+    campaign.warnings = list(dict.fromkeys(warnings))
     campaign_store.save_campaign(campaign)
     return GenerateBriefResponse(
         campaign_id=campaign_id,

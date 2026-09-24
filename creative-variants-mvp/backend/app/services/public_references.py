@@ -110,6 +110,52 @@ def public_image_urls(html: str, page_url: str, *, login_wall: bool = False) -> 
     return clean
 
 
+#: Una foto de un post no pesa más que esto; un vídeo sí, y no sirve de nada.
+MAX_PUBLIC_IMAGE_BYTES = 8_000_000
+
+
+def fetch_public_image(url: str, *, timeout: float = 8.0) -> bytes:
+    """Descarga una imagen pública con las mismas salvaguardas que la página.
+
+    OpenAI descarga él mismo las URLs que se le pasan y, si una sola falla
+    —una URL caducada del CDN de Instagram, un 403, un vídeo—, rechaza el
+    mensaje entero con HTTP 400. Bajarla aquí permite descartar solo esa.
+    """
+
+    current = url
+    with httpx.Client(
+        timeout=timeout,
+        follow_redirects=False,
+        trust_env=False,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; MisivaCreativeStudio/1.0)"},
+    ) as client:
+        for _redirect in range(5):
+            parsed = urlparse(current)
+            if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+                raise PublicReferenceError("Usa una URL publica http o https.")
+            ensure_public_host(parsed.hostname)
+            with client.stream("GET", current) as response:
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise PublicReferenceError("La imagen redirigio sin destino.")
+                    current = urljoin(current, location)
+                    continue
+                response.raise_for_status()
+                kind = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if not kind.startswith("image/"):
+                    raise PublicReferenceError("La URL no es una imagen.")
+                chunks: list[bytes] = []
+                size = 0
+                for chunk in response.iter_bytes():
+                    size += len(chunk)
+                    if size > MAX_PUBLIC_IMAGE_BYTES:
+                        raise PublicReferenceError("La imagen es demasiado grande.")
+                    chunks.append(chunk)
+                return b"".join(chunks)
+    raise PublicReferenceError("La imagen redirige demasiadas veces.")
+
+
 def inspect_public_url(url: str, *, timeout: float = 6.0) -> dict[str, object]:
     current = url
     raw = b""

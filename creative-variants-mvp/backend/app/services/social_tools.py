@@ -210,6 +210,12 @@ def _post_images(payload: object) -> list[dict]:
             for post in posts:
                 if not isinstance(post, dict):
                     continue
+                # Un reel trae en Url_media y en Thumbnail el mismo .mp4, no un
+                # fotograma. OpenAI no admite vídeo: una sola de esas URLs en el
+                # mensaje devolvía HTTP 400 y tiraba el análisis entero al modo
+                # local. Medido el 2026-09-24 en @marcimexec: 4 de 24 posts.
+                if str(post.get("type") or "").casefold() == "video":
+                    continue
                 media = str(post.get("Url_media") or post.get("Thumbnail") or "")
                 if not media.startswith(("http://", "https://")):
                     continue
