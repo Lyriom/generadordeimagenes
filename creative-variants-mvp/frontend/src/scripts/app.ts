@@ -5228,6 +5228,27 @@ function manualMatrixEditorHtml(
     (options.list ? ' list="' + attr(options.list) + '"' : '') +
     (options.min !== undefined ? ' min="' + String(options.min) + '"' : '') + '></label>';
   const select = '<label class="field"><span>Plantilla</span><select class="manual-matrix-field" data-row="ROW" data-field="template">OPTIONS</select></label>';
+  // Los formatos se eligen, no se escriben: escribir "feed" obligaba a saber
+  // los alias que entiende el motor. Se agrupan por plataforma, igual que el
+  // selector de formatos por defecto.
+  const formatPicker = (row: MatrixRow) => {
+    const catalog = state.capabilities?.format_catalog || [];
+    const tokens = manualFormatTokens(row);
+    const chosen = new Set(tokens);
+    const platforms = Array.from(new Set(catalog.map((item) => item.platform)));
+    const groups = platforms.map((platform) =>
+      '<fieldset><legend>' + esc(platform) + '</legend>' +
+      catalog.filter((item) => item.platform === platform).map((item) =>
+        '<label class="format-pick"><input type="checkbox" class="manual-format-pick" data-row="' +
+        String(row.rowNumber) + '" value="' + attr(item.id) + '"' + checked(chosen.has(item.id)) + '>' +
+        '<span>' + esc(item.label || item.placement) + '</span><small>' + String(item.width) + '×' +
+        String(item.height) + '</small></label>'
+      ).join("") + '</fieldset>'
+    ).join("");
+    return '<div class="field format-picker-field"><span>Formatos</span><details class="format-picker">' +
+      '<summary data-format-summary="' + String(row.rowNumber) + '">' + esc(manualFormatSummary(row)) + '</summary>' +
+      '<div class="format-picker-menu">' + groups + '</div></details></div>';
+  };
   const cards = rows.map((row) => {
     const template = select.replace("ROW", String(row.rowNumber)).replace(
       "OPTIONS",
@@ -5248,13 +5269,44 @@ function manualMatrixEditorHtml(
       input(row, "cta", "CTA", { placeholder: "Vacío = no se dibuja; nunca se inventa" }) +
       input(row, "validity", "Vigencia", { placeholder: "Vacío = no se dibuja" }) +
       input(row, "legal", "Legal", { placeholder: "Vacío = los legales del brief" }) +
-      input(row, "formats", "Formatos", { placeholder: "feed | story | 1080x1350" }) +
+      formatPicker(row) +
       input(row, "proposals", "Propuestas", { type: "number", min: 1, value: Math.max(1, row.proposals) }) +
       template +
       input(row, "notes", "Notas de composición", { placeholder: "Ej. producto principal a la derecha" }) +
       '</div><div class="manual-matrix-composition" data-composition="' + String(row.rowNumber) + '"></div></article>';
   }).join("");
   return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Para un combo, separa productos y archivos con <strong>|</strong> en el mismo orden. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Solo el producto y su imagen son obligatorios. Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
+}
+
+/** Una edición manual invalida el archivo y el preflight anterior. El botón
+ *  final queda bloqueado hasta que se valide de nuevo, en vez de producir
+ *  silenciosamente la versión vieja del CSV. */
+let formatPickerCloserBound = false;
+
+function markManualMatrixDirty(): void {
+  state.productionMatrixPlans = [];
+  state.productionMatrixDraftId = null;
+  state.productionMatrixFile = null;
+  query<HTMLButtonElement>("#run-campaign-production")?.setAttribute("disabled", "");
+  const status = query<HTMLElement>(".manual-matrix-status");
+  if (status) status.textContent = "Cambios sin validar. Pulsa “Validar matriz manual” antes de producir.";
+  saveSession();
+}
+
+function manualFormatTokens(row: MatrixRow): string[] {
+  return row.formats.split("|").map((token) => token.trim()).filter(Boolean);
+}
+
+function manualFormatSummary(row: MatrixRow): string {
+  const catalog = state.capabilities?.format_catalog || [];
+  const names = manualFormatTokens(row).map((token) => {
+    const preset = catalog.find((item) => item.id === token);
+    return preset ? (preset.label || preset.placement) : token;
+  });
+  if (!names.length) {
+    return "Los de por defecto · " + String(state.selectedFormats.size) + " elegidos abajo";
+  }
+  return names.join(" · ");
 }
 
 function blankManualMatrixRow(): MatrixRow {
@@ -5354,19 +5406,36 @@ function bindProductionMatrix(): void {
       } else if (key !== "rowNumber" && key !== "omit") {
         (row as any)[key] = field.value;
       }
-      // Una edición manual invalida el archivo y el preflight anterior. El
-      // botón final queda bloqueado hasta que se valide de nuevo, en vez de
-      // producir silenciosamente la versión vieja del CSV.
-      state.productionMatrixPlans = [];
-      state.productionMatrixDraftId = null;
-      state.productionMatrixFile = null;
-      query<HTMLButtonElement>("#run-campaign-production")?.setAttribute("disabled", "");
-      const status = query<HTMLElement>(".manual-matrix-status");
-      if (status) status.textContent = "Cambios sin validar. Pulsa “Validar matriz manual” antes de producir.";
-      saveSession();
+      markManualMatrixDirty();
     };
     field.addEventListener("input", update);
     field.addEventListener("change", update);
+  });
+  // Un clic fuera cierra la lista, como un desplegable normal.
+  if (!formatPickerCloserBound) {
+    formatPickerCloserBound = true;
+    document.addEventListener("click", (event) => {
+      queryAll<HTMLDetailsElement>(".format-picker[open]").forEach((picker) => {
+        if (!picker.contains(event.target as Node)) picker.open = false;
+      });
+    });
+  }
+  queryAll<HTMLInputElement>(".manual-format-pick").forEach((box) => {
+    box.addEventListener("change", () => {
+      const rowNumber = Number(box.dataset.row || 0);
+      const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+      if (!row) return;
+      const catalogIds = new Set((state.capabilities?.format_catalog || []).map((item) => item.id));
+      // Lo que vino escrito en un CSV y no es un id del catálogo ("feed",
+      // "1080x1350") se conserva: el motor lo entiende y no se ve en la lista.
+      const escritos = manualFormatTokens(row).filter((token) => !catalogIds.has(token));
+      const elegidos = queryAll<HTMLInputElement>('.manual-format-pick[data-row="' + String(rowNumber) + '"]')
+        .filter((item) => item.checked).map((item) => item.value);
+      row.formats = [...escritos, ...elegidos].join("|");
+      const summary = query<HTMLElement>('[data-format-summary="' + String(rowNumber) + '"]');
+      if (summary) summary.textContent = manualFormatSummary(row);
+      markManualMatrixDirty();
+    });
   });
   queryAll<HTMLButtonElement>(".preview-manual-matrix-row").forEach((button) => {
     button.addEventListener("click", async () => {

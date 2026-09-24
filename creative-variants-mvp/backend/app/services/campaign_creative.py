@@ -1299,6 +1299,7 @@ def _render(
     # producto en su hueco. Un "TITULAR DE CAMPAÑA" en la retícula genérica
     # encima de un arte real era lo que hacía que la plantilla no sirviera.
     titular = ""
+    extras: list[str] = []
     if row is None and candidate.meta.get("plate_measured") and medidas:
         visible &= medidas | {"logo"}
         values = {key: (value if key in visible else "") for key, value in values.items()}
@@ -1313,8 +1314,21 @@ def _render(
         # sitio en ese arte: en la retícula genérica caían encima del logo de
         # campaña y de los sellos. Solo se dibuja lo que el arte tiene; el
         # legal es la excepción, porque omitirlo no es una decisión de diseño.
+        # Lo que la persona escribió en la fila se dibuja siempre; lo que
+        # redactó la IA, solo si el arte tiene sitio para ello. Los campos sin
+        # hueco en el arte no van a la retícula genérica —ahí caían encima del
+        # logo de campaña—: se apilan sobre el producto, que cede ese alto.
         titular = values.get("headline", "").strip()
+        de_la_ia = {
+            {"titular": "headline", "subtitulo": "subheadline", "cta": "cta"}.get(campo, campo)
+            for campo in row.ai_fields
+        }
+        extras = [
+            clave for clave in ("headline", "subheadline", "previous_price", "discount", "cta", "validity")
+            if clave not in medidas and values.get(clave, "").strip() and clave not in de_la_ia
+        ]
         visible &= medidas | {"logo", "legal"}
+        visible |= set(extras)
         values = {key: (value if key in visible else "") for key, value in values.items()}
     sin_precio = bool(
         row is not None and candidate.meta.get("plate_measured")
@@ -1328,8 +1342,35 @@ def _render(
         titular_en_pastilla = titular
         if titular_en_pastilla:
             sin_precio = False
+            if "headline" in extras:
+                extras.remove("headline")
     regions = _layout(candidate, width, height, safe, proposal, visible)
     lineas_nombre = 2
+    if extras and "product" in medidas and "product" in regions:
+        # La pila de campos escritos a mano ocupa la parte alta del hueco del
+        # producto, en orden de lectura, y el producto se encaja debajo.
+        px, py, pw, ph = regions["product"]
+        pesos = {
+            "headline": .17, "subheadline": .09, "previous_price": .06,
+            "discount": .07, "cta": .08, "validity": .05,
+        }
+        separacion = int(ph * .018)
+        y = py
+        for clave in extras:
+            alto_campo = int(ph * pesos[clave])
+            # Un botón a lo ancho de una columna estrecha parte "Aplica ya" en
+            # dos renglones; en una ancha, un botón de lado a lado no parece
+            # botón. Se ajusta al ancho disponible.
+            estrecha = pw < width * .36
+            ancho_campo = pw if clave not in {"cta", "discount"} or estrecha else int(pw * .6)
+            regions[clave] = (px, y, ancho_campo, alto_campo)
+            y += alto_campo + separacion
+        regions["product"] = (px, y, pw, max(int(ph * .45), py + ph - y))
+        keys = set(keys) | {
+            {"headline": "titular", "subheadline": "subtitulo", "previous_price": "precio_anterior",
+             "discount": "descuento", "cta": "cta", "validity": "vigencia"}[clave]
+            for clave in extras
+        }
     if titular_en_pastilla:
         cajas = [regions[clave] for clave in ("price", "installment") if clave in medidas]
         x0 = min(c[0] for c in cajas)
@@ -1832,10 +1873,16 @@ def complete_copy_once(
             fields = allowed(row)
             if row.titular is None and "titular" not in suppressed and "titular" in fields:
                 row.titular = str(item.get("headline") or "")[:220] or None
+                if row.titular:
+                    row.ai_fields.append("titular")
             if row.subtitulo is None and "subtitulo" not in suppressed and "subtitulo" in fields:
                 row.subtitulo = str(item.get("subtitle") or "")[:300] or None
+                if row.subtitulo:
+                    row.ai_fields.append("subtitulo")
             if row.cta is None and "cta" not in suppressed and "cta" in fields:
                 row.cta = str(item.get("cta") or "")[:80] or None
+                if row.cta:
+                    row.ai_fields.append("cta")
         return []
     except Exception:  # noqa: BLE001 - la produccion no depende de la API
         return ["OpenAI no completo el copy; se uso el brief como respaldo."]

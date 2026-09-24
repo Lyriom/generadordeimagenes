@@ -51,6 +51,10 @@ class MatrixRow(BaseModel):
     # Campos que el usuario pidió excluir de forma explícita. Una lista (y no
     # un set) mantiene JSON estable y facilita mostrarla en la revisión.
     suppressed_fields: list[str] = Field(default_factory=list)
+    # Campos que redactó la IA y no la persona. Sobre la plantilla del
+    # editable, lo escrito a mano siempre se dibuja; lo redactado solo si el
+    # arte tiene sitio para ello.
+    ai_fields: list[str] = Field(default_factory=list)
 
 
 def _key(value: str) -> str:
