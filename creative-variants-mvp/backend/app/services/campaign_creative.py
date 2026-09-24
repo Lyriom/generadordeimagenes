@@ -17,6 +17,7 @@ import unicodedata
 import warnings
 import zipfile
 from collections.abc import Callable, Mapping
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterable
 
@@ -160,6 +161,13 @@ def _catalogue_font_path(campaign: Campaign, *, bold: bool) -> str | None:
     return None
 
 
+@lru_cache(maxsize=256)
+def _es_de_prueba(path: Path) -> bool:
+    from .campaign_ingestion import font_trial_name
+
+    return bool(font_trial_name(path))
+
+
 def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
     font_candidates: list[tuple[str, Path]] = []
     for source in campaign.sources:
@@ -185,13 +193,23 @@ def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
             except Exception:  # noqa: BLE001
                 continue
     if font_candidates:
-        preference = ("bold", "black", "semi", "heavy") if bold else ("regular", "medium", "book", "light")
-        ranked = sorted(
-            font_candidates,
-            key=lambda item: not any(token in item[0].casefold() for token in preference),
+        # En orden de preferencia: la primera palabra que aparezca manda. Una
+        # "black" de prueba ganaba antes a la "Heavy" de la marca por sonar
+        # igual de gruesa.
+        preference = (
+            ("heavy", "extrabold", "bold", "black", "semi")
+            if bold else ("regular", "book", "medium", "light")
         )
-        for _name, path in ranked:
-            if path.is_file():
+
+        def rango(item: tuple[str, Path]) -> int:
+            nombre = item[0].casefold()
+            return next((i for i, token in enumerate(preference) if token in nombre), len(preference))
+
+        for _name, path in sorted(font_candidates, key=rango):
+            # Las fuentes subidas antes de marcar las de prueba no traen la
+            # marca: se comprueba aquí, en la propia tabla de nombres. Una
+            # cara "DEMO" cambia el "$" por su sello y el precio salía así.
+            if path.is_file() and not _es_de_prueba(path):
                 return str(path)
     catalogue_font = _catalogue_font_path(campaign, bold=bold)
     if catalogue_font:

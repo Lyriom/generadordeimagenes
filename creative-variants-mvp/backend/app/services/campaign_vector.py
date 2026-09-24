@@ -29,6 +29,7 @@ redes y la alternativa —dejar el catálogo de fondo— es justo lo que se veí
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from dataclasses import dataclass, field
@@ -888,6 +889,20 @@ def adapt(
     dentro = {
         hueco: _contenedor(caja, elementos) for hueco, caja in cajas_campo.items()
     }
+    # Campos de texto escritos directamente sobre el fondo, sin pastilla: se
+    # agrupan como un bloque propio para que viajen juntos y en su orden.
+    sueltos = [
+        caja for hueco, caja in cajas_campo.items()
+        if hueco != "product" and dentro.get(hueco) is None
+    ]
+    if sueltos:
+        elementos.append((
+            min(c[0] for c in sueltos), min(c[1] for c in sueltos),
+            max(c[2] for c in sueltos), max(c[3] for c in sueltos),
+        ))
+        for hueco in cajas_campo:
+            if hueco != "product" and dentro.get(hueco) is None:
+                dentro[hueco] = len(elementos) - 1
     # Lo omitido solo deja de pintarse: el plan se calcula con todo, para que
     # la variante sin pastilla ponga el producto y el nombre en el mismo
     # sitio que la placa completa cuyas posiciones usa el renderer.
@@ -908,6 +923,12 @@ def adapt(
         if not _choca(a[2], b[2], 0)
     ]
 
+    if abs(math.log((ancho / alto) / (origen[0] / origen[1]))) > .08:
+        # Otra proporción: se compone por roles con la retícula de cada
+        # plataforma, en vez de estirar la del original.
+        plan = _componer(elementos, cajas_campo, dentro, origen, zona, size)
+        if plan is not None:
+            return _pintar(fondo, capa, size, elementos, quitar, zona, *plan)
     if (ancho / alto) / (origen[0] / origen[1]) > 1.5:
         # Un horizontal a partir de un vertical no se arregla anclando: la
         # columna de la izquierda (logo, pastilla, sellos) no cabe en la
@@ -939,7 +960,12 @@ def _pintar(fondo, capa, size, elementos, quitar, zona, destinos, campos):
     from PIL import Image, ImageOps
 
     if fondo is not None:
-        placa = ImageOps.fit(fondo, size, method=Image.Resampling.LANCZOS).convert("RGBA")
+        # El fondo de un KV suele traer su propio marco en el borde (la franja
+        # morada del toolkit). Recortado a otra proporción, ese marco quedaba
+        # como dos bandas sueltas arriba y abajo: se descarta antes de encajar.
+        margen_x, margen_y = int(fondo.width * .045), int(fondo.height * .045)
+        interior = fondo.crop((margen_x, margen_y, fondo.width - margen_x, fondo.height - margen_y))
+        placa = ImageOps.fit(interior, size, method=Image.Resampling.LANCZOS).convert("RGBA")
     else:
         placa = Image.new("RGBA", size, (0, 0, 0, 255))
     for indice, (caja, nueva) in enumerate(zip(elementos, destinos)):
@@ -960,6 +986,234 @@ def _pintar(fondo, capa, size, elementos, quitar, zona, destinos, campos):
             continue
         salida[hueco] = (int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
     return placa.convert("RGB"), salida
+
+
+def ampliar(caja, obstaculos, limite, separacion: float):
+    """Crece la caja por cada lado hasta tocar otro elemento o el borde."""
+
+    x0, y0, x1, y1 = (float(v) for v in caja)
+    otros = [o for o in obstaculos if not _choca(o, caja, 0)]
+    paso = max(2.0, min(limite[2] - limite[0], limite[3] - limite[1]) * .01)
+
+    def libre(prueba):
+        return all(
+            not _choca(prueba, (o[0] - separacion, o[1] - separacion, o[2] + separacion, o[3] + separacion), 0)
+            for o in otros
+        )
+
+    for _ in range(400):
+        movido = False
+        for lado in range(4):
+            prueba = [x0, y0, x1, y1]
+            if lado == 0 and x0 - paso >= limite[0]:
+                prueba[0] -= paso
+            elif lado == 1 and y0 - paso >= limite[1]:
+                prueba[1] -= paso
+            elif lado == 2 and x1 + paso <= limite[2]:
+                prueba[2] += paso
+            elif lado == 3 and y1 + paso <= limite[3]:
+                prueba[3] += paso
+            else:
+                continue
+            if libre(tuple(prueba)):
+                x0, y0, x1, y1 = prueba
+                movido = True
+        if not movido:
+            break
+    return (int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
+
+
+def roles(elementos, cajas_campo, dentro, origen) -> dict | None:
+    """Qué es cada elemento de identidad, por su sitio y su contenido.
+
+    * ``offer``: el que contiene el precio o el nombre (la pastilla).
+    * ``brand``: pequeño y pegado a una esquina (el logo de la marca).
+    * ``lockup``: el mayor de los demás (el logo de campaña).
+    * ``seals``: el resto (sellos, iconos de financiación).
+    """
+
+    ancho0, alto0 = origen
+    oferta = None
+    for hueco in ("price", "installment", "product_name"):
+        if dentro.get(hueco) is not None:
+            oferta = dentro[hueco]
+            break
+    marcas, resto = [], []
+    for indice, caja in enumerate(elementos):
+        if indice == oferta:
+            continue
+        area = _area(caja) / (ancho0 * alto0)
+        cerca_x = caja[0] < ancho0 * .2 or caja[2] > ancho0 * .8
+        cerca_y = caja[1] < alto0 * .2 or caja[3] > alto0 * .8
+        if area < .05 and cerca_x and cerca_y and caja[1] < alto0 * .5:
+            marcas.append(indice)
+        else:
+            resto.append(indice)
+    lockup = max(resto, key=lambda i: _area(elementos[i]), default=None)
+    sellos = [i for i in resto if i != lockup]
+    if lockup is None:
+        return None
+    return {
+        "offer": oferta, "brand": marcas, "lockup": lockup, "seals": sellos,
+        "product": cajas_campo.get("product") if dentro.get("product") is None else None,
+    }
+
+
+def _encajar(caja, marco, alinear=("start", "start"), tope: float = 10.0):
+    """La caja escalada para caber en el marco, sin deformar, alineada."""
+
+    w, h = caja[2] - caja[0], caja[3] - caja[1]
+    mw, mh = marco[2] - marco[0], marco[3] - marco[1]
+    if w <= 0 or h <= 0 or mw <= 0 or mh <= 0:
+        return None
+    escala = min(mw / w, mh / h, tope)
+    nw, nh = w * escala, h * escala
+    ax, ay = alinear
+    x = marco[0] if ax == "start" else marco[2] - nw if ax == "end" else marco[0] + (mw - nw) / 2
+    y = marco[1] if ay == "start" else marco[3] - nh if ay == "end" else marco[1] + (mh - nh) / 2
+    return (x, y, x + nw, y + nh)
+
+
+def _fila(indices, elementos, marco, gap, alinear_x="start"):
+    """Varios elementos en una fila, a la misma escala, dentro del marco."""
+
+    if not indices:
+        return {}
+    anchos = sum(elementos[i][2] - elementos[i][0] for i in indices)
+    alto = max(elementos[i][3] - elementos[i][1] for i in indices)
+    mw, mh = marco[2] - marco[0], marco[3] - marco[1]
+    disponible = mw - gap * (len(indices) - 1)
+    if anchos <= 0 or alto <= 0 or disponible <= 0:
+        return {}
+    escala = min(disponible / anchos, mh / alto)
+    total = anchos * escala + gap * (len(indices) - 1)
+    x = marco[0] if alinear_x == "start" else marco[0] + (mw - total) / 2
+    salida = {}
+    for indice in sorted(indices, key=lambda i: elementos[i][0]):
+        caja = elementos[indice]
+        w, h = (caja[2] - caja[0]) * escala, (caja[3] - caja[1]) * escala
+        y = marco[3] - h - (mh - alto * escala) / 2
+        salida[indice] = (x, y, x + w, y + h)
+        x += w + gap
+    return salida
+
+
+def _componer(elementos, cajas_campo, dentro, origen, zona, size):
+    """Composición por roles con la retícula de cada plataforma.
+
+    Parámetros de las guías de Meta y Google para piezas de producto: el
+    producto es el protagonista (en torno al 40-45 % del ancho en horizontal y
+    cuadrado, casi la mitad del alto en story); el logo de la marca siempre
+    visible y en su esquina; la oferta junto al producto y con cuerpo
+    suficiente para leerse en móvil; los sellos agrupados en una franja; nada
+    dentro de las zonas que tapa la interfaz (el área segura ya las excluye).
+    """
+
+    papel = roles(elementos, cajas_campo, dentro, origen)
+    if papel is None:
+        return None
+    zx0, zy0, zx1, zy1 = zona
+    zw, zh = zx1 - zx0, zy1 - zy0
+    ancho, alto = size
+    gap = min(zw, zh) * .035
+    destinos: list = [None] * len(elementos)
+    campos: dict[str, tuple[float, float, float, float]] = {}
+
+    # El logo de la marca, pequeño y en su esquina: se le da un ancho fijo
+    # relativo al lienzo, como hacen las guías (entre el 15 y el 22 %).
+    techo_derecha = zy0
+    for indice in papel["brand"]:
+        caja = elementos[indice]
+        derecha = caja[2] > origen[0] / 2
+        ancho_marca = zw * (.20 if ancho >= alto else .30)
+        marco = (
+            (zx1 - ancho_marca, zy0, zx1, zy0 + zh * .12) if derecha
+            else (zx0, zy0, zx0 + ancho_marca, zy0 + zh * .12)
+        )
+        destinos[indice] = _encajar(caja, marco, ("end" if derecha else "start", "start"))
+        if derecha and destinos[indice]:
+            techo_derecha = max(techo_derecha, destinos[indice][3] + gap)
+
+    formato = "landscape" if ancho / alto > 1.4 else "story" if alto / ancho > 1.5 else "square"
+    lockup = elementos[papel["lockup"]]
+    oferta = papel["offer"]
+    producto = papel["product"]
+
+    if formato == "landscape":
+        col_producto = (zx1 - zw * .40, techo_derecha, zx1, zy1)
+        izquierda = (zx0, zy0, zx1 - zw * .40 - gap, zy1)
+        iw = izquierda[2] - izquierda[0]
+        franja_sellos = zh * .26
+        arriba = (izquierda[0], zy0, izquierda[2], zy1 - franja_sellos - gap)
+        destinos[papel["lockup"]] = _encajar(
+            lockup, (arriba[0], arriba[1], arriba[0] + iw * .50, arriba[3]), ("start", "center")
+        )
+        if oferta is not None:
+            destinos[oferta] = _encajar(
+                elementos[oferta],
+                (arriba[0] + iw * .50 + gap, arriba[1], arriba[2], arriba[3]),
+                ("center", "center"),
+            )
+        sellos = (izquierda[0], zy1 - franja_sellos, izquierda[2], zy1)
+    elif formato == "square":
+        col_producto = (zx1 - zw * .44, techo_derecha, zx1, zy1)
+        izquierda = (zx0, zy0, zx1 - zw * .44 - gap, zy1)
+        franja_sellos = zh * .20
+        cuerpo = zy1 - franja_sellos - gap
+        destinos[papel["lockup"]] = _encajar(
+            lockup, (izquierda[0], zy0, izquierda[2], zy0 + (cuerpo - zy0) * .56), ("start", "start")
+        )
+        alto_lockup = destinos[papel["lockup"]][3] if destinos[papel["lockup"]] else zy0
+        if oferta is not None:
+            destinos[oferta] = _encajar(
+                elementos[oferta],
+                (izquierda[0], alto_lockup + gap, izquierda[2], cuerpo),
+                ("start", "center"),
+            )
+        sellos = (izquierda[0], zy1 - franja_sellos, izquierda[2], zy1)
+    else:  # story
+        # Vertical de pantalla completa: logo de campaña grande arriba, y
+        # debajo producto y oferta lado a lado —el producto a la derecha, más
+        # alto—, con los sellos en la franja inferior. La oferta nunca va
+        # encima del producto: el producto se pinta después de la placa y la
+        # taparía.
+        franja_sellos = zh * .12
+        destinos[papel["lockup"]] = _encajar(
+            lockup, (zx0, zy0, zx0 + zw * .62, zy0 + zh * .33), ("start", "start")
+        )
+        base_lockup = destinos[papel["lockup"]][3] if destinos[papel["lockup"]] else zy0
+        suelo = zy1 - franja_sellos - gap
+        # La oferta se lleva algo más de la mitad del ancho: en un story se
+        # lee de lejos y a pulgar, y el precio es lo que decide el clic.
+        col_producto = (zx0 + zw * .54, techo_derecha + gap, zx1, suelo)
+        if oferta is not None:
+            destinos[oferta] = _encajar(
+                elementos[oferta],
+                (zx0, base_lockup + gap, zx0 + zw * .54 - gap, suelo),
+                ("start", "center"),
+            )
+        sellos = (zx0, zy1 - franja_sellos, zx1, zy1)
+
+    for indice, caja in _fila(papel["seals"], elementos, sellos, gap).items():
+        destinos[indice] = caja
+    if producto is not None:
+        campos["product"] = col_producto
+
+    # Los campos de la oferta viajan con su pastilla.
+    for hueco, caja in cajas_campo.items():
+        if hueco in campos:
+            continue
+        indice = dentro.get(hueco)
+        if indice is None or destinos[indice] is None:
+            continue
+        original, nueva = elementos[indice], destinos[indice]
+        factor = (nueva[2] - nueva[0]) / max(1, original[2] - original[0])
+        x0 = nueva[0] + (caja[0] - original[0]) * factor
+        y0 = nueva[1] + (caja[1] - original[1]) * factor
+        campos[hueco] = (x0, y0, x0 + (caja[2] - caja[0]) * factor, y0 + (caja[3] - caja[1]) * factor)
+    if any(d is None for i, d in enumerate(destinos)):
+        return None
+    return destinos, campos
 
 
 def _reflujo(elementos, cajas_campo, dentro, quitar, origen, zona, omit):
@@ -1105,7 +1359,7 @@ FAMILIES = {
     "landscape": ((1600, 838), "meta_feed_landscape"),
 }
 #: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
-VERSION = 4
+VERSION = 5
 
 
 def build_templates(pdf_path: Path, folder: Path) -> dict:
@@ -1160,6 +1414,18 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
             cajas, lecturas = field_boxes(pieza, escala)
             size = (ancho, alto)
             origen = "piece"
+            if "product" in cajas and pieza is principal:
+                # El hueco medido es la silueta del producto del ejemplo (una
+                # refrigeradora alta y estrecha): un cilindro o una licuadora
+                # quedaban diminutos. Se amplía al espacio libre que lo rodea.
+                obstaculos = [
+                    caja for caja in components(descompuesta[1])
+                ] + [caja for hueco, caja in cajas.items() if hueco != "product"]
+                margen = min(size) * .035
+                cajas["product"] = ampliar(
+                    cajas["product"], obstaculos,
+                    (margen, margen, size[0] - margen, size[1] - margen), min(size) * .03,
+                )
         else:
             # Ninguna pieza en esta proporción: se recompone la principal.
             fondo, capa, cajas_base, lecturas = descompuesta
