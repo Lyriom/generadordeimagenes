@@ -1134,11 +1134,57 @@ def _componer(elementos, cajas_campo, dentro, origen, zona, size):
         if derecha and destinos[indice]:
             techo_derecha = max(techo_derecha, destinos[indice][3] + gap)
 
-    formato = "landscape" if ancho / alto > 1.4 else "story" if alto / ancho > 1.5 else "square"
+    proporcion = ancho / alto
+    formato = (
+        "banner" if proporcion > 3 else "tall" if proporcion < .4
+        else "landscape" if proporcion > 1.4 else "story" if proporcion < .67 else "square"
+    )
+    nada = (0.0, 0.0, 0.0, 0.0)
     lockup = elementos[papel["lockup"]]
     oferta = papel["offer"]
     producto = papel["product"]
 
+    if formato == "banner":
+        # Banner (728x90, 320x50, 970x90): una sola fila a toda altura. No
+        # caben sellos: se omiten, como en cualquier banner de retail.
+        fila = [
+            (papel["lockup"], .22), (oferta, .36), ("product", .20),
+        ]
+        x = zx0
+        for clave, parte in fila:
+            marco = (x, zy0, x + zw * parte, zy1)
+            if clave == "product":
+                if producto is not None:
+                    campos["product"] = marco
+            elif clave is not None:
+                destinos[clave] = _encajar(elementos[clave], marco, ("center", "center"))
+            x += zw * parte + gap
+        for indice in papel["brand"]:
+            destinos[indice] = _encajar(
+                elementos[indice], (x, zy0 + zh * .2, zx1, zy1 - zh * .2), ("end", "center")
+            )
+        for indice in papel["seals"]:
+            destinos[indice] = nada
+        return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
+    if formato == "tall":
+        # Rascacielos (160x600): todo apilado a lo ancho de la columna.
+        tramos = [("brand", .07), (papel["lockup"], .22), ("product", .32), (oferta, .22), ("seals", .11)]
+        y = zy0
+        for clave, parte in tramos:
+            marco = (zx0, y, zx1, y + zh * parte)
+            if clave == "brand":
+                for indice in papel["brand"]:
+                    destinos[indice] = _encajar(elementos[indice], marco, ("center", "center"))
+            elif clave == "product":
+                if producto is not None:
+                    campos["product"] = marco
+            elif clave == "seals":
+                for indice, caja in _fila(papel["seals"], elementos, marco, gap, "center").items():
+                    destinos[indice] = caja
+            elif clave is not None:
+                destinos[clave] = _encajar(elementos[clave], marco, ("center", "center"))
+            y += zh * parte + gap * .6
+        return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
     if formato == "landscape":
         col_producto = (zx1 - zw * .40, techo_derecha, zx1, zy1)
         izquierda = (zx0, zy0, zx1 - zw * .40 - gap, zy1)
@@ -1199,7 +1245,12 @@ def _componer(elementos, cajas_campo, dentro, origen, zona, size):
     if producto is not None:
         campos["product"] = col_producto
 
-    # Los campos de la oferta viajan con su pastilla.
+    return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
+
+
+def _cerrar(destinos, campos, elementos, cajas_campo, dentro):
+    """Los campos de la oferta viajan con su pastilla; lo omitido no se pinta."""
+
     for hueco, caja in cajas_campo.items():
         if hueco in campos:
             continue
@@ -1211,7 +1262,7 @@ def _componer(elementos, cajas_campo, dentro, origen, zona, size):
         x0 = nueva[0] + (caja[0] - original[0]) * factor
         y0 = nueva[1] + (caja[1] - original[1]) * factor
         campos[hueco] = (x0, y0, x0 + (caja[2] - caja[0]) * factor, y0 + (caja[3] - caja[1]) * factor)
-    if any(d is None for i, d in enumerate(destinos)):
+    if any(d is None for d in destinos):
         return None
     return destinos, campos
 
@@ -1359,7 +1410,7 @@ FAMILIES = {
     "landscape": ((1600, 838), "meta_feed_landscape"),
 }
 #: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
-VERSION = 5
+VERSION = 6
 
 
 def build_templates(pdf_path: Path, folder: Path) -> dict:
@@ -1403,7 +1454,30 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
     escala_base = PLATE_MAX_SIDE / max(principal.width, principal.height)
     fondo_base, capa_base = decompose(pdf_path, principal, escala_base)
     cajas_base, lecturas_base = field_boxes(principal, escala_base)
+    if "product" in cajas_base:
+        # El hueco medido es la silueta del producto del ejemplo: se amplía al
+        # espacio libre para que cualquier otro producto quepa con cuerpo.
+        medida_base = capa_base.size
+        margen_base = min(medida_base) * .035
+        cajas_base["product"] = ampliar(
+            cajas_base["product"],
+            components(capa_base) + [c for h, c in cajas_base.items() if h != "product"],
+            (margen_base, margen_base, medida_base[0] - margen_base, medida_base[1] - margen_base),
+            min(medida_base) * .03,
+        )
     descompuesta = (fondo_base, capa_base, cajas_base, lecturas_base)
+    # La descomposición se guarda: el renderer recompone cada medida exacta
+    # (320x50, 1280x720…) en vez de recortar la placa de la familia más
+    # parecida, que cortaba el logo por los lados.
+    folder.mkdir(parents=True, exist_ok=True)
+    if fondo_base is not None:
+        fondo_base.convert("RGB").save(folder / "vector-fondo.jpg", format="JPEG", quality=92)
+    capa_base.save(folder / "vector-capa.png", format="PNG", optimize=True)
+    resumen["decomposition"] = {
+        "fondo": "vector-fondo.jpg" if fondo_base is not None else "",
+        "capa": "vector-capa.png",
+        "fields": {hueco: list(caja) for hueco, caja in cajas_base.items()},
+    }
     for familia, (medida, preset) in FAMILIES.items():
         safe = seguro(preset)
         pieza = propias.get(familia)

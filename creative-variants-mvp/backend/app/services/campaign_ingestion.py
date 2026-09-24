@@ -1457,7 +1457,10 @@ def _plate_origin(source: CampaignSource) -> str:
 
 
 def _drop_plate(source: CampaignSource) -> None:
-    for clave in ("template_plates", "plate_placements", "plate_text_colors", "plate_text_reads"):
+    for clave in (
+        "template_plates", "plate_placements", "plate_text_colors", "plate_text_reads",
+        "vector_decomposition",
+    ):
         source.meta.pop(clave, None)
 
 
@@ -1538,6 +1541,16 @@ def _ensure_vector_templates(client_id: str, campaign_id: str, campaign) -> list
             source.meta["plate_text_reads"] = resumen["text_reads"]
             source.meta["plate_text_fonts"] = resumen.get("fonts", {})
             source.meta["plate_text_case"] = resumen.get("text_case", {})
+            descomposicion = resumen.get("decomposition") or {}
+            if descomposicion.get("capa"):
+                source.meta["vector_decomposition"] = {
+                    "fondo": (
+                        _relative(client_id, campaign_id, carpeta / descomposicion["fondo"])
+                        if descomposicion.get("fondo") else ""
+                    ),
+                    "capa": _relative(client_id, campaign_id, carpeta / descomposicion["capa"]),
+                    "fields": descomposicion.get("fields", {}),
+                }
             source.meta.pop("vector_catalog", None)
         elif resumen["catalog_pieces"]:
             source.meta["vector_catalog"] = True

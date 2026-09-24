@@ -182,3 +182,23 @@ def test_sin_precio_la_placa_pierde_la_pastilla_y_nada_mas(tmp_path: Path):
     with Image.open(tmp_path / "assets" / retrato["file"]) as completa, \
             Image.open(tmp_path / "assets" / retrato["bare_file"]) as desnuda:
         assert completa.size == desnuda.size
+
+
+def test_un_banner_pone_todo_en_una_fila_dentro_del_lienzo():
+    """320x50 y 728x90 recortaban la placa horizontal y cortaban el logo."""
+
+    capa = Image.new("RGBA", (800, 1000), (0, 0, 0, 0))
+    capa.alpha_composite(Image.new("RGBA", (300, 300), (250, 0, 200, 255)), (40, 40))
+    capa.alpha_composite(Image.new("RGBA", (120, 40), (255, 255, 255, 255)), (640, 40))
+    capa.alpha_composite(Image.new("RGBA", (300, 200), (230, 80, 130, 255)), (40, 450))
+    capa.alpha_composite(Image.new("RGBA", (200, 120), (0, 200, 60, 255)), (40, 800))
+    campos = {"price": (60, 480, 320, 600), "product": (450, 200, 760, 950)}
+    safe = {"left": .035, "top": .035, "right": .035, "bottom": .035}
+
+    placa, cajas = vector.adapt(None, capa, campos, (728, 90), safe)
+
+    assert placa.size == (728, 90)
+    for x0, y0, x1, y1 in cajas.values():
+        assert 0 <= x0 < x1 <= 728 and 0 <= y0 < y1 <= 90
+    # Lockup, oferta, producto: de izquierda a derecha.
+    assert cajas["price"][2] <= cajas["product"][0]

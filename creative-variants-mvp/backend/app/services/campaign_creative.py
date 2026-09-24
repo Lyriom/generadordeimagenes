@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import io
+import logging
 import json
 import math
 import re
@@ -33,6 +34,8 @@ from ..models.formats import DEFAULT_SAFE_AREA, FORMAT_PRESETS, SUPPORTED_FORMAT
 from . import campaign_store, client_fonts, template_store
 from .production_matrix import MatrixRow, ai_fillable_fields, product_count, select_template
 from .security import slugify
+
+logger = logging.getLogger(__name__)
 
 
 class CampaignProductionError(ValueError):
@@ -368,6 +371,84 @@ def _template_plate(
     except Exception:  # noqa: BLE001 - una placa rota no tumba la plantilla
         return None
     return f"Placa de plantilla · {nombre}", layer
+
+
+@lru_cache(maxsize=8)
+def _imagen_cacheada(ruta: str, mtime: float, modo: str) -> Image.Image:
+    with Image.open(ruta) as imagen:
+        return imagen.convert(modo).copy()
+
+
+def _vector_layout(
+    campaign: Campaign,
+    canvas: tuple[int, int],
+    safe: dict[str, float],
+    *,
+    bare: bool = False,
+) -> tuple[Image.Image, dict[str, tuple[int, int, int, int]]] | None:
+    """Placa y cajas del editable recompuestas para esta medida exacta.
+
+    Las placas se guardan por familia (4:5, 1:1, 9:16, 1,91:1). Cualquier otra
+    medida —1280x720, 300x600, 320x50— recortaba la de la familia más
+    parecida y se comía el logo por los lados o dejaba medio banner vacío.
+    Con la descomposición guardada se compone cada medida con su retícula.
+
+    Devuelve ``None`` cuando la medida coincide con la pieza dibujada en el
+    editable: esa placa, renderizada del PDF, es más fiel que cualquier
+    recomposición.
+    """
+
+    from . import campaign_vector
+
+    width, height = canvas
+    for source in campaign.sources:
+        datos = source.meta.get("vector_decomposition")
+        if not isinstance(datos, dict) or not datos.get("capa"):
+            continue
+        propias = [
+            placa for placa in source.meta.get("template_plates", [])
+            if isinstance(placa, dict) and placa.get("origin") == "vector"
+        ]
+        # La pieza original, si la medida es la suya (±2 %): esa se usa tal cual.
+        for placa in propias:
+            medida = placa.get("size") or [0, 0]
+            if (
+                placa.get("family") and medida[1]
+                and abs((width / height) / (medida[0] / medida[1]) - 1) < .02
+                and source.meta.get("vector_summary", {}).get("plates")
+                and any(
+                    item.get("family") == placa.get("family") and item.get("origin") == "piece"
+                    for item in source.meta["vector_summary"]["plates"]
+                )
+            ):
+                return None
+        try:
+            capa_ruta = campaign_store.campaign_path(campaign.client_id, campaign.campaign_id, datos["capa"])
+            capa = _imagen_cacheada(str(capa_ruta), capa_ruta.stat().st_mtime, "RGBA")
+            fondo = None
+            if datos.get("fondo"):
+                fondo_ruta = campaign_store.campaign_path(
+                    campaign.client_id, campaign.campaign_id, datos["fondo"]
+                )
+                fondo = _imagen_cacheada(str(fondo_ruta), fondo_ruta.stat().st_mtime, "RGB")
+            campos = {
+                clave: tuple(int(v) for v in caja)
+                for clave, caja in (datos.get("fields") or {}).items()
+                if isinstance(caja, (list, tuple)) and len(caja) == 4
+            }
+            placa, cajas = campaign_vector.adapt(
+                fondo, capa, campos, canvas, safe,
+                omit={"price", "installment"} if bare else None,
+            )
+        except Exception:  # noqa: BLE001 - sin recomposición queda la placa de familia
+            logger.info("No se pudo recomponer la placa del editable", exc_info=True)
+            return None
+        regiones = {
+            clave: (caja[0], caja[1], max(1, caja[2] - caja[0]), max(1, caja[3] - caja[1]))
+            for clave, caja in cajas.items()
+        }
+        return placa.convert("RGBA"), regiones
+    return None
 
 
 def _decorations(
@@ -1231,6 +1312,9 @@ def _render(
         else "landscape" if width / height > 1.35 else "square"
     )
     medidas = set(candidate.blueprint.placements.get(familia, {}))
+    vector = _vector_layout(campaign, canvas, safe) if candidate.meta.get("plate_measured") else None
+    if vector is not None:
+        medidas = set(vector[1])
     if candidate.meta.get("plate_measured") and medidas:
         # Todas las candidatas comparten la placa del editable, con su
         # pastilla y su hueco de producto pintados. Una candidata que no
@@ -1318,14 +1402,24 @@ def _render(
         # redactó la IA, solo si el arte tiene sitio para ello. Los campos sin
         # hueco en el arte no van a la retícula genérica —ahí caían encima del
         # logo de campaña—: se apilan sobre el producto, que cede ese alto.
-        titular = values.get("headline", "").strip()
+        # El titular de la pastilla sale de la fila (escrito o redactado por
+        # la IA), nunca del respaldo del brief: ese respaldo es el objetivo
+        # interno ("Comunicar la campaña…"), no un texto para el cliente.
+        titular = (row.titular or "").strip()
         de_la_ia = {
             {"titular": "headline", "subtitulo": "subheadline", "cta": "cta"}.get(campo, campo)
             for campo in row.ai_fields
         }
+        # Solo lo que trae la propia fila: el titular de respaldo del brief
+        # ("Vender a crédito directo") no lo escribió nadie para esta pieza.
+        escrito = {
+            "headline": row.titular, "subheadline": row.subtitulo,
+            "previous_price": row.precio_anterior, "discount": row.descuento,
+            "cta": row.cta, "validity": row.vigencia,
+        }
         extras = [
-            clave for clave in ("headline", "subheadline", "previous_price", "discount", "cta", "validity")
-            if clave not in medidas and values.get(clave, "").strip() and clave not in de_la_ia
+            clave for clave, valor in escrito.items()
+            if clave not in medidas and (valor or "").strip() and clave not in de_la_ia
         ]
         visible &= medidas | {"logo", "legal"}
         visible |= set(extras)
@@ -1345,6 +1439,27 @@ def _render(
             if "headline" in extras:
                 extras.remove("headline")
     regions = _layout(candidate, width, height, safe, proposal, visible)
+    if vector is not None:
+        regions.update(vector[1])
+    # Un banner (320x50, 728x90) o un rascacielos no tienen sitio para una
+    # pila de texto: ahí solo va lo que el arte trae.
+    if width / height > 3 or width / height < .4:
+        for clave in extras:
+            values[clave] = ""
+        extras = []
+    if width / height > 3 and candidate.meta.get("plate_measured") and values.get("price", "").strip():
+        # En 50-90 px de alto el nombre y la cuota no se leen y montan el
+        # precio encima. El banner lleva solo el precio, en la parte de color
+        # de la pastilla (la del precio y la cuota).
+        cajas = [regions[clave] for clave in ("price", "installment") if clave in medidas]
+        if cajas:
+            x0 = min(c[0] for c in cajas)
+            y0 = min(c[1] for c in cajas)
+            x1 = max(c[0] + c[2] for c in cajas)
+            y1 = max(c[1] + c[3] for c in cajas)
+            regions["price"] = (x0, y0, x1 - x0, y1 - y0)
+        values["product_name"] = ""
+        values["installment"] = ""
     lineas_nombre = 2
     if extras and "product" in medidas and "product" in regions:
         # La pila de campos escritos a mano ocupa la parte alta del hueco del
@@ -1415,10 +1530,17 @@ def _render(
         layers.append(("01 · " + branding_background[0], branding_background[1]))
     # La placa del PSD manda sobre todo lo demás: es el arte de la marca, no una
     # aproximación. Solo cede ante un fondo que una persona marcó a mano.
-    plate = (
-        _template_plate(campaign, candidate, canvas, bare=bool(sin_precio))
-        if branding_background is None else None
-    )
+    if branding_background is not None:
+        plate = None
+    elif vector is not None:
+        placa_vector = vector[0]
+        if sin_precio:
+            desnuda = _vector_layout(campaign, canvas, safe, bare=True)
+            if desnuda is not None:
+                placa_vector = desnuda[0]
+        plate = ("Placa de plantilla · editable", placa_vector)
+    else:
+        plate = _template_plate(campaign, candidate, canvas, bare=bool(sin_precio))
     if plate is not None:
         layers.append(("01 · " + plate[0], plate[1]))
     fixed_psd_layers = _fixed_psd_asset_layers(campaign, candidate, canvas)
@@ -1583,7 +1705,9 @@ def render_row_preview(
     peticion = format_token.strip() or (row.formatos[0] if row.formatos else "meta_feed_4_5")
     format_id, width, height, safe = resolve_format(peticion)
     factor = min(1.0, max_side / max(width, height))
-    preview_size = (max(160, round(width * factor)), max(160, round(height * factor)))
+    # Sin mínimo por lado: forzar 160 px de alto convertía un 320x50 en un
+    # 320x160 y la vista enseñaba otra pieza. Se conserva la proporción.
+    preview_size = (max(1, round(width * factor)), max(1, round(height * factor)))
 
     _validate_product_render_budget(row, product_paths)
     opened: list[Image.Image] = []
