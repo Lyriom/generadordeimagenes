@@ -1105,7 +1105,7 @@ FAMILIES = {
     "landscape": ((1600, 838), "meta_feed_landscape"),
 }
 #: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
-VERSION = 3
+VERSION = 4
 
 
 def build_templates(pdf_path: Path, folder: Path) -> dict:
