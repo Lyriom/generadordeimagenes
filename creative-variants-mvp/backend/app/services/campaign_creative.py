@@ -278,8 +278,13 @@ def _template_plate(
     campaign: Campaign,
     candidate: TemplateCandidate,
     canvas: tuple[int, int],
+    *,
+    bare: bool = False,
 ) -> tuple[str, Image.Image] | None:
     """Placa de plantilla del PSD: el arte real, sin su contenido variable.
+
+    ``bare`` pide la variante sin la pastilla del precio cuando la placa la
+    tiene: una fila sin precio ni cuota no debe dejar la pastilla vacía.
 
     Es la diferencia entre una plantilla que comunica la marca y un degradado
     con "TITULAR DE CAMPAÑA" encima. Entre varias placas se elige la del
@@ -309,11 +314,14 @@ def _template_plate(
                 continue
             if ancho <= 0 or alto <= 0:
                 continue
+            ruta = placa["path"]
+            if bare and isinstance(placa.get("bare_path"), str) and placa["bare_path"]:
+                ruta = placa["bare_path"]
             mejores.append((
                 abs(ancho / alto - objetivo),
                 0 if source.source_id in preferidas else 1,
                 str(placa.get("name", "PSD")),
-                placa["path"],
+                ruta,
                 # El editable vectorial da la placa exacta; el PSD, una
                 # reconstruida; el OCR sobre un arte plano, una adivinada.
                 {"vector": 0, "psd": 1}.get(str(placa.get("origin") or "psd"), 2),
@@ -738,12 +746,16 @@ def _layout(
 
     visible = visible_fields or set(regions)
     product_x, product_y, product_w, product_h = regions["product"]
-    if not ({"headline", "subheadline"} & visible):
+    # Un hueco de producto medido sobre el arte no se estira: crecer hacia
+    # arriba lo metía debajo del logo que la placa trae pintado encima.
+    medido = "product" in explicit
+    if not medido and not ({"headline", "subheadline"} & visible):
         reclaimed = min(.13, max(0, product_y - .10))
         product_y -= reclaimed
         product_h += reclaimed
     if (
-        not ({"price", "previous_price", "installment", "discount"} & visible)
+        not medido
+        and not ({"price", "previous_price", "installment", "discount"} & visible)
         and "product_name" not in visible
         and not landscape
     ):
@@ -1257,21 +1269,23 @@ def _render(
     if row is None and candidate.meta.get("plate_measured") and medidas:
         visible &= medidas | {"logo"}
         values = {key: (value if key in visible else "") for key, value in values.items()}
+        show_product = show_product and "product" in visible
         # La pastilla del arte es de una sola línea: "$ PRECIO" partía en "$"
         # y la vista previa enseñaba un símbolo suelto.
         if values.get("price"):
             values["price"] = "$ 000"
     elif row is not None and candidate.meta.get("plate_measured") and medidas:
-        # En producción el titular se autocompleta desde el brief. Sobre un
-        # arte que no tiene sitio para titular, ese texto caía en la retícula
-        # genérica encima del logo de campaña. Solo se dibuja si la fila lo
-        # trae escrito: entonces es una decisión de alguien, no un relleno.
-        propios = {"headline": row.titular, "subheadline": row.subtitulo}
-        for clave, escrito in propios.items():
-            if clave not in medidas and not (escrito or "").strip():
-                values[clave] = ""
-                visible.discard(clave)
-        show_product = show_product and "product" in visible
+        # La plantilla del editable define qué campos existen. Un titular o un
+        # CTA —escritos en la matriz o autocompletados por la IA— no tienen
+        # sitio en ese arte: en la retícula genérica caían encima del logo de
+        # campaña y de los sellos. Solo se dibuja lo que el arte tiene; el
+        # legal es la excepción, porque omitirlo no es una decisión de diseño.
+        visible &= medidas | {"logo", "legal"}
+        values = {key: (value if key in visible else "") for key, value in values.items()}
+    sin_precio = (
+        row is not None and candidate.meta.get("plate_measured")
+        and not values.get("price", "").strip() and not values.get("installment", "").strip()
+    )
     regions = _layout(candidate, width, height, safe, proposal, visible)
 
     blueprint = candidate.blueprint
@@ -1288,7 +1302,10 @@ def _render(
         layers.append(("01 · " + branding_background[0], branding_background[1]))
     # La placa del PSD manda sobre todo lo demás: es el arte de la marca, no una
     # aproximación. Solo cede ante un fondo que una persona marcó a mano.
-    plate = _template_plate(campaign, candidate, canvas) if branding_background is None else None
+    plate = (
+        _template_plate(campaign, candidate, canvas, bare=bool(sin_precio))
+        if branding_background is None else None
+    )
     if plate is not None:
         layers.append(("01 · " + plate[0], plate[1]))
     fixed_psd_layers = _fixed_psd_asset_layers(campaign, candidate, canvas)

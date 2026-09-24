@@ -1518,9 +1518,15 @@ def _ensure_vector_templates(client_id: str, campaign_id: str, campaign) -> list
                 relativa = _relative(client_id, campaign_id, carpeta / placa["file"])
                 if relativa not in source.asset_files:
                     source.asset_files.append(relativa)
+                desnuda = ""
+                if placa.get("bare_file"):
+                    desnuda = _relative(client_id, campaign_id, carpeta / placa["bare_file"])
+                    if desnuda not in source.asset_files:
+                        source.asset_files.append(desnuda)
                 placas.append({
                     "name": f"{source.filename} · pág. {placa['page']}",
                     "path": relativa,
+                    "bare_path": desnuda,
                     "size": placa["size"],
                     "engine": "vector",
                     "origin": "vector",
@@ -1717,9 +1723,9 @@ def apply_plate_placements(campaign, candidates) -> int:
     for candidate in candidates:
         # Las cajas del editable son las de la placa: la pastilla del precio
         # está pintada ahí. Unas posiciones propuestas por la IA dejarían la
-        # cifra fuera de su pastilla, así que mandan las medidas, salvo en una
-        # candidata ya aprobada.
-        manda_la_placa = vectorial and not candidate.approved
+        # cifra fuera de su pastilla, así que mandan las medidas, también en una
+        # candidata aprobada: lo que se aprobó es esa placa.
+        manda_la_placa = vectorial
         if manda_la_placa:
             candidate.meta["plate_measured"] = True
         for familia, huecos in medidas.items():

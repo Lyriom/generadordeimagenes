@@ -51,6 +51,7 @@ import type {
   ProductGroup,
   ProductZone,
   ProductionBatch,
+  ProductionPiece,
   Project,
   ProjectSummary,
   Variant,
@@ -6167,8 +6168,11 @@ async function renderCampaignResults(): Promise<void> {
     query("#resume-production-task")?.addEventListener("click", () => void resumeCampaignProductionTask());
     return;
   }
-  const cards = batch.pieces.map((piece) => [
-    '<article class="result-card campaign-result"><a class="result-image" href="', attr(piece.png_url || piece.preview_url), '" target="_blank" rel="noreferrer">',
+  // Las piezas se revisan en el visor, como siempre. El PNG se sirve como
+  // descarga, y abrirlo en otra pestaña bajaba el archivo en vez de enseñarlo.
+  pieceViewerItems = batch.pieces;
+  const cards = batch.pieces.map((piece, slot) => [
+    '<article class="result-card campaign-result"><a class="result-image piece-open" data-slot="', String(slot), '" href="', attr(piece.png_url || piece.preview_url), '" target="_blank" rel="noreferrer">',
     '<img src="', attr(piece.preview_url), '" alt="', attr(piece.product + " · " + piece.format), '" loading="lazy" decoding="async"></a>',
     '<div class="result-info"><span class="kicker">FILA ', String(piece.row_number), ' · PROPUESTA ', String(piece.proposal), '</span>',
     '<h3>', esc(piece.product || "Arte sin nombre"), '</h3><p>', esc(piece.template_name), ' · ',
@@ -6197,6 +6201,12 @@ async function renderCampaignResults(): Promise<void> {
   ].join("");
   bindStepBar();
   query("#new-production")?.addEventListener("click", () => navigate("generate"));
+  queryAll<HTMLAnchorElement>(".piece-open").forEach((link) => {
+    link.addEventListener("click", (event) => {
+      event.preventDefault();
+      openPieceViewer(Number(link.dataset.slot));
+    });
+  });
 }
 
 /* ------------------------------------------------------------------ visor
@@ -6211,6 +6221,49 @@ interface ViewerItem {
 
 let viewerItems: ViewerItem[] = [];
 let viewerAt = -1;
+/** Piezas de la última tanda de campaña, en el orden de la galería. */
+let pieceViewerItems: ProductionPiece[] = [];
+let viewerMode: "variant" | "piece" = "variant";
+
+function openPieceViewer(slot: number): void {
+  if (slot < 0 || slot >= pieceViewerItems.length) return;
+  viewerMode = "piece";
+  viewerAt = slot;
+  const piece = pieceViewerItems[slot];
+  const overlay = query<HTMLElement>("#viewer")!;
+  const image = query<HTMLImageElement>("#viewer-img")!;
+  // Un <img> ignora el Content-Disposition: enseña el PNG a tamaño real.
+  image.src = piece.png_url || piece.preview_url;
+  image.alt = (piece.product || "Arte") + " · " + piece.format;
+  query<HTMLElement>("#viewer-title")!.textContent = piece.product || "Arte sin nombre";
+  query<HTMLElement>("#viewer-meta")!.textContent = [
+    "Fila " + String(piece.row_number) + " · propuesta " + String(piece.proposal),
+    String(piece.width) + "×" + String(piece.height),
+    piece.format,
+    String(slot + 1) + " de " + String(pieceViewerItems.length),
+  ].join(" · ");
+  query<HTMLElement>("#viewer-actions")!.innerHTML = [
+    '<button class="ghost-button" id="viewer-real">Tamaño real</button>',
+    '<a class="ghost-button" href="' + attr(piece.png_url) + '" download>PNG</a>',
+    '<a class="ghost-button" href="' + attr(piece.jpg_url) + '" download>JPG</a>',
+    '<a class="ghost-button" href="' + attr(piece.psd_url) + '" download>PSD</a>',
+  ].join("");
+  query<HTMLElement>("#viewer-foot")!.innerHTML = [
+    "Plantilla: <strong>" + esc(piece.template_name) + "</strong>",
+    piece.warnings.length
+      ? " · " + piece.warnings.map((warning) => "⚠ " + esc(warning)).join(" · ")
+      : " · sin avisos",
+    '<span class="right"> ← → para pasar · Esc para cerrar</span>',
+  ].join("");
+  query<HTMLButtonElement>("#viewer-prev")!.disabled = slot === 0;
+  query<HTMLButtonElement>("#viewer-next")!.disabled = slot >= pieceViewerItems.length - 1;
+  overlay.classList.remove("is-real");
+  overlay.hidden = false;
+  query<HTMLButtonElement>("#viewer-real")?.addEventListener("click", () => {
+    overlay.classList.toggle("is-real");
+  });
+  query<HTMLButtonElement>("#viewer-close")!.focus();
+}
 
 function viewerVariant(item: ViewerItem): { project: Project; variant: Variant } | null {
   const project = state.campaign.find((entry) => entry.project_id === item.projectId);
@@ -6220,6 +6273,7 @@ function viewerVariant(item: ViewerItem): { project: Project; variant: Variant }
 
 function openViewer(slot: number): void {
   if (slot < 0 || slot >= viewerItems.length) return;
+  viewerMode = "variant";
   viewerAt = slot;
   const overlay = query<HTMLElement>("#viewer")!;
   const found = viewerVariant(viewerItems[slot]);
@@ -6280,6 +6334,10 @@ function closeViewer(): void {
 
 function stepViewer(delta: number): void {
   if (viewerAt < 0) return;
+  if (viewerMode === "piece") {
+    openPieceViewer(Math.min(pieceViewerItems.length - 1, Math.max(0, viewerAt + delta)));
+    return;
+  }
   openViewer(Math.min(viewerItems.length - 1, Math.max(0, viewerAt + delta)));
 }
 

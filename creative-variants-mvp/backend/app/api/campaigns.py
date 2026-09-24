@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import mimetypes
 import shutil
 from pathlib import Path
@@ -56,6 +57,7 @@ from ..services import (
 from ..services.security import FileValidationError, slugify, validate_uuid
 from .deps import bind_session
 
+logger = logging.getLogger(__name__)
 router = APIRouter(
     prefix="/clients",
     tags=["clientes y campanas"],
@@ -1175,6 +1177,24 @@ def _load_matrix_draft(
     return filename, payload
 
 
+def _refresh_vector_plates(campaign: Campaign, brand_name: str) -> None:
+    """Pone al día la placa del editable antes de producir o previsualizar.
+
+    La extracción se versiona: cuando mejora (la adaptación a horizontal, la
+    variante sin pastilla) una campaña ya aprobada debe usarla sin tener que
+    reanalizar y volver a aprobar. Con la versión al día no cuesta nada.
+    """
+
+    try:
+        campaign_ingestion.ensure_template_plates(
+            campaign.client_id, campaign.campaign_id, campaign, brand_name
+        )
+        campaign_ingestion.apply_plate_placements(campaign, campaign.template_candidates)
+        campaign_store.save_campaign(campaign)
+    except Exception:  # noqa: BLE001 - con la placa anterior se sigue produciendo
+        logger.info("No se pudo refrescar la placa del editable", exc_info=True)
+
+
 def _preflight_production_order(
     campaign: Campaign,
     rows: list[production_matrix.MatrixRow],
@@ -1542,6 +1562,7 @@ async def preview_production_row(
         rows = production_matrix.parse_matrix(payload, matrix_name)
     except production_matrix.MatrixParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    _refresh_vector_plates(campaign, brand.name)
     row = next((item for item in rows if item.row_number == row_number), None)
     if row is None:
         raise HTTPException(
@@ -1730,6 +1751,7 @@ async def produce_campaign(
         selected_asset_ids = list(dict.fromkeys([*decoded_asset_ids, *direct_ids]))
         products = _stored_product_assets(campaign, selected_asset_ids)
         planned = _planned_matrix_pieces(rows, formats)
+        _refresh_vector_plates(campaign, brand.name)
         _preflight_production_order(campaign, rows, products, planned)
         job = _persist_production_job(
             campaign,

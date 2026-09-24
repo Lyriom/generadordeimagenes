@@ -152,3 +152,33 @@ def test_un_desplegable_con_muchos_precios_es_catalogo(tmp_path: Path):
     assert vector.best_pieces(piezas) == []
     resumen = vector.build_templates(ruta, tmp_path / "assets")
     assert resumen["plates"] == [] and resumen["catalog_pieces"] == 1
+
+
+def test_el_horizontal_redistribuye_en_vez_de_encoger():
+    """De un 4:5 a un 1200x628 anclando, todo quedaba diminuto."""
+
+    capa = Image.new("RGBA", (800, 1000), (0, 0, 0, 0))
+    capa.alpha_composite(Image.new("RGBA", (300, 300), (250, 0, 200, 255)), (40, 40))
+    capa.alpha_composite(Image.new("RGBA", (300, 200), (230, 80, 130, 255)), (40, 450))
+    capa.alpha_composite(Image.new("RGBA", (200, 120), (0, 200, 60, 255)), (40, 800))
+    campos = {"price": (60, 480, 320, 600), "product": (450, 200, 760, 950)}
+    safe = {k: float(v) for k, v in FORMAT_PRESETS["meta_feed_landscape"]["safe_area"].items()}
+
+    _placa, cajas = vector.adapt(None, capa, campos, (1600, 838), safe)
+
+    minima = min(1600 * .93 / 800, 838 * .93 / 1000)
+    x0, y0, x1, y1 = cajas["price"]
+    assert (x1 - x0) > 260 * minima * 1.3
+    # El producto va a la derecha, sin pisar la columna de identidad.
+    assert cajas["product"][0] > x1
+
+
+def test_sin_precio_la_placa_pierde_la_pastilla_y_nada_mas(tmp_path: Path):
+    ruta = tmp_path / "toolkit.pdf"
+    _toolkit(ruta)
+    resumen = vector.build_templates(ruta, tmp_path / "assets")
+    retrato = next(placa for placa in resumen["plates"] if placa["family"] == "portrait")
+    assert retrato["bare_file"]
+    with Image.open(tmp_path / "assets" / retrato["file"]) as completa, \
+            Image.open(tmp_path / "assets" / retrato["bare_file"]) as desnuda:
+        assert completa.size == desnuda.size

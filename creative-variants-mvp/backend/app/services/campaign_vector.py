@@ -761,6 +761,12 @@ def components(capa) -> list[tuple[int, int, int, int]]:
         x, y, w, h, area = stats[indice]
         if area < minimo:
             continue
+        # Una franja fina a lo largo de un borde no es un elemento: es el
+        # filo del marco o un píxel de diferencia entre el fondo renderizado y
+        # el extraído. Contarla impedía agrandar nada en un horizontal.
+        fw, fh = mascara.shape[1], mascara.shape[0]
+        if (w < fw * .03 and h > fh * .6) or (h < fh * .03 and w > fw * .6):
+            continue
         cajas.append((
             int(x / factor), int(y / factor),
             min(ancho, int((x + w) / factor) + 1), min(alto, int((y + h) / factor) + 1),
@@ -803,16 +809,64 @@ def _mover(
     return nx, ny, nx + w, ny + h
 
 
+def _contenedor(caja, elementos, umbral: float = .5):
+    """El elemento de identidad que contiene la caja de un campo, si lo hay."""
+
+    area = _area(caja)
+    if area <= 0:
+        return None
+    mejor, indice = 0.0, None
+    for posicion, original in enumerate(elementos):
+        parte = _area(_inter(caja, original)) / area
+        if parte > mejor:
+            mejor, indice = parte, posicion
+    return indice if mejor >= umbral else None
+
+
+def _plan(elementos, cajas_campo, dentro, origen, zona, escala):
+    """Dónde cae cada elemento y cada campo con una escala dada."""
+
+    destinos = [_mover(caja, origen, zona, escala) for caja in elementos]
+    campos: dict[str, tuple[float, float, float, float]] = {}
+    for hueco, caja in cajas_campo.items():
+        indice = dentro.get(hueco)
+        if indice is not None:
+            original, nueva = elementos[indice], destinos[indice]
+            x0 = nueva[0] + (caja[0] - original[0]) * escala
+            y0 = nueva[1] + (caja[1] - original[1]) * escala
+            campos[hueco] = (
+                x0, y0, x0 + (caja[2] - caja[0]) * escala, y0 + (caja[3] - caja[1]) * escala
+            )
+        else:
+            campos[hueco] = _mover(caja, origen, zona, escala)
+    return destinos, campos
+
+
+def _choca(a, b, margen: float = 4.0) -> bool:
+    return (
+        min(a[2], b[2]) - max(a[0], b[0]) > margen
+        and min(a[3], b[3]) - max(a[1], b[1]) > margen
+    )
+
+
 def adapt(
     fondo, capa, cajas_campo: dict[str, tuple[int, int, int, int]],
     size: tuple[int, int], safe: dict[str, float],
+    *,
+    omit: set[str] | None = None,
 ):
     """Recompone la pieza en otra proporción. Devuelve (placa, cajas de campo).
 
-    El fondo cubre el lienzo; cada elemento de identidad se ancla a su borde y
-    se escala lo justo para que la pieza entera quepa en el área segura. Los
-    campos viajan con el elemento que los contiene —el precio con su
-    pastilla—, así no se separa la cifra de su fondo.
+    El fondo cubre el lienzo; cada elemento de identidad se ancla a su borde.
+    La escala se busca: se empieza por la que conserva el área de cada
+    elemento y se baja hasta que nada se pise y todo quepa en el área segura.
+    Con la escala mínima —la que mete la pieza entera— un horizontal quedaba
+    con el logo y el producto diminutos en un mar de fondo.
+
+    Los campos viajan con el elemento que los contiene —el precio con su
+    pastilla—, así no se separa la cifra de su fondo. ``omit`` quita los
+    elementos que solo existen para ciertos campos: sin precio en la fila, la
+    pastilla vacía no debe quedar en la pieza.
     """
 
     from PIL import Image, ImageOps
@@ -823,43 +877,203 @@ def adapt(
         ancho * float(safe.get("left", .04)), alto * float(safe.get("top", .04)),
         ancho * (1 - float(safe.get("right", .04))), alto * (1 - float(safe.get("bottom", .04))),
     )
-    escala = min((zona[2] - zona[0]) / origen[0], (zona[3] - zona[1]) / origen[1])
+    minima = min((zona[2] - zona[0]) / origen[0], (zona[3] - zona[1]) / origen[1])
+    maxima = min(
+        1.0 * max(ancho, alto) / max(origen),
+        ((zona[2] - zona[0]) * (zona[3] - zona[1]) / (origen[0] * origen[1])) ** .5,
+    )
+    maxima = max(maxima, minima)
+
+    elementos = components(capa)
+    dentro = {
+        hueco: _contenedor(caja, elementos) for hueco, caja in cajas_campo.items()
+    }
+    # Lo omitido solo deja de pintarse: el plan se calcula con todo, para que
+    # la variante sin pastilla ponga el producto y el nombre en el mismo
+    # sitio que la placa completa cuyas posiciones usa el renderer.
+    quitar = {
+        dentro[hueco] for hueco in (omit or set()) if dentro.get(hueco) is not None
+    }
+    sin_quitar: set[int] = set()
+    # Lo que ocupa sitio propio: cada elemento y cada campo suelto (el
+    # producto). Dos cosas que no se tocaban en el original no pueden
+    # tocarse en la adaptación.
+    unidades = [("e", i, caja) for i, caja in enumerate(elementos)]
+    unidades += [
+        ("c", hueco, caja) for hueco, caja in cajas_campo.items()
+        if dentro.get(hueco) is None
+    ]
+    separadas = [
+        (a, b) for x, a in enumerate(unidades) for b in unidades[x + 1:]
+        if not _choca(a[2], b[2], 0)
+    ]
+
+    if (ancho / alto) / (origen[0] / origen[1]) > 1.5:
+        # Un horizontal a partir de un vertical no se arregla anclando: la
+        # columna de la izquierda (logo, pastilla, sellos) no cabe en la
+        # altura y todo queda diminuto. Se redistribuye en filas.
+        plan = _reflujo(elementos, cajas_campo, dentro, sin_quitar, origen, zona, set())
+        if plan is not None:
+            return _pintar(fondo, capa, size, elementos, quitar, zona, *plan)
+    escala = minima
+    for paso in range(13):
+        prueba = maxima - (maxima - minima) * paso / 12
+        destinos, campos = _plan(elementos, cajas_campo, dentro, origen, zona, prueba)
+
+        def donde(unidad):
+            return destinos[unidad[1]] if unidad[0] == "e" else campos[unidad[1]]
+
+        fuera = any(
+            donde(u)[0] < zona[0] - 2 or donde(u)[1] < zona[1] - 2
+            or donde(u)[2] > zona[2] + 2 or donde(u)[3] > zona[3] + 2
+            for u in unidades if u[0] == "e"
+        )
+        if not fuera and not any(_choca(donde(a), donde(b)) for a, b in separadas):
+            escala = prueba
+            break
+    destinos, campos = _plan(elementos, cajas_campo, dentro, origen, zona, escala)
+    return _pintar(fondo, capa, size, elementos, quitar, zona, destinos, campos)
+
+
+def _pintar(fondo, capa, size, elementos, quitar, zona, destinos, campos):
+    from PIL import Image, ImageOps
+
     if fondo is not None:
         placa = ImageOps.fit(fondo, size, method=Image.Resampling.LANCZOS).convert("RGBA")
     else:
         placa = Image.new("RGBA", size, (0, 0, 0, 255))
-
-    elementos = components(capa)
-    destinos: list[tuple[tuple[int, int, int, int], tuple[float, float, float, float]]] = []
-    for caja in elementos:
-        nueva = _mover(caja, origen, zona, escala)
-        destinos.append((caja, nueva))
+    for indice, (caja, nueva) in enumerate(zip(elementos, destinos)):
+        if indice in quitar or nueva[2] <= nueva[0] or nueva[3] <= nueva[1]:
+            continue
         recorte = capa.crop(caja)
         medida = (max(1, int(round(nueva[2] - nueva[0]))), max(1, int(round(nueva[3] - nueva[1]))))
         recorte = recorte.resize(medida, Image.Resampling.LANCZOS)
         placa.alpha_composite(recorte, (int(round(nueva[0])), int(round(nueva[1]))))
 
     salida: dict[str, tuple[int, int, int, int]] = {}
-    for hueco, caja in cajas_campo.items():
-        area = _area(caja)
-        contenedor = None
-        if area > 0:
-            mejor = 0.0
-            for original, nueva in destinos:
-                parte = _area(_inter(caja, original)) / area
-                if parte > mejor:
-                    mejor, contenedor = parte, (original, nueva)
-            if mejor < .5:
-                contenedor = None
-        if contenedor is not None:
-            original, nueva = contenedor
-            x0 = nueva[0] + (caja[0] - original[0]) * escala
-            y0 = nueva[1] + (caja[1] - original[1]) * escala
-            movida = (x0, y0, x0 + (caja[2] - caja[0]) * escala, y0 + (caja[3] - caja[1]) * escala)
-        else:
-            movida = _mover(caja, origen, zona, escala)
-        salida[hueco] = tuple(int(round(v)) for v in movida)  # type: ignore[assignment]
+    for hueco, caja in campos.items():
+        # Un campo suelto que se sale del área segura se recorta a ella: el
+        # producto se encaja dentro de su caja, así que solo pierde aire.
+        x0, y0 = max(zona[0], caja[0]), max(zona[1], caja[1])
+        x1, y1 = min(zona[2], caja[2]), min(zona[3], caja[3])
+        if x1 <= x0 or y1 <= y0:
+            continue
+        salida[hueco] = (int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
     return placa.convert("RGB"), salida
+
+
+def _reflujo(elementos, cajas_campo, dentro, quitar, origen, zona, omit):
+    """Horizontal: el producto a la derecha y la identidad en filas a su izquierda.
+
+    Los elementos pequeños pegados a una esquina (el logo de la marca arriba a
+    la derecha) conservan su esquina. El resto se coloca en filas, en el orden
+    en que se leen en el original, con la escala más grande que quepa.
+    """
+
+    zx0, zy0, zx1, zy1 = zona
+    zw, zh = zx1 - zx0, zy1 - zy0
+    ancho0, alto0 = origen
+    destinos: list = [None] * len(elementos)
+    campos: dict[str, tuple[float, float, float, float]] = {}
+
+    esquinas = []
+    resto = []
+    for indice, caja in enumerate(elementos):
+        if indice in quitar:
+            continue
+        area = _area(caja) / (ancho0 * alto0)
+        cerca_x = caja[0] < ancho0 * .2 or caja[2] > ancho0 * .8
+        cerca_y = caja[1] < alto0 * .2 or caja[3] > alto0 * .8
+        if area < .06 and cerca_x and cerca_y:
+            esquinas.append(indice)
+        else:
+            resto.append(indice)
+    escala_e = min(zw / ancho0, zh / alto0) * 1.4
+    for indice in esquinas:
+        destinos[indice] = _mover(elementos[indice], origen, zona, escala_e)
+
+    producto = cajas_campo.get("product") if "product" not in omit else None
+    derecha = zx1
+    if producto is not None and dentro.get("product") is None:
+        # El producto ocupa la columna derecha, por debajo o por encima de lo
+        # que ya vive en esas esquinas (el logo de la marca).
+        techo = max(
+            [zy0] + [destinos[i][3] + zh * .03 for i in esquinas
+                     if destinos[i][2] > zx1 - zw * .4 and destinos[i][1] < zy0 + zh / 2]
+        )
+        suelo = min(
+            [zy1] + [destinos[i][1] - zh * .03 for i in esquinas
+                     if destinos[i][2] > zx1 - zw * .4 and destinos[i][1] >= zy0 + zh / 2]
+        )
+        pw, ph = producto[2] - producto[0], producto[3] - producto[1]
+        escala_p = min((suelo - techo) / ph, zw * .38 / pw)
+        w, h = pw * escala_p, ph * escala_p
+        medio = (techo + suelo) / 2
+        campos["product"] = (zx1 - w, medio - h / 2, zx1, medio + h / 2)
+        derecha = zx1 - w - zw * .03
+
+    resto.sort(key=lambda i: (elementos[i][1], elementos[i][0]))
+    izquierda_w = derecha - zx0
+    if not resto or izquierda_w <= 0:
+        return None
+
+    def filas(escala):
+        gap = zw * .025
+        lineas, actual, ancho_actual = [], [], 0.0
+        for indice in resto:
+            w = (elementos[indice][2] - elementos[indice][0]) * escala
+            if actual and ancho_actual + gap + w > izquierda_w:
+                lineas.append(actual)
+                actual, ancho_actual = [], 0.0
+            actual.append(indice)
+            ancho_actual += (gap if len(actual) > 1 else 0) + w
+            if w > izquierda_w:
+                return None
+        if actual:
+            lineas.append(actual)
+        alto_total = sum(
+            max((elementos[i][3] - elementos[i][1]) * escala for i in linea) for linea in lineas
+        ) + gap * (len(lineas) - 1)
+        return (lineas, alto_total, gap) if alto_total <= zh else None
+
+    bajo, alto_e, mejor = .05, 3.0, None
+    for _ in range(24):
+        medio = (bajo + alto_e) / 2
+        resultado = filas(medio)
+        if resultado is None:
+            alto_e = medio
+        else:
+            bajo, mejor = medio, (medio, resultado)
+    if mejor is None:
+        return None
+    escala, (lineas, alto_total, gap) = mejor
+    y = zy0 + (zh - alto_total) / 2
+    for linea in lineas:
+        alto_linea = max((elementos[i][3] - elementos[i][1]) * escala for i in linea)
+        ancho_linea = sum((elementos[i][2] - elementos[i][0]) * escala for i in linea) + gap * (len(linea) - 1)
+        x = zx0 + (izquierda_w - ancho_linea) / 2
+        for indice in linea:
+            caja = elementos[indice]
+            w, h = (caja[2] - caja[0]) * escala, (caja[3] - caja[1]) * escala
+            destinos[indice] = (x, y + (alto_linea - h) / 2, x + w, y + (alto_linea + h) / 2)
+            x += w + gap
+        y += alto_linea + gap
+
+    for hueco, caja in cajas_campo.items():
+        if hueco in campos or hueco in omit:
+            continue
+        indice = dentro.get(hueco)
+        if indice is None or destinos[indice] is None:
+            continue
+        original, nueva = elementos[indice], destinos[indice]
+        factor = (nueva[2] - nueva[0]) / max(1, original[2] - original[0])
+        x0 = nueva[0] + (caja[0] - original[0]) * factor
+        y0 = nueva[1] + (caja[1] - original[1]) * factor
+        campos[hueco] = (x0, y0, x0 + (caja[2] - caja[0]) * factor, y0 + (caja[3] - caja[1]) * factor)
+    destinos = [
+        d if d is not None else (0.0, 0.0, 0.0, 0.0) for d in destinos
+    ]
+    return destinos, campos
 
 
 def field_boxes(pieza: Pieza, escala: float) -> tuple[dict[str, tuple[int, int, int, int]], list[dict]]:
@@ -891,7 +1105,7 @@ FAMILIES = {
     "landscape": ((1600, 838), "meta_feed_landscape"),
 }
 #: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
-VERSION = 1
+VERSION = 2
 
 
 def build_templates(pdf_path: Path, folder: Path) -> dict:
@@ -932,7 +1146,10 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
     for pieza in elegidas:
         propias.setdefault(aspect_key((int(pieza.width), int(pieza.height))), pieza)
 
-    descompuesta = None
+    escala_base = PLATE_MAX_SIDE / max(principal.width, principal.height)
+    fondo_base, capa_base = decompose(pdf_path, principal, escala_base)
+    cajas_base, lecturas_base = field_boxes(principal, escala_base)
+    descompuesta = (fondo_base, capa_base, cajas_base, lecturas_base)
     for familia, (medida, preset) in FAMILIES.items():
         safe = seguro(preset)
         pieza = propias.get(familia)
@@ -945,11 +1162,6 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
             origen = "piece"
         else:
             # Ninguna pieza en esta proporción: se recompone la principal.
-            if descompuesta is None:
-                escala = PLATE_MAX_SIDE / max(principal.width, principal.height)
-                fondo, capa = decompose(pdf_path, principal, escala)
-                cajas_base, lecturas_base = field_boxes(principal, escala)
-                descompuesta = (fondo, capa, cajas_base, lecturas_base)
             fondo, capa, cajas_base, lecturas = descompuesta
             placa, cajas = adapt(fondo, capa, cajas_base, medida, safe)
             destino.parent.mkdir(parents=True, exist_ok=True)
@@ -961,8 +1173,22 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
             resumen["placements"][familia] = {
                 hueco: caja.model_dump(mode="json") for hueco, caja in posiciones.items()
             }
+        # Variante sin la pastilla del precio, para las filas que no traen
+        # precio ni cuota: una pastilla vacía en la pieza final parece un error.
+        desnuda = None
+        if {"price", "installment"} & set(cajas_base):
+            fondo, capa, cajas_b, _l = descompuesta
+            sin_margen = {"left": 0.0, "top": 0.0, "right": 0.0, "bottom": 0.0}
+            placa_b, _cajas = adapt(
+                fondo, capa, cajas_b, size,
+                sin_margen if origen == "piece" else safe,
+                omit={"price", "installment"},
+            )
+            desnuda = folder / f"vector-plate-{familia}-sin-precio.png"
+            placa_b.save(desnuda, format="PNG", optimize=True)
         resumen["plates"].append({
             "family": familia,
+            "bare_file": desnuda.name if desnuda else "",
             "file": destino.name,
             "size": [size[0], size[1]],
             "origin": origen,
