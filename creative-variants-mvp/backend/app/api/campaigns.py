@@ -7,6 +7,7 @@ import json
 import logging
 import mimetypes
 import shutil
+import threading
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
@@ -51,6 +52,7 @@ from ..services import (
     campaign_creative,
     campaign_ingestion,
     campaign_store,
+    campaign_vector,
     production_matrix,
     template_store,
 )
@@ -224,7 +226,13 @@ def list_campaigns(client_id: str) -> list[Campaign]:
 
 @router.get("/{client_id}/campaigns/{campaign_id}", response_model=Campaign)
 def get_campaign(client_id: str, campaign_id: str) -> Campaign:
-    return _campaign_or_404(client_id, campaign_id)
+    campaign = _campaign_or_404(client_id, campaign_id)
+    if campaign.template_candidates and _vector_outdated(campaign):
+        # Una sola vez por versión del extractor: al abrir la campaña se ven
+        # ya las plantillas con la placa nueva.
+        _refresh_vector_plates(campaign, _brand_or_404(client_id).name)
+        campaign = _campaign_or_404(client_id, campaign_id)
+    return campaign
 
 
 @router.put("/{client_id}/campaigns/{campaign_id}", response_model=Campaign)
@@ -1177,22 +1185,42 @@ def _load_matrix_draft(
     return filename, payload
 
 
+_REFRESCOS: dict[str, threading.Lock] = {}
+
+
+def _vector_outdated(campaign: Campaign) -> bool:
+    return any(
+        Path(source.filename).suffix.casefold() in {".ai", ".pdf"}
+        and source.meta.get("vector_version") != campaign_vector.VERSION
+        for source in campaign.sources
+    )
+
+
 def _refresh_vector_plates(campaign: Campaign, brand_name: str) -> None:
     """Pone al día la placa del editable antes de producir o previsualizar.
 
     La extracción se versiona: cuando mejora (la adaptación a horizontal, la
     variante sin pastilla) una campaña ya aprobada debe usarla sin tener que
-    reanalizar y volver a aprobar. Con la versión al día no cuesta nada.
+    reanalizar y volver a aprobar. Con la versión al día no cuesta nada. Si
+    cambia, se redibujan también las vistas de las plantillas: si no, la
+    pantalla de plantillas seguía enseñando la placa anterior.
     """
 
-    try:
-        campaign_ingestion.ensure_template_plates(
-            campaign.client_id, campaign.campaign_id, campaign, brand_name
-        )
-        campaign_ingestion.apply_plate_placements(campaign, campaign.template_candidates)
-        campaign_store.save_campaign(campaign)
-    except Exception:  # noqa: BLE001 - con la placa anterior se sigue produciendo
-        logger.info("No se pudo refrescar la placa del editable", exc_info=True)
+    cerrojo = _REFRESCOS.setdefault(campaign.campaign_id, threading.Lock())
+    with cerrojo:
+        try:
+            desfasada = _vector_outdated(campaign)
+            campaign_ingestion.ensure_template_plates(
+                campaign.client_id, campaign.campaign_id, campaign, brand_name
+            )
+            campaign_ingestion.apply_plate_placements(campaign, campaign.template_candidates)
+            if desfasada:
+                campaign_creative.render_candidate_previews(
+                    campaign, brand_name, campaign.template_candidates
+                )
+            campaign_store.save_campaign(campaign)
+        except Exception:  # noqa: BLE001 - con la placa anterior se sigue produciendo
+            logger.info("No se pudo refrescar la placa del editable", exc_info=True)
 
 
 def _preflight_production_order(

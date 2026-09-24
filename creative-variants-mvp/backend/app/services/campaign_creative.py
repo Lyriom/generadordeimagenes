@@ -1208,6 +1208,24 @@ def _render(
     bold = _font_path(campaign, bold=True)
     regular = _font_path(campaign, bold=False)
     keys = _candidate_keys(candidate)
+    familia = (
+        "story" if height / width >= 1.62 else "portrait" if height / width > 1.2
+        else "landscape" if width / height > 1.35 else "square"
+    )
+    medidas = set(candidate.blueprint.placements.get(familia, {}))
+    if candidate.meta.get("plate_measured") and medidas:
+        # Todas las candidatas comparten la placa del editable, con su
+        # pastilla y su hueco de producto pintados. Una candidata que no
+        # declaraba precio o producto dejaba la pastilla vacía o el hueco sin
+        # nada: los campos del arte valen para todas.
+        region_a_slot = {
+            "product_name": "nombre_producto", "headline": "titular",
+            "subheadline": "subtitulo", "price": "precio",
+            "previous_price": "precio_anterior", "installment": "cuota",
+            "discount": "descuento", "cta": "cta", "legal": "legal",
+            "validity": "vigencia", "product": "producto",
+        }
+        keys = set(keys) | {region_a_slot[r] for r in medidas if r in region_a_slot}
     if row is None:
         values = {
             "product_name": "NOMBRE DEL PRODUCTO", "headline": "TITULAR DE CAMPAÑA",
@@ -1229,7 +1247,8 @@ def _render(
                 "vigencia": "validity",
             }
             for slot, region in region_by_slot.items():
-                if slot not in preview_keys:
+                medido = bool(candidate.meta.get("plate_measured")) and slot in keys
+                if slot not in preview_keys and not medido:
                     values[region] = ""
     else:
         values = _values(row, campaign, candidate)
@@ -1261,11 +1280,6 @@ def _render(
     # el arte tiene: el nombre, el precio y la cuota en su pastilla, el
     # producto en su hueco. Un "TITULAR DE CAMPAÑA" en la retícula genérica
     # encima de un arte real era lo que hacía que la plantilla no sirviera.
-    familia = (
-        "story" if height / width >= 1.62 else "portrait" if height / width > 1.2
-        else "landscape" if width / height > 1.35 else "square"
-    )
-    medidas = set(candidate.blueprint.placements.get(familia, {}))
     titular = ""
     if row is None and candidate.meta.get("plate_measured") and medidas:
         visible &= medidas | {"logo"}
@@ -1360,7 +1374,7 @@ def _render(
             _decorations(width, height, colours, proposal, decoration_style),
         )
     )
-    has_product_slot = any(
+    has_product_slot = "producto" in keys or any(
         slot.category == "product"
         or slot.key in {"producto", "productos", "product", "products"}
         for slot in candidate.slots
@@ -1463,9 +1477,12 @@ def render_candidate_previews(
             )
             target = folder / f"{candidate.candidate_id}-{aspect}.png"
             image.convert("RGB").save(target, format="PNG", optimize=True)
+            # La versión en la URL: la misma dirección con otra imagen detrás
+            # quedaba en la caché del navegador y se veía la plantilla vieja.
             candidate.preview_urls[aspect] = (
                 f"/clients/{campaign.client_id}/campaigns/{campaign.campaign_id}/"
                 f"template-candidates/{candidate.candidate_id}/preview?aspect={aspect}"
+                f"&v={int(target.stat().st_mtime)}"
             )
             image.close()
             for _name, layer in layers:
