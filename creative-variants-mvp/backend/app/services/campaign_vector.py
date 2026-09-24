@@ -1105,7 +1105,7 @@ FAMILIES = {
     "landscape": ((1600, 838), "meta_feed_landscape"),
 }
 #: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
-VERSION = 2
+VERSION = 3
 
 
 def build_templates(pdf_path: Path, folder: Path) -> dict:
@@ -1204,6 +1204,15 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
         lectura = por_caja.get(tuple(caja))
         if lectura and re.match(r"^#[0-9A-F]{6}$", str(lectura.get("color", ""))):
             resumen["text_colors"][hueco] = lectura["color"]
+    # Si el diseñador escribió el campo en mayúsculas ("REFRIGERADORA TOP
+    # MOUNT"), la fila "cilindro" también debe salir así.
+    resumen["text_case"] = {
+        hueco: "upper"
+        for hueco, caja in cajas.items()
+        if tuple(caja) in por_caja
+        and any(c.isalpha() for c in por_caja[tuple(caja)]["text"])
+        and por_caja[tuple(caja)]["text"] == por_caja[tuple(caja)]["text"].upper()
+    }
     resumen["fonts"] = {
         hueco: por_caja[tuple(caja)]["font"]
         for hueco, caja in cajas.items()

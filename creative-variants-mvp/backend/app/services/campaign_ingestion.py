@@ -1537,6 +1537,7 @@ def _ensure_vector_templates(client_id: str, campaign_id: str, campaign) -> list
             source.meta["plate_text_colors"] = resumen["text_colors"]
             source.meta["plate_text_reads"] = resumen["text_reads"]
             source.meta["plate_text_fonts"] = resumen.get("fonts", {})
+            source.meta["plate_text_case"] = resumen.get("text_case", {})
             source.meta.pop("vector_catalog", None)
         elif resumen["catalog_pieces"]:
             source.meta["vector_catalog"] = True
@@ -1706,6 +1707,9 @@ def apply_plate_placements(campaign, candidates) -> int:
     rango = {"vector": 0, "psd": 1, "ocr": 2}
     fuentes = sorted(campaign.sources, key=lambda source: rango.get(_plate_origin(source), 3))
     vectorial = bool(fuentes) and _plate_origin(fuentes[0]) == "vector"
+    mayusculas = fuentes[0].meta.get("plate_text_case", {}) if vectorial else {}
+    if not isinstance(mayusculas, dict):
+        mayusculas = {}
     for source in fuentes:
         crudo = source.meta.get("plate_placements")
         if isinstance(crudo, dict):
@@ -1728,6 +1732,7 @@ def apply_plate_placements(campaign, candidates) -> int:
         manda_la_placa = vectorial
         if manda_la_placa:
             candidate.meta["plate_measured"] = True
+            candidate.meta["text_case"] = dict(mayusculas)
         for familia, huecos in medidas.items():
             propias = candidate.blueprint.placements.get(familia) or {}
             if propias and not manda_la_placa:

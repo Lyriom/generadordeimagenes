@@ -1615,6 +1615,15 @@ async def preview_production_row(
         }
     )
     if faltan_copy:
+        # La misma redacción que hará la tanda, para esta fila sola. Sin ella
+        # la vista enseñaba otra pieza: sin titular, la plantilla del editable
+        # tira la pastilla, y al producir la IA sí lo escribía.
+        await run_in_threadpool(
+            campaign_creative.complete_copy_once,
+            campaign, [row], {row.row_number: production_matrix.ai_fillable_fields(candidate)},
+        )
+        faltan_copy = [campo for campo in faltan_copy if getattr(row, campo, None) in (None, "")]
+    if faltan_copy:
         warnings.append(
             "Aqui se ve vacio " + ", ".join(faltan_copy)
             + ": la IA lo redacta al producir, no en la vista previa."

@@ -1266,6 +1266,7 @@ def _render(
         else "landscape" if width / height > 1.35 else "square"
     )
     medidas = set(candidate.blueprint.placements.get(familia, {}))
+    titular = ""
     if row is None and candidate.meta.get("plate_measured") and medidas:
         visible &= medidas | {"logo"}
         values = {key: (value if key in visible else "") for key, value in values.items()}
@@ -1280,13 +1281,52 @@ def _render(
         # sitio en ese arte: en la retícula genérica caían encima del logo de
         # campaña y de los sellos. Solo se dibuja lo que el arte tiene; el
         # legal es la excepción, porque omitirlo no es una decisión de diseño.
+        titular = values.get("headline", "").strip()
         visible &= medidas | {"logo", "legal"}
         values = {key: (value if key in visible else "") for key, value in values.items()}
-    sin_precio = (
+    sin_precio = bool(
         row is not None and candidate.meta.get("plate_measured")
         and not values.get("price", "").strip() and not values.get("installment", "").strip()
     )
+    # Sin precio, la pastilla del arte no se tira si hay un titular —escrito en
+    # la matriz o redactado por la IA—: pasa a llevarlo, y el nombre sigue en
+    # su franja. La pieza conserva su bloque de color en vez de un hueco.
+    titular_en_pastilla = ""
+    if sin_precio and "price" in medidas and row is not None:
+        titular_en_pastilla = titular
+        if titular_en_pastilla:
+            sin_precio = False
     regions = _layout(candidate, width, height, safe, proposal, visible)
+    lineas_nombre = 2
+    if titular_en_pastilla:
+        cajas = [regions[clave] for clave in ("price", "installment") if clave in medidas]
+        x0 = min(c[0] for c in cajas)
+        y0 = min(c[1] for c in cajas)
+        x1 = max(c[0] + c[2] for c in cajas)
+        y1 = max(c[1] + c[3] for c in cajas)
+        regions["headline"] = (x0, y0, x1 - x0, y1 - y0)
+        values["headline"] = titular_en_pastilla
+        keys = set(keys) | {"titular"}
+    if candidate.meta.get("plate_measured"):
+        for clave, caso in (candidate.meta.get("text_case") or {}).items():
+            if caso == "upper" and values.get(clave):
+                values[clave] = values[clave].upper()
+        if sin_precio and values.get("product_name", "").strip():
+            # Sin precio, la placa pierde su pastilla y el nombre se quedaba
+            # como una línea diminuta flotando. Ocupa el sitio entero de la
+            # pastilla: así es el protagonista del bloque, no un resto.
+            cajas = [regions[clave] for clave in ("product_name", "price", "installment") if clave in medidas]
+            if cajas:
+                x0 = min(c[0] for c in cajas)
+                y0 = min(c[1] for c in cajas)
+                x1 = max(c[0] + c[2] for c in cajas)
+                y1 = max(c[1] + c[3] for c in cajas)
+                # Se centra en la altura que dejó la pastilla: arriba del todo
+                # quedaba un hueco debajo.
+                alto_texto = min(y1 - y0, int((x1 - x0) * .32))
+                medio = (y0 + y1) // 2
+                regions["product_name"] = (x0, medio - alto_texto // 2, x1 - x0, alto_texto)
+                lineas_nombre = 1 if len(values["product_name"].split()) <= 2 else 2
 
     blueprint = candidate.blueprint
     background = _background(
@@ -1337,7 +1377,7 @@ def _render(
     text_specs = [
         ("Titular", "headline", "titular", bold, True, 3, False, False),
         ("Subtitulo", "subheadline", "subtitulo", regular, False, 2, False, False),
-        ("Nombre del producto", "product_name", "nombre_producto", bold, True, 2, False, False),
+        ("Nombre del producto", "product_name", "nombre_producto", bold, True, lineas_nombre, False, False),
         ("Precio", "price", "precio", bold, True, 1, False, False),
         ("Precio anterior", "previous_price", "precio_anterior", regular, False, 1, False, True),
         ("Cuota", "installment", "cuota", bold, True, 1, False, False),
