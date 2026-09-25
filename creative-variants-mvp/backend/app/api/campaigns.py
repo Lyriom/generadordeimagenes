@@ -1547,23 +1547,53 @@ async def preview_production_matrix(
     except production_matrix.MatrixParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     formats = _default_format_list(default_formats)
-    planned = _planned_matrix_pieces(rows, formats)
+    # La revisión enseña las filas tal cual se escribieron; el conteo y los
+    # planes, las piezas que de verdad saldrán (una por producto en las filas
+    # «individual»).
+    expandidas = production_matrix.expand_rows(rows)
+    planned = _planned_matrix_pieces(expandidas, formats)
     draft_id = _save_matrix_draft(
         campaign, matrix_name=matrix_name, payload=payload
     )
     return {
         "rows": [row.model_dump(mode="json") for row in rows],
         "total_rows": len(rows),
+        "total_arts": len(expandidas),
         "requested_pieces": planned,
         "matrix_draft_id": draft_id,
-        "plans": _matrix_preview_plans(campaign, rows),
+        "plans": _plans_por_fila(_matrix_preview_plans(campaign, expandidas), expandidas),
     }
 
 
-def _row_preview_path(campaign: Campaign, row_number: int) -> Path:
+def _plans_por_fila(
+    plans: list[dict[str, object]], rows: list[production_matrix.MatrixRow]
+) -> list[dict[str, object]]:
+    """Un plan por fila de la matriz: las variantes de una fila «individual»
+    se resumen en la de su origen (la primera que falle, si alguna falla)."""
+
+    origen = {row.row_number: row.fila_origen or row.row_number for row in rows}
+    por_fila: dict[int, list[dict[str, object]]] = {}
+    for plan in plans:
+        por_fila.setdefault(origen.get(int(plan["row_number"]), int(plan["row_number"])), []).append(plan)
+    salida = []
+    for fila, grupo in por_fila.items():
+        elegido = next((p for p in grupo if p.get("status") != "ready"), grupo[0])
+        elegido = {**elegido, "row_number": fila}
+        if len(grupo) > 1:
+            elegido["art_count"] = len(grupo)
+            if elegido.get("status") == "ready":
+                elegido["message"] = (
+                    f"{len(grupo)} artes, uno por producto, con «{elegido['template']['name']}»."
+                )
+        salida.append(elegido)
+    return salida
+
+
+def _row_preview_path(campaign: Campaign, row_number: int, variante: int = 0) -> Path:
     carpeta = campaign_store.production_root(campaign.client_id, campaign.campaign_id) / "row-previews"
     carpeta.mkdir(parents=True, exist_ok=True)
-    return carpeta / f"fila-{max(0, min(9999, row_number)):04d}.jpg"
+    sufijo = f"-p{max(0, min(999, variante)):03d}" if variante else ""
+    return carpeta / f"fila-{max(0, min(9999, row_number)):04d}{sufijo}.jpg"
 
 
 @router.post("/{client_id}/campaigns/{campaign_id}/production/row-preview")
@@ -1573,6 +1603,7 @@ async def preview_production_row(
     matrix: UploadFile = File(...),
     row_number: int = Form(...),
     piece_format: str = Form(""),
+    variante: int = Form(0),
 ) -> dict[str, object]:
     """Compone una sola fila para verla antes de lanzar la tanda.
 
@@ -1595,6 +1626,15 @@ async def preview_production_row(
     if row is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, f"La matriz no trae una fila {row_number}."
+        )
+    variantes = production_matrix.expand_rows([row])
+    total_variantes = len(variantes)
+    variante = max(0, min(total_variantes - 1, variante))
+    if len(variantes) > 1:
+        # Una fila «individual» se ve con uno de sus productos: el que se
+        # pida, o el primero. Conserva el número de la fila para su archivo.
+        row = variantes[variante].model_copy(
+            update={"row_number": row.row_number}
         )
 
     approved = [item for item in campaign.template_candidates if item.approved]
@@ -1657,7 +1697,7 @@ async def preview_production_row(
             + ": la IA lo redacta al producir, no en la vista previa."
         )
 
-    target = _row_preview_path(campaign, row.row_number)
+    target = _row_preview_path(campaign, row.row_number, variante)
     try:
         format_id, width, height = await run_in_threadpool(
             campaign_creative.render_row_preview,
@@ -1668,13 +1708,16 @@ async def preview_production_row(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     return {
         "row_number": row.row_number,
+        "product": row.producto,
+        "variant": variante,
+        "variant_count": total_variantes,
         "template": {"candidate_id": candidate.candidate_id, "name": candidate.name},
         "format": format_id,
         "width": width,
         "height": height,
         "preview_url": (
             f"/clients/{client_id}/campaigns/{campaign_id}/production/"
-            f"row-preview/{row.row_number}?v={int(target.stat().st_mtime)}"
+            f"row-preview/{row.row_number}?variante={variante}&v={int(target.stat().st_mtime)}"
         ),
         "warnings": warnings,
     }
@@ -1682,10 +1725,10 @@ async def preview_production_row(
 
 @router.get("/{client_id}/campaigns/{campaign_id}/production/row-preview/{row_number}")
 def get_production_row_preview(
-    client_id: str, campaign_id: str, row_number: int
+    client_id: str, campaign_id: str, row_number: int, variante: int = 0
 ) -> FileResponse:
     campaign = _campaign_or_404(client_id, campaign_id)
-    target = _row_preview_path(campaign, row_number)
+    target = _row_preview_path(campaign, row_number, variante)
     if not target.exists() or not target.is_file():
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "Esa vista previa aun no se ha generado."
@@ -1743,7 +1786,7 @@ async def produce_campaign(
             "Sube o valida una matriz antes de producir.",
         )
     try:
-        rows = production_matrix.parse_matrix(payload, matrix_name)
+        rows = production_matrix.expand_rows(production_matrix.parse_matrix(payload, matrix_name))
     except production_matrix.MatrixParseError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     formats = _default_format_list(default_formats)

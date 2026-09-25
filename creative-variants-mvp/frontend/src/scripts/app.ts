@@ -52,6 +52,7 @@ import type {
   ProductZone,
   ProductionBatch,
   ProductionPiece,
+  MatrixRowComposition,
   Project,
   ProjectSummary,
   Variant,
@@ -344,6 +345,9 @@ interface MatrixRow {
   notes: string;
   template: string;
   omit: string[];
+  /** Con varios productos: "combo" los junta en un arte; "individual" hace
+   *  un arte por producto con el mismo copy, formatos y plantilla. */
+  mode?: string;
 }
 
 function emptyCampaignBrief(client = ""): CampaignBrief {
@@ -4794,9 +4798,79 @@ function matrixTokenMatchesFilename(token: string, filename: string): boolean {
 function matrixRequestedPieces(): number {
   const defaultFormatCount = Math.max(1, state.selectedFormats.size);
   return state.productionMatrix.reduce(
-    (total, row) => total + (matrixFormats(row).length || defaultFormatCount) * Math.max(1, row.proposals),
+    (total, row) => total + matrixArtCount(row) *
+      (matrixFormats(row).length || defaultFormatCount) * Math.max(1, row.proposals),
     0,
   );
+}
+
+function pipeParts(value: string | undefined): string[] {
+  return String(value || "").split(/[|;]/).map((item) => item.trim()).filter(Boolean);
+}
+
+/** Artes que salen de una fila: uno, o uno por producto en modo individual. */
+function matrixArtCount(row: MatrixRow): number {
+  if (row.mode !== "individual") return 1;
+  return Math.max(1, pipeParts(row.image).length, pipeParts(row.product).length);
+}
+
+/** «licuadora-oster_2L.png» → «Licuadora oster 2L», como hace el motor. */
+function humanProductName(filename: string): string {
+  const base = filename.replace(/\.[^.]+$/, "").replace(/[_-]+/g, " ").trim();
+  return base ? base.charAt(0).toUpperCase() + base.slice(1) : filename;
+}
+
+/** Campos que una fila individual acepta por producto, en el orden de las
+ *  imágenes y separados con «|», igual que en el CSV. */
+const PER_PRODUCT_FIELDS: Array<{ field: "price" | "previousPrice" | "installment" | "discount"; label: string }> = [
+  { field: "price", label: "Precio" },
+  { field: "previousPrice", label: "Precio anterior" },
+  { field: "installment", label: "Cuota" },
+  { field: "discount", label: "Descuento" },
+];
+
+function perProductValue(row: MatrixRow, field: keyof MatrixRow, index: number): string {
+  const parts = String(row[field] || "").split("|").map((item) => item.trim());
+  return parts.length > 1 ? (parts[index] || "") : "";
+}
+
+function setPerProductValue(row: MatrixRow, field: keyof MatrixRow, index: number, value: string, total: number): void {
+  let parts = String(row[field] || "").split("|").map((item) => item.trim());
+  if (parts.length <= 1) parts = Array.from({ length: total }, () => parts[0] || "");
+  while (parts.length < total) parts.push("");
+  parts = parts.slice(0, total);
+  parts[index] = value.trim();
+  // Si todos coinciden vuelve a ser un valor común: el CSV queda limpio.
+  (row as any)[field] = parts.every((item) => item === parts[0]) ? parts[0] : parts.join(" | ");
+}
+
+/** Al elegir o quitar productos, cada nombre y cada precio siguen a su imagen
+ *  (no a su posición): quitar el segundo de tres no cambia el precio del tercero. */
+function remapChosenProducts(row: MatrixRow, chosen: string[]): void {
+  const previous = pipeParts(row.image);
+  const names = String(row.product || "").split("|").map((item) => item.trim());
+  const byFile = new Map<string, number>(previous.map((file, index) => [file.toLowerCase(), index]));
+  const pick = (list: string[], file: string, fallback: string) => {
+    const index = byFile.get(file.toLowerCase());
+    return index !== undefined && list.length > 1 ? (list[index] || fallback) : fallback;
+  };
+  const perField = PER_PRODUCT_FIELDS.map(({ field }) => ({
+    field, parts: String(row[field] || "").split("|").map((item) => item.trim()),
+  }));
+  row.product = chosen.map((file, position) => {
+    const index = byFile.get(file.toLowerCase());
+    // Sin imágenes previas, los nombres ya escritos se asignan en orden.
+    const typed = previous.length ? (index !== undefined ? names[index] : "") : names[position];
+    return typed || humanProductName(file);
+  }).join(" | ");
+  for (const { field, parts } of perField) {
+    if (parts.length > 1) {
+      const values = chosen.map((file) => pick(parts, file, ""));
+      (row as any)[field] = values.every((item) => item === values[0]) ? values[0] : values.join(" | ");
+    }
+  }
+  row.image = chosen.join(" | ");
+  if (chosen.length < 2) row.mode = "combo";
 }
 
 function campaignProductAssets(): CampaignProductionAsset[] {
@@ -5249,6 +5323,67 @@ function manualMatrixEditorHtml(
       '<summary data-format-summary="' + String(row.rowNumber) + '">' + esc(manualFormatSummary(row)) + '</summary>' +
       '<div class="format-picker-menu">' + groups + '</div></details></div>';
   };
+  // Los productos se eligen de las imágenes cargadas, como los formatos. Con
+  // dos o más aparece la opción de un arte por producto (masivo) o todos
+  // juntos (combo); en masivo, cada producto lleva su nombre y su precio.
+  const productPicker = (row: MatrixRow) => {
+    const tokens = pipeParts(row.image);
+    if (!assets.length) {
+      return input(row, "image", "Imagen(es) del producto", {
+        placeholder: "Sube las imágenes arriba para elegirlas aquí", list: "matrix-asset-names",
+      });
+    }
+    const chosen = new Set(tokens.map((item) => item.toLowerCase()));
+    const summary = tokens.length
+      ? String(tokens.length) + (tokens.length === 1 ? " producto · " : " productos · ") + tokens.join(" · ")
+      : "Elegir productos";
+    const items = assets.map((asset) =>
+      '<label class="product-pick"><input type="checkbox" class="manual-product-pick" data-row="' +
+      String(row.rowNumber) + '" value="' + attr(asset.filename) + '"' +
+      checked(chosen.has(asset.filename.toLowerCase())) + '>' +
+      (asset.preview_url ? '<img src="' + attr(asset.preview_url) + '" alt="" loading="lazy">' : '<span class="product-pick-empty"></span>') +
+      '<span>' + esc(asset.filename) + '</span></label>'
+    ).join("");
+    return '<div class="field format-picker-field"><span>Imagen(es) del producto</span>' +
+      '<details class="format-picker product-picker" data-row="' + String(row.rowNumber) + '">' +
+      '<summary>' + esc(summary) + '</summary><div class="format-picker-menu product-picker-menu">' +
+      '<div class="product-picker-tools"><button type="button" class="ghost-button small manual-product-all" data-row="' +
+      String(row.rowNumber) + '">Todos</button><button type="button" class="ghost-button small manual-product-none" data-row="' +
+      String(row.rowNumber) + '">Ninguno</button></div><div class="product-picker-grid">' + items + '</div></div></details></div>';
+  };
+  const productMode = (row: MatrixRow) => {
+    const total = Math.max(pipeParts(row.image).length, pipeParts(row.product).length);
+    if (total < 2) return "";
+    const individual = row.mode === "individual";
+    const option = (value: string, title: string, detail: string) =>
+      '<label class="manual-mode-option' + (((value === "individual") === individual) ? ' is-active' : '') + '">' +
+      '<input type="radio" class="manual-mode-pick" name="mode-' + String(row.rowNumber) + '" data-row="' +
+      String(row.rowNumber) + '" value="' + value + '"' + checked((value === "individual") === individual) + '>' +
+      '<strong>' + esc(title) + '</strong><small>' + esc(detail) + '</small></label>';
+    const table = individual
+      ? '<div class="per-product-table"><div class="per-product-head"><span></span><span>Nombre en el arte</span>' +
+        PER_PRODUCT_FIELDS.map(({ label }) => '<span>' + esc(label) + '</span>').join("") + '</div>' +
+        Array.from({ length: total }, (_unused, index) => {
+          const file = pipeParts(row.image)[index] || "";
+          const asset = assets.find((item) => item.filename.toLowerCase() === file.toLowerCase());
+          const name = String(row.product || "").split("|").map((item) => item.trim())[index] || "";
+          return '<div class="per-product-row">' +
+            (asset?.preview_url ? '<img src="' + attr(asset.preview_url) + '" alt="">' : '<span class="product-pick-empty"></span>') +
+            '<input class="manual-per-product" data-row="' + String(row.rowNumber) + '" data-index="' + String(index) +
+            '" data-field="product" value="' + attr(name) + '" placeholder="' + attr(humanProductName(file)) + '">' +
+            PER_PRODUCT_FIELDS.map(({ field }) =>
+              '<input class="manual-per-product" data-row="' + String(row.rowNumber) + '" data-index="' + String(index) +
+              '" data-field="' + field + '" value="' + attr(perProductValue(row, field, index)) +
+              '" placeholder="' + attr(String(row[field] || "").includes("|") ? "—" : String(row[field] || "Común")) + '">'
+            ).join("") + '</div>';
+        }).join("") +
+        '<p class="muted tiny">Vacío = usa el valor común de la fila. El titular, el CTA, los formatos y la plantilla son los mismos para todos: así la tanda sale coherente.</p></div>'
+      : '';
+    return '<div class="manual-mode">' +
+      option("individual", "Un arte por producto", String(total) + " artes con el mismo diseño") +
+      option("combo", "Todos juntos", "un arte con los " + String(total) + " productos") +
+      '</div>' + table;
+  };
   const cards = rows.map((row) => {
     const template = select.replace("ROW", String(row.rowNumber)).replace(
       "OPTIONS",
@@ -5256,8 +5391,8 @@ function manualMatrixEditorHtml(
     );
     return '<article class="manual-matrix-row"><div class="manual-matrix-row-head"><div><strong>Fila ' + String(row.rowNumber) + '</strong><span>Vacío = opcional · “no poner” = ocultar</span></div><div class="manual-matrix-row-tools"><button class="ghost-button small preview-manual-matrix-row" type="button" data-row="' + String(row.rowNumber) + '">Ver composición</button><button class="icon-button remove-manual-matrix-row" data-row="' + String(row.rowNumber) + '" title="Quitar fila" aria-label="Quitar fila ' + String(row.rowNumber) + '">×</button></div></div>' +
       '<div class="manual-matrix-grid">' +
-      input(row, "product", "Producto(s) / arte grupal", { placeholder: "Silla | Mesa | Lámpara" }) +
-      input(row, "image", "Archivo(s) de imagen", { placeholder: "silla.png | mesa.png", list: "matrix-asset-names" }) +
+      input(row, "product", row.mode === "individual" ? "Productos (uno por arte)" : "Producto(s) / arte grupal", { placeholder: "Silla | Mesa | Lámpara" }) +
+      productPicker(row) +
       // Cada casilla dice qué pasa si se deja vacía. Son catorce campos: sin
       // esto hay que rellenarlos todos por si acaso, y la mitad no hace falta.
       input(row, "headline", "Titular", { placeholder: "Vacío = IA si la plantilla lo permite" }) +
@@ -5273,9 +5408,10 @@ function manualMatrixEditorHtml(
       input(row, "proposals", "Propuestas", { type: "number", min: 1, value: Math.max(1, row.proposals) }) +
       template +
       input(row, "notes", "Notas de composición", { placeholder: "Ej. producto principal a la derecha" }) +
-      '</div><div class="manual-matrix-composition" data-composition="' + String(row.rowNumber) + '"></div></article>';
+      '</div>' + productMode(row) +
+      '<div class="manual-matrix-composition" data-composition="' + String(row.rowNumber) + '"></div></article>';
   }).join("");
-  return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Para un combo, separa productos y archivos con <strong>|</strong> en el mismo orden. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Solo el producto y su imagen son obligatorios. Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
+  return '<section class="manual-matrix-editor"><div class="card-head"><div><span class="kicker">EDITOR MANUAL</span><h3>Contenido de cada arte</h3><p>Elige uno o varios productos en cada fila. Con varios decides si sale un arte por producto —misma plantilla, copy y formatos para todos— o uno solo con el combo. Una fila sin producto crea una pieza institucional.</p></div><div class="button-row"><button class="ghost-button add-manual-matrix-row">+ Añadir fila</button><button class="button" id="validate-manual-matrix">Validar matriz manual</button></div></div><datalist id="matrix-asset-names">' + assetNames + '</datalist><div class="manual-matrix-rows">' + cards + '</div><div class="manual-matrix-status muted tiny">Solo el producto y su imagen son obligatorios. Edita y luego valida: la IA comprobará plantilla, formatos y campos antes de producir.</div></section>';
 }
 
 /** Una edición manual invalida el archivo y el preflight anterior. El botón
@@ -5314,7 +5450,7 @@ function blankManualMatrixRow(): MatrixRow {
   return {
     rowNumber: Math.max(2, rowNumber), product: "", image: "", headline: "", subtitle: "", price: "",
     previousPrice: "", installment: "", discount: "", cta: "", legal: "", validity: "", formats: "",
-    proposals: 1, notes: "", template: "", omit: [],
+    proposals: 1, notes: "", template: "", omit: [], mode: "combo",
   };
 }
 
@@ -5325,11 +5461,12 @@ function matrixCsvCell(value: string | number): string {
 function manualMatrixFile(rows = state.productionMatrix): File {
   const headers = [
     "producto", "imagen", "titular", "subtitulo", "precio_actual", "precio_anterior", "cuota", "descuento",
-    "cta", "legal", "vigencia", "formatos", "cantidad_propuestas", "notas", "plantilla",
+    "cta", "legal", "vigencia", "formatos", "cantidad_propuestas", "notas", "plantilla", "modo",
   ];
   const content = [headers.join(","), ...rows.map((row) => [
     row.product, row.image, row.headline, row.subtitle, row.price, row.previousPrice, row.installment,
     row.discount, row.cta, row.legal, row.validity, row.formats, Math.max(1, row.proposals), row.notes, row.template,
+    row.mode === "individual" ? "individual" : "",
   ].map(matrixCsvCell).join(","))].join("\n");
   return new File([content], "matriz-manual.csv", { type: "text/csv" });
 }
@@ -5344,6 +5481,7 @@ function applyCampaignMatrixPreview(file: File, preview: Awaited<ReturnType<type
     validity: String(row?.vigencia || ""), formats: Array.isArray(row?.formatos) ? row.formatos.join("|") : "",
     proposals: Number(row?.cantidad_propuestas || 1), notes: String(row?.notas || ""),
     template: String(row?.plantilla || ""), omit: Array.isArray(row?.suppressed_fields) ? row.suppressed_fields.map(String) : [],
+    mode: String(row?.modo || "combo") === "individual" ? "individual" : "combo",
   }));
   state.productionMatrixPlans = preview.plans;
   state.productionMatrixFile = file;
@@ -5437,32 +5575,122 @@ function bindProductionMatrix(): void {
       markManualMatrixDirty();
     });
   });
+  // Elegir productos cambia la fila (aparece el modo y la tabla por
+  // producto): se vuelve a pintar el editor y se deja abierta la lista.
+  const rerenderManualRow = async (rowNumber: number, keepPickerOpen: boolean): Promise<void> => {
+    const scroll = window.scrollY;
+    saveSession();
+    await renderGenerate();
+    window.scrollTo(0, scroll);
+    if (keepPickerOpen) {
+      const picker = query<HTMLDetailsElement>('.product-picker[data-row="' + String(rowNumber) + '"]');
+      if (picker) picker.open = true;
+    }
+  };
+  const applyProductChoice = async (rowNumber: number, chosenNow: string[]): Promise<void> => {
+    const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+    if (!row) return;
+    const lower = new Set(chosenNow.map((item) => item.toLowerCase()));
+    // Se respeta el orden en que se eligieron: lo que ya estaba conserva su
+    // sitio y lo nuevo va al final (el primero es el protagonista del combo).
+    const kept = pipeParts(row.image).filter((item) => lower.has(item.toLowerCase()));
+    const keptLower = new Set(kept.map((item) => item.toLowerCase()));
+    const added = chosenNow.filter((item) => !keptLower.has(item.toLowerCase()));
+    remapChosenProducts(row, [...kept, ...added]);
+    markManualMatrixDirty();
+    await rerenderManualRow(rowNumber, true);
+  };
+  queryAll<HTMLInputElement>(".manual-product-pick").forEach((box) => {
+    box.addEventListener("change", () => {
+      const rowNumber = Number(box.dataset.row || 0);
+      const chosen = queryAll<HTMLInputElement>('.manual-product-pick[data-row="' + String(rowNumber) + '"]')
+        .filter((item) => item.checked).map((item) => item.value);
+      void applyProductChoice(rowNumber, chosen);
+    });
+  });
+  queryAll<HTMLButtonElement>(".manual-product-all, .manual-product-none").forEach((button) => {
+    button.addEventListener("click", () => {
+      const rowNumber = Number(button.dataset.row || 0);
+      const all = button.classList.contains("manual-product-all");
+      const chosen = all
+        ? queryAll<HTMLInputElement>('.manual-product-pick[data-row="' + String(rowNumber) + '"]').map((item) => item.value)
+        : [];
+      void applyProductChoice(rowNumber, chosen);
+    });
+  });
+  queryAll<HTMLInputElement>(".manual-mode-pick").forEach((radio) => {
+    radio.addEventListener("change", async () => {
+      const rowNumber = Number(radio.dataset.row || 0);
+      const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+      if (!row || !radio.checked) return;
+      row.mode = radio.value === "individual" ? "individual" : "combo";
+      markManualMatrixDirty();
+      await rerenderManualRow(rowNumber, false);
+    });
+  });
+  queryAll<HTMLInputElement>(".manual-per-product").forEach((field) => {
+    field.addEventListener("input", () => {
+      const rowNumber = Number(field.dataset.row || 0);
+      const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+      const key = field.dataset.field as keyof MatrixRow | undefined;
+      if (!row || !key) return;
+      const index = Math.max(0, Math.trunc(Number(field.dataset.index) || 0));
+      const total = Math.max(pipeParts(row.image).length, pipeParts(row.product).length);
+      if (key === "product") {
+        const names = String(row.product || "").split("|").map((item) => item.trim());
+        while (names.length < total) names.push("");
+        names[index] = field.value.trim() || humanProductName(pipeParts(row.image)[index] || "");
+        row.product = names.slice(0, total).join(" | ");
+        const common = query<HTMLInputElement>('.manual-matrix-field[data-row="' + String(rowNumber) + '"][data-field="product"]');
+        if (common) common.value = row.product;
+      } else {
+        setPerProductValue(row, key, index, field.value, total);
+      }
+      markManualMatrixDirty();
+    });
+  });
   queryAll<HTMLButtonElement>(".preview-manual-matrix-row").forEach((button) => {
     button.addEventListener("click", async () => {
       if (!state.activeClientId || !state.campaignWorkspace) return;
       const rowNumber = Number(button.dataset.row || 0);
       const host = query<HTMLElement>('[data-composition="' + String(rowNumber) + '"]');
-      if (!host) return;
+      const row = state.productionMatrix.find((item) => item.rowNumber === rowNumber);
+      if (!host || !row) return;
+      // El número que ve el motor es la línea del CSV que se le envía, no el
+      // de la tarjeta: tras quitar una fila del medio no coincidían.
+      const csvRow = state.productionMatrix.indexOf(row) + 2;
       const label = button.textContent || "Ver composición";
       button.disabled = true;
       button.textContent = "Componiendo…";
-      host.innerHTML = '<p class="manual-matrix-composition-wait">Componiendo el arte con el mismo motor que produce la tanda…</p>';
+      const total = Math.min(6, matrixArtCount(row));
+      host.innerHTML = '<p class="manual-matrix-composition-wait">Componiendo ' +
+        (total > 1 ? String(total) + ' artes' : 'el arte') + ' con el mismo motor que produce la tanda…</p>';
       try {
-        const shot = await previewCampaignRow(
-          state.activeClientId,
-          state.campaignWorkspace.campaign_id,
-          manualMatrixFile(),
-          rowNumber,
-        );
+        const file = manualMatrixFile();
+        const shots: MatrixRowComposition[] = [];
+        // Una fila masiva se ve entera (hasta seis): lo que se revisa es que
+        // todos los artes salgan coherentes, no solo el primero.
+        for (let variant = 0; variant < total; variant += 1) {
+          shots.push(await previewCampaignRow(
+            state.activeClientId, state.campaignWorkspace.campaign_id, file, csvRow, "", variant,
+          ));
+        }
+        const notes = Array.from(new Set(shots.flatMap((shot) => shot.warnings)));
+        const extra = matrixArtCount(row) - shots.length;
         host.innerHTML = [
-          '<figure class="manual-matrix-composition-shot"><img src="', attr(shot.previewUrl),
-          '" alt="Composición del arte de la fila ', String(rowNumber), '">',
-          '<figcaption><strong>', esc(shot.templateName || "Plantilla automática"), '</strong>',
-          '<span>', esc(shot.format), ' · ', String(shot.width), '×', String(shot.height),
-          ' px al producir</span></figcaption></figure>',
-          shot.warnings.length
+          '<div class="manual-matrix-composition-grid', shots.length > 1 ? ' is-multi' : '', '">',
+          shots.map((shot) => [
+            '<figure class="manual-matrix-composition-shot"><img src="', attr(shot.previewUrl),
+            '" alt="Composición del arte de ', attr(shot.product || "la fila " + String(rowNumber)), '">',
+            '<figcaption><strong>', esc(shots.length > 1 ? (shot.product || "Producto") : (shot.templateName || "Plantilla automática")), '</strong>',
+            '<span>', esc(shots.length > 1 ? shot.templateName : shot.format), ' · ', String(shot.width), '×', String(shot.height),
+            ' px al producir</span></figcaption></figure>',
+          ].join("")).join(""),
+          '</div>',
+          extra > 0 ? '<p class="muted tiny">Y ' + String(extra) + ' artes más con el mismo diseño.</p>' : '',
+          notes.length
             ? '<ul class="manual-matrix-composition-notes">' +
-              shot.warnings.map((warning) => '<li>' + esc(warning) + '</li>').join("") + '</ul>'
+              notes.map((warning) => '<li>' + esc(warning) + '</li>').join("") + '</ul>'
             : '',
         ].join("");
       } catch (error) {

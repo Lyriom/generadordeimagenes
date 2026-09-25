@@ -427,6 +427,10 @@ export interface MatrixProductionPlan {
  *  lanzar la tanda. `width`/`height` son las del entregable, no las del JPG. */
 export interface MatrixRowComposition {
   rowNumber: number;
+  /** Producto de esta vista: en una fila «un arte por producto», cuál es. */
+  product: string;
+  variant: number;
+  variantCount: number;
   templateName: string;
   format: string;
   width: number;

@@ -2883,3 +2883,39 @@ details .inventory { margin-top: 14px; }
 .format-pick:hover { background: var(--surface-3); }
 .format-pick small { color: var(--fg-faint); font-variant-numeric: tabular-nums; }
 .manual-matrix-grid .format-pick input { width: 17px; padding: 0; }
+
+/* Productos de una fila: se eligen de las imágenes cargadas, con miniatura.
+   Con varios, la fila decide si sale un arte por producto o un combo. */
+.product-picker-menu { min-width: min(560px, 90vw); }
+.product-picker-tools { display: flex; gap: 6px; }
+.product-picker-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.product-pick {
+  display: grid; grid-template-columns: auto 40px minmax(0, 1fr); align-items: center; gap: 8px;
+  padding: 6px 8px; border: 1px solid transparent; border-radius: 10px; font-size: var(--fs-xs); cursor: pointer;
+}
+.product-pick:hover { background: var(--surface-3); }
+.product-pick:has(input:checked) { border-color: var(--accent); background: var(--accent-soft, var(--surface-3)); }
+.product-pick img, .product-pick-empty { width: 40px; height: 40px; object-fit: contain; border-radius: 8px; background: var(--surface-3); }
+.product-pick span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.manual-matrix-grid .product-pick input { width: 17px; padding: 0; }
+.manual-mode { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
+.manual-mode-option {
+  display: grid; grid-template-columns: auto 1fr; column-gap: 8px; align-items: center;
+  padding: 10px 12px; border: 1px solid var(--line-strong); border-radius: 12px; cursor: pointer;
+}
+.manual-mode-option input { grid-row: span 2; }
+.manual-mode-option strong { font-size: var(--fs-sm); }
+.manual-mode-option small { color: var(--fg-muted); font-size: var(--fs-xs); }
+.manual-mode-option.is-active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.per-product-table { display: grid; gap: 6px; margin-top: 10px; overflow-x: auto; }
+.per-product-head, .per-product-row {
+  display: grid; grid-template-columns: 44px minmax(140px, 1.6fr) repeat(4, minmax(90px, 1fr));
+  align-items: center; gap: 8px; min-width: 640px;
+}
+.per-product-head span { color: var(--fg-muted); font-size: 11px; font-weight: 600; }
+.per-product-row img, .per-product-row .product-pick-empty { width: 44px; height: 44px; object-fit: contain; border-radius: 8px; background: var(--surface-3); }
+.per-product-row input { min-width: 0; padding: 8px 9px; font-size: var(--fs-xs); }
+.manual-matrix-composition-grid { display: grid; gap: 12px; }
+.manual-matrix-composition-grid.is-multi { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.manual-matrix-composition-grid.is-multi .manual-matrix-composition-shot img { max-width: 100%; }
+@media (max-width: 720px) { .manual-mode { grid-template-columns: 1fr; } }

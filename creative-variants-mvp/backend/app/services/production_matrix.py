@@ -55,6 +55,12 @@ class MatrixRow(BaseModel):
     # editable, lo escrito a mano siempre se dibuja; lo redactado solo si el
     # arte tiene sitio para ello.
     ai_fields: list[str] = Field(default_factory=list)
+    # Con varios productos: ``combo`` los pone juntos en un arte;
+    # ``individual`` hace un arte por producto con el mismo copy y formatos.
+    modo: str = "combo"
+    # Una fila ``individual`` se expande en una por producto; cada una recuerda
+    # la línea de la matriz de la que salió para los mensajes y la vista previa.
+    fila_origen: int | None = None
 
 
 def _key(value: str) -> str:
@@ -98,6 +104,7 @@ ALIASES: dict[str, set[str]] = {
         "count",
     },
     "plantilla": {"plantilla", "template"},
+    "modo": {"modo", "mode", "agrupacion", "tipo_de_arte", "arte_por_producto"},
     "notas": {"notas", "notes", "instrucciones", "instruction"},
 }
 
@@ -203,6 +210,76 @@ def _optional(value: str, field: str, suppressed: list[str]) -> str | None:
     return value
 
 
+_MODO_INDIVIDUAL = {
+    "individual", "individuales", "uno_por_producto", "un_arte_por_producto",
+    "por_producto", "separado", "separados", "si",
+}
+
+
+def _modo(value: str) -> str:
+    """``individual`` o ``combo``; vacío o desconocido es combo, como antes."""
+
+    return "individual" if _key(value) in _MODO_INDIVIDUAL else "combo"
+
+
+def _partes(value: str | None) -> list[str]:
+    return [parte.strip() for parte in re.split(r"[|;]", value or "") if parte.strip()]
+
+
+def _nombre_de_archivo(archivo: str) -> str:
+    """«licuadora-oster_2L.png» → «Licuadora oster 2L»: un nombre legible."""
+
+    base = re.sub(r"[_\-]+", " ", Path(archivo).stem).strip()
+    return base[:1].upper() + base[1:] if base else archivo
+
+
+#: Campos que en una fila individual pueden traer un valor por producto,
+#: separados con «|» en el mismo orden («$400 | $520 | $610»). Un solo valor
+#: vale para todos.
+POR_PRODUCTO = ("precio_actual", "precio_anterior", "cuota", "descuento")
+
+
+def expand_rows(rows: Sequence[MatrixRow]) -> list[MatrixRow]:
+    """Una fila ``individual`` con N productos pasa a N filas de un producto.
+
+    Es lo que hace masiva una matriz: elegir veinte productos en una fila y
+    obtener veinte artes coherentes —mismo copy, mismos formatos, misma
+    plantilla— sin copiar la fila veinte veces. Las filas nuevas toman números
+    por encima del último de la matriz, para que ninguna clave choque, y
+    guardan ``fila_origen``.
+    """
+
+    siguiente = max((row.row_number for row in rows), default=1) + 1
+    salida: list[MatrixRow] = []
+    for row in rows:
+        nombres, archivos = _partes(row.producto), _partes(row.imagen)
+        total = max(len(nombres), len(archivos))
+        if row.modo != "individual" or total < 2:
+            salida.append(row)
+            continue
+        valores = {campo: _partes(getattr(row, campo)) for campo in POR_PRODUCTO}
+        for indice in range(total):
+            archivo = archivos[indice] if indice < len(archivos) else None
+            nombre = (
+                nombres[indice] if indice < len(nombres)
+                else _nombre_de_archivo(archivo) if archivo else ""
+            )
+            cambios: dict[str, object] = {
+                "producto": nombre,
+                "imagen": archivo,
+                "modo": "combo",
+                "fila_origen": row.row_number,
+                "row_number": row.row_number if indice == 0 else siguiente,
+            }
+            for campo, lista in valores.items():
+                if len(lista) > 1:
+                    cambios[campo] = lista[indice] if indice < len(lista) else None
+            if indice:
+                siguiente += 1
+            salida.append(row.model_copy(update=cambios))
+    return salida
+
+
 def _formats(value: str, row_number: int) -> list[str]:
     if not value:
         return []
@@ -265,6 +342,7 @@ def parse_csv(payload: bytes | str) -> list[MatrixRow]:
             row = MatrixRow(
                 row_number=row_number,
                 producto=producto,
+                modo=_modo(_cell(cells, columns.get("modo"))),
                 **optional,
                 formatos=_formats(_cell(cells, columns.get("formatos")), row_number),
                 cantidad_propuestas=_quantity(

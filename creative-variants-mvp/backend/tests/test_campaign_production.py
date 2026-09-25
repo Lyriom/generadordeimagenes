@@ -1136,3 +1136,74 @@ def test_el_plan_nombra_la_plantilla_que_si_sirve_en_vez_de_mandar_a_probar(
     assert plan["suggested_template"], plan
     assert plan["suggested_template"]["name"] in plan["message"]
     assert "Elige otra plantilla aprobada" not in plan["message"]
+
+
+def test_una_fila_con_varios_productos_hace_un_arte_por_cada_uno(
+    client: TestClient, artwork_png: bytes
+):
+    """Masivo desde una sola fila: se eligen varios productos y sale un arte
+    por producto, con la misma plantilla; la vista previa enseña cada uno."""
+
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+    client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/assets",
+        files=[
+            ("files", ("televisor.png", artwork_png, "image/png")),
+            ("files", ("licuadora.png", artwork_png, "image/png")),
+        ],
+    )
+    nombre, contenido, tipo = _matrix_csv(
+        producto="Televisor | Licuadora", imagen="televisor.png | licuadora.png",
+        precio_actual="$499 | $59", formatos="meta_feed_4_5|meta_stories", cantidad_propuestas="1",
+    )
+    contenido = contenido.replace(b"plantilla\n", b"plantilla,modo\n").rstrip(b"\n") + b',"individual"\n'
+    matriz = (nombre, contenido, tipo)
+
+    revision = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/preview",
+        files=[("matrix", matriz)],
+    )
+    assert revision.status_code == 200, revision.text
+    cuerpo = revision.json()
+    assert cuerpo["total_rows"] == 1 and cuerpo["total_arts"] == 2
+    assert cuerpo["requested_pieces"] == 4
+    assert len(cuerpo["plans"]) == 1 and cuerpo["plans"][0]["row_number"] == 2
+    assert cuerpo["plans"][0]["art_count"] == 2
+    assert cuerpo["rows"][0]["modo"] == "individual"
+
+    segunda = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production/row-preview",
+        files=[("matrix", matriz)],
+        data={"row_number": "2", "piece_format": "meta_feed_4_5", "variante": "1"},
+    )
+    assert segunda.status_code == 200, segunda.text
+    datos = segunda.json()
+    assert datos["product"] == "Licuadora" and datos["variant"] == 1 and datos["variant_count"] == 2
+    imagen = client.get(datos["preview_url"])
+    assert imagen.status_code == 200
+
+
+def test_la_tanda_masiva_produce_un_arte_por_producto_de_la_fila(
+    client: TestClient, artwork_png: bytes
+):
+    client_id, campaign_id, _ = _ready_campaign(client, artwork_png)
+    matrix = (
+        "producto,imagen,titular,precio,formatos,cantidad_propuestas,modo\n"
+        "Televisor | Licuadora | Cocina,tv.png|licuadora.png|cocina.png,A crédito,$499|$59|$320,320x400|300x300,1,individual\n"
+    ).encode()
+
+    response = client.post(
+        f"/clients/{client_id}/campaigns/{campaign_id}/production",
+        files=[
+            ("matrix", ("matriz.csv", matrix, "text/csv")),
+            ("product_files", ("tv.png", artwork_png, "image/png")),
+            ("product_files", ("licuadora.png", artwork_png, "image/png")),
+            ("product_files", ("cocina.png", artwork_png, "image/png")),
+        ],
+        data={"default_formats": "[]", "use_ai_copy": "false"},
+    )
+
+    assert response.status_code == 201, response.text
+    batch = response.json()
+    assert batch["total_pieces"] == 3 * 2
+    assert {piece["product"] for piece in batch["pieces"]} == {"Televisor", "Licuadora", "Cocina"}

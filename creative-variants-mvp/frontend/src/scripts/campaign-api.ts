@@ -698,11 +698,13 @@ export async function previewCampaignRow(
   matrix: File,
   rowNumber: number,
   pieceFormat = "",
+  variant = 0,
 ): Promise<MatrixRowComposition> {
   const form = new FormData();
   form.append("matrix", matrix);
   form.append("row_number", String(rowNumber));
   form.append("piece_format", pieceFormat);
+  form.append("variante", String(Math.max(0, Math.trunc(variant))));
   const payload: any = await upload(
     "/clients/" + encodeURIComponent(clientId) + "/campaigns/" +
       encodeURIComponent(campaignId) + "/production/row-preview",
@@ -710,6 +712,9 @@ export async function previewCampaignRow(
   );
   return {
     rowNumber: Math.max(2, Math.trunc(Number(payload?.row_number) || rowNumber)),
+    product: String(payload?.product || ""),
+    variant: Math.max(0, Math.trunc(Number(payload?.variant) || 0)),
+    variantCount: Math.max(1, Math.trunc(Number(payload?.variant_count) || 1)),
     templateName: String(payload?.template?.name || ""),
     format: String(payload?.format || ""),
     width: Math.max(0, Math.trunc(Number(payload?.width) || 0)),

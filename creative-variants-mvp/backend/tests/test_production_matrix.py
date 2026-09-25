@@ -266,3 +266,36 @@ def test_selector_no_descarta_en_silencio_un_campo_que_llego_en_la_matriz():
 
     assert score_template(row, institutional) == float("-inf")
     assert select_template(row, [institutional, price]) is price
+
+
+def test_una_fila_individual_da_un_arte_por_producto_con_su_precio():
+    """Masivo: elegir varios productos en una fila y obtener un arte por cada
+    uno, con el mismo copy y formatos, y el precio de cada cual."""
+
+    from app.services.production_matrix import expand_rows
+
+    rows = parse_csv(
+        "producto,imagen,titular,precio,cuota,formatos,modo\n"
+        "Licuadora | ,licuadora.png|air-fryer_oster.png|tv.png,Hoy a crédito,$40 | $90 | $500,12 cuotas,feed|story,individual\n"
+        "Otro,otro.png,Titular,$10,,feed,\n"
+    )
+    assert rows[0].modo == "individual" and rows[1].modo == "combo"
+    artes = expand_rows(rows)
+
+    assert [a.imagen for a in artes] == ["licuadora.png", "air-fryer_oster.png", "tv.png", "otro.png"]
+    assert [a.producto for a in artes[:3]] == ["Licuadora", "Air fryer oster", "Tv"]
+    assert [a.precio_actual for a in artes[:3]] == ["$40", "$90", "$500"]
+    # Lo común se copia a todos; nadie choca de número y cada uno sabe su fila.
+    assert all(a.titular == "Hoy a crédito" and a.cuota == "12 cuotas" for a in artes[:3])
+    assert all(a.formatos == rows[0].formatos for a in artes[:3])
+    assert len({a.row_number for a in artes}) == len(artes)
+    assert [a.fila_origen for a in artes] == [2, 2, 2, None]
+    assert artes[0].row_number == 2
+    assert requested_piece_count(artes) == 3 * 2 + 1
+
+
+def test_un_combo_sigue_siendo_un_solo_arte():
+    from app.services.production_matrix import expand_rows
+
+    rows = parse_csv("producto,imagen,modo\nTV | Barra,tv.png|barra.png,combo\n")
+    assert expand_rows(rows) == rows
