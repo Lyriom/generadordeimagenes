@@ -1138,11 +1138,16 @@ def _bloque(extras, modo: str):
         return None
     base, sep = 1000.0, 1000.0 * .035
     cajas: dict[str, tuple[float, float, float, float]] = {}
+    # Sin titular, el subtítulo es el mensaje: con el cuerpo de un subtítulo
+    # quedaba una línea diminuta suelta sobre el botón.
+    proporcion = dict(_BLOQUE)
+    if "headline" not in campos:
+        proporcion["subheadline"] = 4.5
     if modo == "fila" and "cta" in campos and len(campos) > 1:
         texto_w, boton_w = base * .60, base * .34
         y = 0.0
         for clave in (c for c in campos if c != "cta"):
-            alto = texto_w / _BLOQUE[clave]
+            alto = texto_w / proporcion[clave]
             cajas[clave] = (0.0, y, texto_w, y + alto)
             y += alto + sep
         alto_texto = y - sep
@@ -1157,7 +1162,7 @@ def _bloque(extras, modo: str):
     y = 0.0
     for clave in campos:
         ancho = base * (.62 if clave in {"cta", "discount"} else 1.0)
-        alto = ancho / _BLOQUE[clave]
+        alto = ancho / proporcion[clave]
         x = (base - ancho) / 2
         cajas[clave] = (x, y, x + ancho, y + alto)
         y += alto + sep
@@ -1278,6 +1283,24 @@ def _componer(
     producto = papel["product"]
     pantalla = sangrado is not None and sangrado > zy1
     suelo_producto = max(zy1, sangrado or zy1)
+    # El precio anterior y el descuento son parte de la oferta: tachado bajo
+    # la pastilla y una insignia en su esquina. Sueltos en el bloque de
+    # mensaje, "$500" y "10%" quedaban como líneas perdidas.
+    junto_oferta = (
+        {"previous_price", "discount"} & set(extras)
+        if oferta is not None and formato != "banner" else set()
+    )
+    extras = tuple(c for c in extras if c not in junto_oferta)
+    satelite: dict[str, tuple[float, float]] = {}
+    if "legal" in extras and formato != "banner":
+        # El legal, en su franja al pie del área segura; nada la pisa. Antes
+        # caía en la retícula genérica encima de la vigencia.
+        alto_legal = max(zh * .045, 10.0)
+        campos["legal"] = (zx0, zy1 - alto_legal, zx1, zy1)
+        zy1 = zy1 - alto_legal - gap * .6
+        zh = zy1 - zy0
+        zona = (zx0, zy0, zx1, zy1)
+        suelo_producto = zy1
     if aspecto is None and producto is not None:
         aspecto = (producto[2] - producto[0]) / max(1, producto[3] - producto[1])
     aspecto = min(3.2, max(.3, aspecto or 1.0))
@@ -1293,6 +1316,20 @@ def _componer(
         ancho_s = sum(natural(i)[0] for i in sellos) + alto_s * .18 * (len(sellos) - 1)
     else:
         alto_s = ancho_s = 0.0
+
+    def natural_oferta():
+        w, h = natural(oferta)
+        return (w, h * 1.24) if "previous_price" in junto_oferta else (w, h)
+
+    def poner_oferta(caja):
+        if caja is None or oferta is None:
+            return
+        if "previous_price" in junto_oferta:
+            alto = (caja[3] - caja[1]) / 1.24
+            destinos[oferta] = (caja[0], caja[1], caja[2], caja[1] + alto)
+            satelite["previous_price"] = (caja[1] + alto * 1.03, caja[3])
+        else:
+            destinos[oferta] = caja
 
     def poner(indice, caja, alinear=("center", "center")):
         if indice is not None and caja is not None:
@@ -1334,7 +1371,28 @@ def _componer(
         for indice, destino in enumerate(destinos):
             if destino is None and indice in sellos:
                 destinos[indice] = nada
-        return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
+        plan = _cerrar(destinos, campos, elementos, cajas_campo, dentro)
+        if plan is None or not junto_oferta or destinos[oferta] is None:
+            return plan
+        ox0, oy0, ox1, oy1 = destinos[oferta]
+        precios = [campos[c] for c in ("price", "installment") if c in campos]
+        px0 = min((c[0] for c in precios), default=ox0)
+        px1 = max((c[2] for c in precios), default=ox1)
+        if "previous_price" in satelite:
+            # Justo bajo la parte de color de la pastilla, no bajo su caja: los
+            # iconos que cuelgan de ella lo dejaban despegado del precio.
+            alto_tachado = (oy1 - oy0) * .17
+            base_precio = max((c[3] for c in precios), default=oy1)
+            y0 = min(base_precio + (oy1 - oy0) * .07, satelite["previous_price"][0])
+            campos["previous_price"] = (px0, y0, px1, y0 + alto_tachado)
+        if "discount" in junto_oferta:
+            # Fuera de la franja del nombre, colgando de la esquina: encima
+            # tapaba el final de "AIR FRYER OSTER".
+            lado = (oy1 - oy0) * .40
+            x0 = min(ox1 - lado * .45, zona[2] - lado)
+            y0 = max(oy0 - lado * .62, zona[1])
+            campos["discount"] = (x0, y0, x0 + lado, y0 + lado)
+        return plan
 
     if formato == "banner":
         # Leaderboard y banner móvil: una hilera a toda la altura. Los sellos
@@ -1377,7 +1435,7 @@ def _componer(
         if producto is not None:
             items.append(("product", aspecto * 100, 100.0, .34))
         if oferta is not None:
-            items.append(("offer", *natural(oferta), .20))
+            items.append(("offer", *natural_oferta(), .20))
         forma = _bloque(extras, "columna")
         if forma is not None:
             items.append(("bloque", forma[0], forma[1], .16))
@@ -1387,7 +1445,7 @@ def _componer(
             if clave == "lockup":
                 destinos[papel["lockup"]] = caja
             elif clave == "offer":
-                destinos[oferta] = caja
+                poner_oferta(caja)
             elif clave == "product":
                 # El hueco toma el ancho entero de la columna.
                 campos["product"] = (zx0, caja[1], zx1, caja[3])
@@ -1418,13 +1476,13 @@ def _componer(
                 poner_sellos(caja)
         items = []
         if oferta is not None:
-            items.append(("offer", *natural(oferta), .62 if extras else 1.0))
+            items.append(("offer", *natural_oferta(), .62 if extras else 1.0))
         forma = _bloque(extras, "columna")
         if forma is not None:
             items.append(("bloque", forma[0], forma[1], .42))
         for clave, caja in _pila(items, centro, gap).items():
             if clave == "offer":
-                destinos[oferta] = caja
+                poner_oferta(caja)
             else:
                 poner_bloque(caja, "columna")
         if producto is not None:
@@ -1458,14 +1516,14 @@ def _componer(
                     destinos[papel["lockup"]] = caja
                 else:
                     poner_sellos(caja)
-            poner(oferta, derecha, ("end", "center"))
+            poner_oferta(_encajar((0, 0, *natural_oferta()), derecha, ("end", "center")))
             if forma is not None:
                 alto_bloque = min(zw * forma[1] / forma[0], zh * .26)
                 poner_bloque((zx0, y, zx1, y + alto_bloque), "columna")
                 y += alto_bloque + gap
             campos["product"] = (zx0, y, zx1, suelo_producto)
             return cerrar()
-        poner(oferta, derecha, ("end", "center"))
+        poner_oferta(_encajar((0, 0, *natural_oferta()), derecha, ("end", "center")))
         abajo = zy1
         if oferta is None and forma is not None:
             # Sin pastilla, el mensaje ocupa su sitio junto al logo de campaña.
@@ -1509,7 +1567,7 @@ def _componer(
     columna_p = (izquierda[2] + gap, techo, zx1, suelo_producto)
     items = [] if pantalla else [("lockup", *natural(papel["lockup"]), .30 if pequeno else .40)]
     if oferta is not None:
-        items.append(("offer", *natural(oferta), .46 if pequeno else .34))
+        items.append(("offer", *natural_oferta(), .46 if pequeno else .34))
     columna = _bloque(extras, "columna") if en_columna else None
     if columna is not None:
         items.append(("bloque", columna[0], columna[1], .24 if oferta is not None else .40))
@@ -1519,7 +1577,7 @@ def _componer(
         if clave == "lockup":
             destinos[papel["lockup"]] = caja
         elif clave == "offer":
-            destinos[oferta] = caja
+            poner_oferta(caja)
         elif clave == "bloque":
             poner_bloque(caja, "columna")
         else:

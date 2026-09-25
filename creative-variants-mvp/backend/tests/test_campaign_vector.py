@@ -306,3 +306,27 @@ def test_la_franja_de_la_pastilla_da_el_ancho_del_texto():
     assert x0 <= 70 and 300 < x1 <= 350
     assert (y0, y1) == (55, 85)
     assert cajas["product"] == (0, 0, 10, 10)
+
+
+def test_con_todos_los_campos_cada_uno_tiene_su_sitio():
+    """Con precio anterior, descuento, vigencia y legal la pieza se desarmaba:
+    "$500" y "10%" sueltos bajo el bloque y el legal encima de la vigencia."""
+
+    capa, campos = _kv()
+    campos["installment"] = (60, 560, 320, 600)
+    campos["price"] = (60, 480, 320, 555)
+    safe = _safe("meta_instagram_feed_3_4")
+    extras = ("subheadline", "previous_price", "discount", "cta", "validity", "legal")
+    _placa, cajas = vector.adapt(None, capa, campos, (1080, 1440), safe, extras=extras)
+
+    assert set(extras) <= set(cajas)
+    # El legal va al pie, sin pisar nada.
+    legal = cajas["legal"]
+    assert all(legal[1] >= caja[3] - 1 for clave, caja in cajas.items() if clave != "legal")
+    # El precio anterior, justo bajo el precio; el descuento, en la esquina de
+    # la pastilla (arriba a la derecha del precio).
+    precio = cajas["price"]
+    assert 0 <= cajas["previous_price"][1] - cajas["installment"][3] < 1440 * .05
+    assert cajas["discount"][0] > precio[0] and cajas["discount"][1] < precio[1]
+    for a, b in (("subheadline", "validity"), ("subheadline", "cta"), ("validity", "legal")):
+        assert not _pisa(cajas[a], cajas[b]), (a, b)

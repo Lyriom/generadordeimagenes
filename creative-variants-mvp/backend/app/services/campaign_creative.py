@@ -230,9 +230,15 @@ def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
             if bold else ("regular", "book", "medium", "light")
         )
 
-        def rango(item: tuple[str, Path]) -> int:
+        def rango(item: tuple[str, Path]) -> tuple[int, int]:
             nombre = item[0].casefold()
-            return next((i for i, token in enumerate(preference) if token in nombre), len(preference))
+            # Una cara condensada de titular (Anton-Regular) no es la regular
+            # del texto corrido: el subtítulo y el legal salían en Anton.
+            titular = any(token in nombre for token in _DISPLAY_TOKENS)
+            return (
+                int(titular),
+                next((i for i, token in enumerate(preference) if token in nombre), len(preference)),
+            )
 
         for _name, path in sorted(font_candidates, key=rango):
             # Las fuentes subidas antes de marcar las de prueba no traen la
@@ -492,7 +498,9 @@ def _tiene_descomposicion(campaign: Campaign) -> bool:
     )
 
 
-def _acento_del_arte(campaign: Campaign) -> tuple[int, int, int] | None:
+def _acento_del_arte(
+    campaign: Campaign, orden: tuple[str, ...] = ("price", "installment", "product_name"),
+) -> tuple[int, int, int] | None:
     """El color de la pastilla del precio en el editable, para el botón.
 
     Se mide en la capa guardada, no en la pieza: una fila sin precio pinta la
@@ -504,7 +512,7 @@ def _acento_del_arte(campaign: Campaign) -> tuple[int, int, int] | None:
         if not isinstance(datos, dict) or not datos.get("capa"):
             continue
         campos = datos.get("fields") or {}
-        caja = next((campos[c] for c in ("price", "installment", "product_name") if c in campos), None)
+        caja = next((campos[c] for c in orden if c in campos), None)
         if not caja:
             return None
         try:
@@ -1047,7 +1055,11 @@ def _text_layer(
         anchor, tx = "ra", x + w
     draw.multiline_text((tx, y), rendered, font=font, fill=colour, spacing=int(start * .12), anchor=anchor, align=align)
     if strike:
-        draw.line((x, y + h // 2, x + min(w, int(draw.textlength(text, font=font))), y + h // 2), fill=colour, width=max(2, h // 18))
+        largo = min(w, int(draw.textlength(rendered.split("\n")[0], font=font)))
+        inicio = x if align == "left" else x + (w - largo) // 2 if align == "center" else x + w - largo
+        alto_linea = draw.textbbox((0, 0), rendered.split("\n")[0], font=font)[3]
+        medio = y + alto_linea * 6 // 10
+        draw.line((inicio - 2, medio, inicio + largo + 2, medio), fill=colour, width=max(2, alto_linea // 9))
     medida = draw.multiline_textbbox((0, 0), rendered, font=font, spacing=int(start * .12))
     if medida[2] > w or medida[3] > h:
         # Ni al cuerpo mínimo cabe (un nombre largo en la pastilla de un
@@ -1115,6 +1127,41 @@ def _boton(
     draw.multiline_text(
         (x + w // 2, y + h // 2), "\n".join(lineas), font=fuente, fill=(*tinta, 255),
         anchor="mm", align="center", spacing=int(tamano * .1),
+    )
+    return capa
+
+
+def _insignia(
+    canvas: tuple[int, int],
+    box: tuple[int, int, int, int],
+    text: str,
+    font_path: str,
+    fill: tuple[int, int, int],
+) -> Image.Image:
+    """Un círculo con el descuento ("-10%"), como el sello de oferta retail."""
+
+    x, y, w, h = box
+    capa = Image.new("RGBA", canvas, (0, 0, 0, 0))
+    lado = min(w, h)
+    if lado <= 6:
+        return capa
+    sombra = Image.new("RGBA", canvas, (0, 0, 0, 0))
+    ImageDraw.Draw(sombra).ellipse((x, y + lado // 14, x + lado, y + lado + lado // 14), fill=(0, 0, 0, 80))
+    capa.alpha_composite(sombra.filter(ImageFilter.GaussianBlur(max(1, lado // 16))))
+    draw = ImageDraw.Draw(capa, "RGBA")
+    draw.ellipse((x, y, x + lado, y + lado), fill=(*fill, 255), outline=(255, 255, 255, 235), width=max(1, lado // 22))
+    tinta = max(((255, 255, 255), DARK_INK), key=lambda t: _contrast(t, fill))
+    texto = text.strip()
+    tamano = max(7, int(lado * .42))
+    while tamano > 7:
+        fuente = _font(font_path, tamano)
+        caja = draw.textbbox((0, 0), texto, font=fuente)
+        if caja[2] - caja[0] <= lado * .74 and caja[3] - caja[1] <= lado * .5:
+            break
+        tamano -= max(1, tamano // 12)
+    draw.text(
+        (x + lado // 2, y + lado // 2), texto, font=_font(font_path, tamano),
+        fill=(*tinta, 255), anchor="mm",
     )
     return capa
 
@@ -1652,6 +1699,10 @@ def _render(
             clave for clave, valor in escrito.items()
             if clave not in medidas and (valor or "").strip() and clave not in de_la_ia
         ]
+        # Lo escrito sale aunque la candidata no declarase ese campo: "_values"
+        # vaciaba el subtítulo de una plantilla sin hueco de subtítulo.
+        for clave in extras:
+            values[clave] = (escrito[clave] or "").strip()
         visible &= medidas | {"logo", "legal"}
         visible |= set(extras)
         values = {key: (value if key in visible else "") for key, value in values.items()}
@@ -1687,6 +1738,9 @@ def _render(
     en_bloque = list(extras)
     if desnuda and values.get("product_name", "").strip():
         en_bloque = ["product_name", *extras]
+    if row is not None and "legal" in keys and values.get("legal", "").strip():
+        # El legal también entra en la composición: con franja propia al pie.
+        en_bloque.append("legal")
     vector = (
         _vector_layout(
             campaign, canvas, safe, bare=desnuda, extras=tuple(en_bloque),
@@ -1699,6 +1753,10 @@ def _render(
     if vector is not None:
         regions.update(vector[1])
         colocados = set(en_bloque) & set(vector[1])
+        if "legal" in en_bloque and "legal" not in colocados:
+            # Un banner de 50-90 px no tiene franja para el legal; en la
+            # retícula genérica caía encima de todo.
+            values["legal"] = ""
     if extras:
         keys = set(keys) | {
             {"headline": "titular", "subheadline": "subtitulo", "previous_price": "precio_anterior",
@@ -1860,11 +1918,23 @@ def _render(
             if value_key == "cta":
                 layers.append((label, _boton(canvas, caja, value, bold, acento)))
                 continue
+            if value_key == "discount":
+                # La insignia del descuento, en la esquina de la pastilla y del
+                # color de su franja (el celeste del nombre), para que no se
+                # confunda con el precio.
+                segundo = _acento_del_arte(campaign, ("product_name",)) or (255, 210, 67)
+                if re.fullmatch(r"\d+(?:[.,]\d+)?\s*%", value):
+                    value = f"-{value.replace(' ', '')}"
+                layers.append((label, _insignia(canvas, caja, value, bold, segundo)))
+                continue
             # Centrado cuando el bloque está apilado; a la izquierda cuando el
             # botón va a su lado, como en una barra de mensaje.
             junto_al_boton = centro_cta is not None and centro_cta > caja[0] + caja[2]
+            principal = value_key == "headline" or (
+                value_key == "subheadline" and "headline" not in colocados
+            )
             layer = _text_layer(
-                canvas, caja, value, display if value_key == "headline" else font_path,
+                canvas, caja, value, display if principal else font_path,
                 colour=_ink_for(backdrop, caja, blueprint.text_colors.get("product_name", "")),
                 bold=is_bold, max_lines=lines, align="left" if junto_al_boton else "center",
                 strike=strike, valign="middle",
