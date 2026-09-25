@@ -855,8 +855,14 @@ def adapt(
     size: tuple[int, int], safe: dict[str, float],
     *,
     omit: set[str] | None = None,
+    extras: tuple[str, ...] | list[str] = (),
+    aspecto: float | None = None,
 ):
     """Recompone la pieza en otra proporción. Devuelve (placa, cajas de campo).
+
+    ``extras`` son los campos que la fila trae y el arte no tiene (titular,
+    CTA…): la composición les reserva su bloque y devuelve sus cajas.
+    ``aspecto`` es el ancho/alto de lo que irá en el hueco del producto.
 
     El fondo cubre el lienzo; cada elemento de identidad se ancla a su borde.
     La escala se busca: se empieza por la que conserva el área de cada
@@ -923,10 +929,19 @@ def adapt(
         if not _choca(a[2], b[2], 0)
     ]
 
-    if abs(math.log((ancho / alto) / (origen[0] / origen[1]))) > .08:
-        # Otra proporción: se compone por roles con la retícula de cada
-        # plataforma, en vez de estirar la del original.
-        plan = _componer(elementos, cajas_campo, dentro, origen, zona, size)
+    # Bajo el área segura de un story o un reel la interfaz tapa texto, no
+    # imagen: el producto puede bajar hasta la mitad de esa franja y la pieza
+    # no queda con un tercio de fondo vacío.
+    reserva = alto - zona[3]
+    sangrado = min(zona[3] + (alto * .94 - zona[3]) * .8, alto * .90) if reserva > alto * .12 else None
+    if extras or aspecto is not None or abs(math.log((ancho / alto) / (origen[0] / origen[1]))) > .08:
+        # Otra proporción, o campos que el original no tenía: se compone por
+        # roles con la retícula de cada plataforma, en vez de estirar la del
+        # original o apilar el mensaje encima del producto.
+        plan = _componer(
+            elementos, cajas_campo, dentro, origen, zona, size, tuple(extras), sangrado, aspecto,
+            quitar if "product_name" in extras else set(),
+        )
         if plan is not None:
             return _pintar(fondo, capa, size, elementos, quitar, zona, *plan)
     if (ancho / alto) / (origen[0] / origen[1]) > 1.5:
@@ -979,9 +994,11 @@ def _pintar(fondo, capa, size, elementos, quitar, zona, destinos, campos):
     salida: dict[str, tuple[int, int, int, int]] = {}
     for hueco, caja in campos.items():
         # Un campo suelto que se sale del área segura se recorta a ella: el
-        # producto se encaja dentro de su caja, así que solo pierde aire.
-        x0, y0 = max(zona[0], caja[0]), max(zona[1], caja[1])
-        x1, y1 = min(zona[2], caja[2]), min(zona[3], caja[3])
+        # producto se encaja dentro de su caja, así que solo pierde aire. El
+        # producto no es texto: puede bajar bajo el área segura, no del lienzo.
+        limite = (0, 0, size[0], size[1]) if hueco == "product" else zona
+        x0, y0 = max(limite[0], caja[0]), max(limite[1], caja[1])
+        x1, y1 = min(limite[2], caja[2]), min(limite[3], caja[3])
         if x1 <= x0 or y1 <= y0:
             continue
         salida[hueco] = (int(round(x0)), int(round(y0)), int(round(x1)), int(round(y1)))
@@ -1098,15 +1115,146 @@ def _fila(indices, elementos, marco, gap, alinear_x="start"):
     return salida
 
 
-def _componer(elementos, cajas_campo, dentro, origen, zona, size):
+#: Proporciones de cada campo del bloque de mensaje (ancho / alto) a un ancho
+#: de referencia de 1000: el titular a dos o tres renglones, el CTA como botón.
+_BLOQUE = {
+    "product_name": 7.0, "headline": 3.0, "subheadline": 9.0, "previous_price": 9.0,
+    "discount": 7.0, "cta": 4.4, "validity": 16.0,
+}
+#: Orden de lectura del bloque, como en cualquier pieza de retail.
+_ORDEN_BLOQUE = ("product_name", "headline", "subheadline", "previous_price", "discount", "cta", "validity")
+
+
+def _bloque(extras, modo: str):
+    """Caja natural del bloque de mensaje y la de cada campo dentro de ella.
+
+    ``columna``: todo apilado y centrado (verticales, columnas estrechas).
+    ``fila``: el texto a la izquierda y el botón del CTA a la derecha, como la
+    barra "Las mejores PROMOS están aquí · VER PRODUCTOS" de un banner web.
+    """
+
+    campos = [c for c in _ORDEN_BLOQUE if c in extras]
+    if not campos:
+        return None
+    base, sep = 1000.0, 1000.0 * .035
+    cajas: dict[str, tuple[float, float, float, float]] = {}
+    if modo == "fila" and "cta" in campos and len(campos) > 1:
+        texto_w, boton_w = base * .60, base * .34
+        y = 0.0
+        for clave in (c for c in campos if c != "cta"):
+            alto = texto_w / _BLOQUE[clave]
+            cajas[clave] = (0.0, y, texto_w, y + alto)
+            y += alto + sep
+        alto_texto = y - sep
+        alto_boton = boton_w / 3.4
+        medio = alto_texto / 2
+        cajas["cta"] = (base - boton_w, medio - alto_boton / 2, base, medio + alto_boton / 2)
+        alto_total = max(alto_texto, alto_boton)
+        if alto_boton > alto_texto:
+            desfase = (alto_boton - alto_texto) / 2
+            cajas = {k: (v[0], v[1] + desfase, v[2], v[3] + desfase) for k, v in cajas.items()}
+        return base, alto_total, cajas
+    y = 0.0
+    for clave in campos:
+        ancho = base * (.62 if clave in {"cta", "discount"} else 1.0)
+        alto = ancho / _BLOQUE[clave]
+        x = (base - ancho) / 2
+        cajas[clave] = (x, y, x + ancho, y + alto)
+        y += alto + sep
+    return base, y - sep, cajas
+
+
+def _pila(items, marco, gap, alinear="center", aire=.07):
+    """Apila elementos en el marco y crece a todos hasta llenarlo.
+
+    ``items``: ``(clave, ancho, alto, cuota)``; la cuota es la parte del alto
+    que cada uno puede llegar a ocupar. Se busca el mayor factor común que
+    quepa —el ancho del marco también limita—, y lo que sobra se reparte entre
+    los huecos (hasta ``aire`` del alto cada uno) y el resto arriba y abajo.
+    Así una columna no deja medio lienzo vacío bajo los sellos.
+    """
+
+    x0, y0, x1, y1 = marco
+    ancho, alto = x1 - x0, y1 - y0
+    items = [i for i in items if i[1] > 0 and i[2] > 0]
+    if not items or ancho <= 0 or alto <= 0:
+        return {}
+    libre = alto - gap * (len(items) - 1)
+
+    def altos(k):
+        return [min(k * cuota * alto, ancho * h / w) for _c, w, h, cuota in items]
+
+    bajo, tope = 0.0, 8.0
+    for _ in range(40):
+        medio = (bajo + tope) / 2
+        if sum(altos(medio)) <= libre:
+            bajo = medio
+        else:
+            tope = medio
+    hs = altos(bajo)
+    sobra = max(0.0, libre - sum(hs))
+    entre = min(sobra / (len(items) - 1), alto * aire) if len(items) > 1 else 0.0
+    y = y0 + (sobra - entre * (len(items) - 1)) / 2
+    salida = {}
+    for (clave, w, h, _cuota), alto_i in zip(items, hs):
+        ancho_i = alto_i * w / h
+        x = (
+            x0 if alinear == "start" else x1 - ancho_i if alinear == "end"
+            else x0 + (ancho - ancho_i) / 2
+        )
+        salida[clave] = (x, y, x + ancho_i, y + alto_i)
+        y += alto_i + gap + entre
+    return salida
+
+
+def _hilera(items, marco, gap, aire=.06):
+    """Como ``_pila`` pero en horizontal, a toda la altura del marco (banners)."""
+
+    x0, y0, x1, y1 = marco
+    ancho, alto = x1 - x0, y1 - y0
+    items = [i for i in items if i[1] > 0 and i[2] > 0]
+    if not items or ancho <= 0 or alto <= 0:
+        return {}
+    libre = ancho - gap * (len(items) - 1)
+    # Cada uno a su altura máxima (cuota del alto); si no caben, todos a menos.
+    anchos = [cuota * alto * w / h for _c, w, h, cuota in items]
+    factor = min(1.0, libre / sum(anchos))
+    sobra = max(0.0, libre - sum(anchos) * factor)
+    entre = min(sobra / (len(items) - 1), ancho * aire) if len(items) > 1 else 0.0
+    x = x0 + (sobra - entre * (len(items) - 1)) / 2
+    salida = {}
+    for (clave, w, h, cuota), ancho_i in zip(items, anchos):
+        ancho_i *= factor
+        alto_i = ancho_i * h / w
+        y = y0 + (alto - alto_i) / 2
+        salida[clave] = (x, y, x + ancho_i, y + alto_i)
+        x += ancho_i + gap + entre
+    return salida
+
+
+def _componer(
+    elementos, cajas_campo, dentro, origen, zona, size, extras=(), sangrado=None, aspecto=None,
+    fuera=frozenset(),
+):
     """Composición por roles con la retícula de cada plataforma.
 
     Parámetros de las guías de Meta y Google para piezas de producto: el
-    producto es el protagonista (en torno al 40-45 % del ancho en horizontal y
-    cuadrado, casi la mitad del alto en story); el logo de la marca siempre
-    visible y en su esquina; la oferta junto al producto y con cuerpo
-    suficiente para leerse en móvil; los sellos agrupados en una franja; nada
-    dentro de las zonas que tapa la interfaz (el área segura ya las excluye).
+    producto es el protagonista; el logo de la marca siempre visible y en su
+    esquina; la oferta junto al producto y con cuerpo para leerse en móvil;
+    los sellos agrupados; el mensaje (titular y CTA) en un bloque propio, con
+    el CTA como botón; y nada de texto en las zonas que tapa la interfaz (el
+    área segura ya las excluye; el producto, que no es texto, puede bajar
+    hasta ``sangrado``).
+
+    La familia sale del área segura, no del lienzo: un Reel de 1080x1920 con
+    un 35 % reservado abajo deja un área casi cuadrada. Y el hueco del
+    producto sigue su forma (``aspecto``, ancho/alto de lo que se va a
+    pintar): un televisor va en una franja a lo ancho, una refrigeradora en
+    una columna. Metidos al revés, cualquiera de los dos salía diminuto.
+
+    ``fuera`` son elementos que no se pintan (la pastilla de una fila sin
+    precio): no se les guarda sitio, y el nombre del producto, si viene en
+    ``extras``, pasa al bloque de mensaje.
     """
 
     papel = roles(elementos, cajas_campo, dentro, origen)
@@ -1114,138 +1262,271 @@ def _componer(elementos, cajas_campo, dentro, origen, zona, size):
         return None
     zx0, zy0, zx1, zy1 = zona
     zw, zh = zx1 - zx0, zy1 - zy0
-    ancho, alto = size
     gap = min(zw, zh) * .035
     destinos: list = [None] * len(elementos)
     campos: dict[str, tuple[float, float, float, float]] = {}
-
-    # El logo de la marca, pequeño y en su esquina: se le da un ancho fijo
-    # relativo al lienzo, como hacen las guías (entre el 15 y el 22 %).
-    techo_derecha = zy0
-    for indice in papel["brand"]:
-        caja = elementos[indice]
-        derecha = caja[2] > origen[0] / 2
-        ancho_marca = zw * (.20 if ancho >= alto else .30)
-        marco = (
-            (zx1 - ancho_marca, zy0, zx1, zy0 + zh * .12) if derecha
-            else (zx0, zy0, zx0 + ancho_marca, zy0 + zh * .12)
-        )
-        destinos[indice] = _encajar(caja, marco, ("end" if derecha else "start", "start"))
-        if derecha and destinos[indice]:
-            techo_derecha = max(techo_derecha, destinos[indice][3] + gap)
-
-    proporcion = ancho / alto
+    proporcion = zw / zh
     formato = (
-        "banner" if proporcion > 3 else "tall" if proporcion < .4
-        else "landscape" if proporcion > 1.4 else "story" if proporcion < .67 else "square"
+        "banner" if proporcion > 3.2 else "horizontal" if proporcion > 1.45
+        else "vertical" if proporcion < .62 else "columnas"
     )
     nada = (0.0, 0.0, 0.0, 0.0)
-    lockup = elementos[papel["lockup"]]
     oferta = papel["offer"]
+    if oferta in fuera:
+        destinos[oferta] = nada
+        oferta = None
     producto = papel["product"]
+    pantalla = sangrado is not None and sangrado > zy1
+    suelo_producto = max(zy1, sangrado or zy1)
+    if aspecto is None and producto is not None:
+        aspecto = (producto[2] - producto[0]) / max(1, producto[3] - producto[1])
+    aspecto = min(3.2, max(.3, aspecto or 1.0))
+    ancho_producto = aspecto >= 1.25
+
+    def natural(indice):
+        caja = elementos[indice]
+        return caja[2] - caja[0], caja[3] - caja[1]
+
+    sellos = sorted(papel["seals"], key=lambda i: elementos[i][0])
+    if sellos:
+        alto_s = max(natural(i)[1] for i in sellos)
+        ancho_s = sum(natural(i)[0] for i in sellos) + alto_s * .18 * (len(sellos) - 1)
+    else:
+        alto_s = ancho_s = 0.0
+
+    def poner(indice, caja, alinear=("center", "center")):
+        if indice is not None and caja is not None:
+            destinos[indice] = _encajar(elementos[indice], caja, alinear)
+
+    def poner_sellos(caja, alinear="center"):
+        if caja is None or not sellos:
+            return
+        # La fila entera se encaja primero: así respeta el ancho del marco.
+        fila = _encajar((0, 0, ancho_s, alto_s), caja, (alinear, "center"))
+        if fila is None:
+            return
+        separa = (fila[3] - fila[1]) * .18
+        for indice, destino in _fila(sellos, elementos, fila, separa, "center").items():
+            destinos[indice] = destino
+
+    def poner_bloque(caja, modo):
+        forma = _bloque(extras, modo)
+        if caja is None or forma is None:
+            return
+        base_w, base_h, partes = forma
+        caja = _encajar((0, 0, base_w, base_h), caja, ("center", "center"))
+        if caja is None:
+            return
+        factor = (caja[2] - caja[0]) / base_w
+        for clave, parte in partes.items():
+            campos[clave] = (
+                caja[0] + parte[0] * factor, caja[1] + parte[1] * factor,
+                caja[0] + parte[2] * factor, caja[1] + parte[3] * factor,
+            )
+
+    def marca_en(marco, alinear=("end", "start")):
+        for indice in papel["brand"]:
+            destinos[indice] = _encajar(elementos[indice], marco, alinear)
+        bajos = [destinos[i][3] for i in papel["brand"] if destinos[i]]
+        return max(bajos) + gap if bajos else marco[1]
+
+    def cerrar():
+        for indice, destino in enumerate(destinos):
+            if destino is None and indice in sellos:
+                destinos[indice] = nada
+        return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
 
     if formato == "banner":
-        # Banner (728x90, 320x50, 970x90): una sola fila a toda altura. No
-        # caben sellos: se omiten, como en cualquier banner de retail.
-        fila = [
-            (papel["lockup"], .22), (oferta, .36), ("product", .20),
-        ]
-        x = zx0
-        for clave, parte in fila:
-            marco = (x, zy0, x + zw * parte, zy1)
-            if clave == "product":
-                if producto is not None:
-                    campos["product"] = marco
-            elif clave is not None:
-                destinos[clave] = _encajar(elementos[clave], marco, ("center", "center"))
-            x += zw * parte + gap
+        # Leaderboard y banner móvil: una hilera a toda la altura. Los sellos
+        # no se leen a 50-90 px y se omiten, como en cualquier banner retail.
+        items = [("lockup", *natural(papel["lockup"]), 1.0)]
+        if producto is not None:
+            items.append(("product", min(2.4, aspecto) * 100, 100.0, 1.0))
+        if oferta is not None:
+            items.append(("offer", *natural(oferta), 1.0))
+        if "product_name" in extras:
+            items.append(("product_name", 4.0, 1.0, .5))
+        if "cta" in extras:
+            items.append(("cta", 3.8, 1.0, .52))
         for indice in papel["brand"]:
-            destinos[indice] = _encajar(
-                elementos[indice], (x, zy0 + zh * .2, zx1, zy1 - zh * .2), ("end", "center")
-            )
-        for indice in papel["seals"]:
+            w_b, h_b = natural(indice)
+            # Un logotipo apaisado a media altura se comía un tercio del banner.
+            items.append((("brand", indice), w_b, h_b, min(.5, zw * .2 * h_b / (zh * w_b))))
+        # Repartidos a lo largo del banner: centrados dejaban dos tercios
+        # vacíos a los lados en un 728x90.
+        for clave, caja in _hilera(items, zona, gap, aire=.25).items():
+            if clave == "lockup":
+                destinos[papel["lockup"]] = caja
+            elif clave == "offer":
+                destinos[oferta] = caja
+            elif clave in {"product", "cta", "product_name"}:
+                campos[clave] = caja
+            elif isinstance(clave, tuple):
+                destinos[clave[1]] = caja
+        for indice in sellos:
             destinos[indice] = nada
-        return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
-    if formato == "tall":
-        # Rascacielos (160x600): todo apilado a lo ancho de la columna.
-        tramos = [("brand", .07), (papel["lockup"], .22), ("product", .32), (oferta, .22), ("seals", .11)]
-        y = zy0
-        for clave, parte in tramos:
-            marco = (zx0, y, zx1, y + zh * parte)
-            if clave == "brand":
-                for indice in papel["brand"]:
-                    destinos[indice] = _encajar(elementos[indice], marco, ("center", "center"))
+        return cerrar()
+
+    if formato == "vertical":
+        # Media página y rascacielos (300x600, 160x600): una sola columna,
+        # centrada, que se llena de arriba abajo.
+        items = []
+        for indice in papel["brand"]:
+            items.append((("brand", indice), *natural(indice), .06))
+        items.append(("lockup", *natural(papel["lockup"]), .26))
+        if producto is not None:
+            items.append(("product", aspecto * 100, 100.0, .34))
+        if oferta is not None:
+            items.append(("offer", *natural(oferta), .20))
+        forma = _bloque(extras, "columna")
+        if forma is not None:
+            items.append(("bloque", forma[0], forma[1], .16))
+        if sellos:
+            items.append(("sellos", ancho_s, alto_s, .10))
+        for clave, caja in _pila(items, zona, gap * .8).items():
+            if clave == "lockup":
+                destinos[papel["lockup"]] = caja
+            elif clave == "offer":
+                destinos[oferta] = caja
             elif clave == "product":
-                if producto is not None:
-                    campos["product"] = marco
-            elif clave == "seals":
-                for indice, caja in _fila(papel["seals"], elementos, marco, gap, "center").items():
-                    destinos[indice] = caja
-            elif clave is not None:
-                destinos[clave] = _encajar(elementos[clave], marco, ("center", "center"))
-            y += zh * parte + gap * .6
-        return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
-    if formato == "landscape":
-        col_producto = (zx1 - zw * .40, techo_derecha, zx1, zy1)
-        izquierda = (zx0, zy0, zx1 - zw * .40 - gap, zy1)
-        iw = izquierda[2] - izquierda[0]
-        franja_sellos = zh * .26
-        arriba = (izquierda[0], zy0, izquierda[2], zy1 - franja_sellos - gap)
-        destinos[papel["lockup"]] = _encajar(
-            lockup, (arriba[0], arriba[1], arriba[0] + iw * .50, arriba[3]), ("start", "center")
-        )
-        if oferta is not None:
-            destinos[oferta] = _encajar(
-                elementos[oferta],
-                (arriba[0] + iw * .50 + gap, arriba[1], arriba[2], arriba[3]),
-                ("center", "center"),
-            )
-        sellos = (izquierda[0], zy1 - franja_sellos, izquierda[2], zy1)
-    elif formato == "square":
-        col_producto = (zx1 - zw * .44, techo_derecha, zx1, zy1)
-        izquierda = (zx0, zy0, zx1 - zw * .44 - gap, zy1)
-        franja_sellos = zh * .20
-        cuerpo = zy1 - franja_sellos - gap
-        destinos[papel["lockup"]] = _encajar(
-            lockup, (izquierda[0], zy0, izquierda[2], zy0 + (cuerpo - zy0) * .56), ("start", "start")
-        )
-        alto_lockup = destinos[papel["lockup"]][3] if destinos[papel["lockup"]] else zy0
-        if oferta is not None:
-            destinos[oferta] = _encajar(
-                elementos[oferta],
-                (izquierda[0], alto_lockup + gap, izquierda[2], cuerpo),
-                ("start", "center"),
-            )
-        sellos = (izquierda[0], zy1 - franja_sellos, izquierda[2], zy1)
-    else:  # story
-        # Vertical de pantalla completa: logo de campaña grande arriba, y
-        # debajo producto y oferta lado a lado —el producto a la derecha, más
-        # alto—, con los sellos en la franja inferior. La oferta nunca va
-        # encima del producto: el producto se pinta después de la placa y la
-        # taparía.
-        franja_sellos = zh * .12
-        destinos[papel["lockup"]] = _encajar(
-            lockup, (zx0, zy0, zx0 + zw * .62, zy0 + zh * .33), ("start", "start")
-        )
-        base_lockup = destinos[papel["lockup"]][3] if destinos[papel["lockup"]] else zy0
-        suelo = zy1 - franja_sellos - gap
-        # La oferta se lleva algo más de la mitad del ancho: en un story se
-        # lee de lejos y a pulgar, y el precio es lo que decide el clic.
-        col_producto = (zx0 + zw * .54, techo_derecha + gap, zx1, suelo)
-        if oferta is not None:
-            destinos[oferta] = _encajar(
-                elementos[oferta],
-                (zx0, base_lockup + gap, zx0 + zw * .54 - gap, suelo),
-                ("start", "center"),
-            )
-        sellos = (zx0, zy1 - franja_sellos, zx1, zy1)
+                # El hueco toma el ancho entero de la columna.
+                campos["product"] = (zx0, caja[1], zx1, caja[3])
+            elif clave == "bloque":
+                poner_bloque(caja, "columna")
+            elif clave == "sellos":
+                poner_sellos(caja)
+            elif isinstance(clave, tuple):
+                destinos[clave[1]] = caja
+        return cerrar()
 
-    for indice, caja in _fila(papel["seals"], elementos, sellos, gap).items():
-        destinos[indice] = caja
+    if formato == "horizontal":
+        # 1,91:1 y 16:9: identidad a la izquierda (logo de campaña sobre los
+        # sellos), oferta y mensaje al centro, producto a la derecha; más
+        # ancho si el producto es apaisado.
+        ancho_p = zw * (.44 if ancho_producto else .36)
+        techo = marca_en((zx1 - zw * .20, zy0, zx1, zy0 + zh * .11))
+        columna_p = (zx1 - ancho_p, techo, zx1, suelo_producto)
+        izquierda = (zx0, zy0, zx0 + zw * (.27 if ancho_producto else .29), zy1)
+        centro = (izquierda[2] + gap, zy0, columna_p[0] - gap, zy1)
+        items = [("lockup", *natural(papel["lockup"]), .72)]
+        if sellos:
+            items.append(("sellos", ancho_s, alto_s, .26))
+        for clave, caja in _pila(items, izquierda, gap).items():
+            if clave == "lockup":
+                destinos[papel["lockup"]] = caja
+            else:
+                poner_sellos(caja)
+        items = []
+        if oferta is not None:
+            items.append(("offer", *natural(oferta), .62 if extras else 1.0))
+        forma = _bloque(extras, "columna")
+        if forma is not None:
+            items.append(("bloque", forma[0], forma[1], .42))
+        for clave, caja in _pila(items, centro, gap).items():
+            if clave == "offer":
+                destinos[oferta] = caja
+            else:
+                poner_bloque(caja, "columna")
+        if producto is not None:
+            campos["product"] = columna_p
+        return cerrar()
+
+    vertical = zh / zw > 1.12
+    techo = marca_en((zx1 - zw * (.26 if vertical else .22), zy0, zx1, zy0 + zh * .10))
+
+    if ancho_producto and producto is not None:
+        # Producto apaisado (un televisor, un combo): franja a todo el ancho.
+        # Arriba el logo de campaña y la oferta lado a lado; abajo el mensaje.
+        # En pantalla completa la franja baja por la zona que tapa la
+        # interfaz, que no admite texto pero sí imagen.
+        alto_arriba = zh * (.40 if pantalla or min(size) < 420 else .34 if not extras else .30)
+        arriba = (zx0, zy0, zx1, zy0 + alto_arriba)
+        poner(papel["lockup"], (zx0, zy0, zx0 + zw * .48, arriba[3]), ("start", "center"))
+        derecha = (zx0 + zw * .52, techo, zx1, arriba[3])
+        forma = _bloque(extras, "fila" if not pantalla else "columna")
+        y = arriba[3] + gap
+        if pantalla:
+            # Arriba el logo de campaña con los sellos debajo, y la oferta; el
+            # mensaje a todo el ancho; el producto, todo lo que queda hasta
+            # el sangrado.
+            items = [("lockup", *natural(papel["lockup"]), .75)]
+            if sellos:
+                items.append(("sellos", ancho_s, alto_s, .22))
+            destinos[papel["lockup"]] = None
+            for clave, caja in _pila(items, (zx0, zy0, zx0 + zw * .48, arriba[3]), gap * .6).items():
+                if clave == "lockup":
+                    destinos[papel["lockup"]] = caja
+                else:
+                    poner_sellos(caja)
+            poner(oferta, derecha, ("end", "center"))
+            if forma is not None:
+                alto_bloque = min(zw * forma[1] / forma[0], zh * .26)
+                poner_bloque((zx0, y, zx1, y + alto_bloque), "columna")
+                y += alto_bloque + gap
+            campos["product"] = (zx0, y, zx1, suelo_producto)
+            return cerrar()
+        poner(oferta, derecha, ("end", "center"))
+        abajo = zy1
+        if oferta is None and forma is not None:
+            # Sin pastilla, el mensaje ocupa su sitio junto al logo de campaña.
+            poner_bloque(derecha, "columna")
+            forma = None
+        if forma is not None:
+            alto_franja = min(zw * forma[1] / forma[0], zh * .18)
+            poner_bloque((zx0, zy1 - alto_franja, zx1, zy1), "fila")
+            abajo = zy1 - alto_franja - gap
+        if sellos:
+            alto_sellos = zh * .12
+            poner_sellos((zx0, abajo - alto_sellos, zx1, abajo), "start" if forma is None else "center")
+            abajo -= alto_sellos + gap
+        campos["product"] = (zx0, y, zx1, abajo)
+        return cerrar()
+
+    # Cuadrado, 4:5 y pantallas completas con un producto alto: dos columnas
+    # —identidad y oferta a la izquierda, producto a la derecha—. El mensaje
+    # de la fila (titular y botón) va en una franja a todo el ancho abajo; en
+    # pantalla completa, en la columna izquierda, para que el producto pueda
+    # seguir bajando por la franja que tapa la interfaz.
+    base = zy1
+    # Sin pastilla, el mensaje va en la columna izquierda, donde iba ella.
+    en_columna = pantalla or oferta is None
+    forma = None if en_columna else _bloque(extras, "fila")
+    if forma is not None:
+        alto_franja = min(zw * forma[1] / forma[0], zh * (.24 if vertical else .20))
+        poner_bloque((zx0, zy1 - alto_franja, zx1, zy1), "fila")
+        base = zy1 - alto_franja - gap * 1.4
+        suelo_producto = base
+    arriba = zy0
+    if pantalla:
+        # El logo de campaña encabeza a todo el ancho, bajo el de la marca: en
+        # una columna de medio ancho quedaba diminuto en 1920 de alto.
+        poner(papel["lockup"], (zx0, techo, zx1, techo + zh * .36), ("center", "start"))
+        arriba = techo = destinos[papel["lockup"]][3] + gap
+    # En un 300x250 la pastilla a media columna dejaba el nombre y la cuota a
+    # 6 px: en lienzos pequeños la oferta se lleva más ancho que el logo.
+    pequeno = min(size) < 420
+    izquierda = (zx0, arriba, zx0 + zw * (.56 if pequeno else .47), base)
+    columna_p = (izquierda[2] + gap, techo, zx1, suelo_producto)
+    items = [] if pantalla else [("lockup", *natural(papel["lockup"]), .30 if pequeno else .40)]
+    if oferta is not None:
+        items.append(("offer", *natural(oferta), .46 if pequeno else .34))
+    columna = _bloque(extras, "columna") if en_columna else None
+    if columna is not None:
+        items.append(("bloque", columna[0], columna[1], .24 if oferta is not None else .40))
+    if sellos:
+        items.append(("sellos", ancho_s, alto_s, .14))
+    for clave, caja in _pila(items, izquierda, gap).items():
+        if clave == "lockup":
+            destinos[papel["lockup"]] = caja
+        elif clave == "offer":
+            destinos[oferta] = caja
+        elif clave == "bloque":
+            poner_bloque(caja, "columna")
+        else:
+            poner_sellos(caja)
     if producto is not None:
-        campos["product"] = col_producto
-
-    return _cerrar(destinos, campos, elementos, cajas_campo, dentro)
+        campos["product"] = columna_p
+    return cerrar()
 
 
 def _cerrar(destinos, campos, elementos, cajas_campo, dentro):
@@ -1402,6 +1683,57 @@ def field_boxes(pieza: Pieza, escala: float) -> tuple[dict[str, tuple[int, int, 
     return cajas, lecturas
 
 
+def ensanchar(capa, cajas: dict[str, tuple[int, int, int, int]]) -> dict[str, tuple[int, int, int, int]]:
+    """Cada texto de una pastilla, al ancho de su franja de color.
+
+    La caja medida es la del texto del ejemplo: "NOMBRE DEL PRODUCTO" ocupa
+    dos tercios de la franja celeste. Un nombre más largo, o la misma
+    pastilla en un 300x250, no cabía y salía a 6 px o cortado. La franja es
+    el sitio real: se busca hacia los lados mientras el color siga siendo el
+    de detrás del texto (en la capa ya no hay texto), y se deja un respiro.
+    """
+
+    import numpy as np
+
+    pixeles = np.asarray(capa.convert("RGBA"), dtype=np.int16)
+    alto, ancho = pixeles.shape[:2]
+    salida = dict(cajas)
+    for hueco, caja in cajas.items():
+        if hueco == "product":
+            continue
+        x0, y0, x1, y1 = (int(v) for v in caja)
+        if x1 - x0 < 4 or y1 - y0 < 2:
+            continue
+        filas = sorted({min(alto - 1, max(0, y)) for y in (y0 + (y1 - y0) // 4, (y0 + y1) // 2, y1 - (y1 - y0) // 4)})
+        izquierda, derecha = [], []
+        for y in filas:
+            fila = pixeles[y]
+            centro = min(ancho - 1, max(0, (x0 + x1) // 2))
+            referencia = fila[centro]
+            if referencia[3] < 200:
+                break
+
+            def igual(x):
+                pixel = fila[x]
+                return pixel[3] >= 200 and int(np.abs(pixel[:3] - referencia[:3]).sum()) < 60
+
+            x = centro
+            while x > 0 and igual(x - 1):
+                x -= 1
+            izquierda.append(x)
+            x = centro
+            while x < ancho - 1 and igual(x + 1):
+                x += 1
+            derecha.append(x + 1)
+        if len(izquierda) != len(filas):
+            continue
+        franja_x0, franja_x1 = max(izquierda), min(derecha)
+        respiro = (franja_x1 - franja_x0) * .07
+        nuevo_x0, nuevo_x1 = int(franja_x0 + respiro), int(franja_x1 - respiro)
+        salida[hueco] = (min(x0, nuevo_x0), y0, max(x1, nuevo_x1), y1)
+    return salida
+
+
 #: Medida de cada familia y el preset del que sale su área segura.
 FAMILIES = {
     "portrait": ((1280, 1600), "meta_feed_4_5"),
@@ -1410,7 +1742,7 @@ FAMILIES = {
     "landscape": ((1600, 838), "meta_feed_landscape"),
 }
 #: Sube cuando cambia lo que se extrae: las campañas ya analizadas se rehacen.
-VERSION = 6
+VERSION = 7
 
 
 def build_templates(pdf_path: Path, folder: Path) -> dict:
@@ -1454,6 +1786,7 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
     escala_base = PLATE_MAX_SIDE / max(principal.width, principal.height)
     fondo_base, capa_base = decompose(pdf_path, principal, escala_base)
     cajas_base, lecturas_base = field_boxes(principal, escala_base)
+    cajas_base = ensanchar(capa_base, cajas_base)
     if "product" in cajas_base:
         # El hueco medido es la silueta del producto del ejemplo: se amplía al
         # espacio libre para que cualquier otro producto quepa con cuerpo.
@@ -1488,6 +1821,8 @@ def build_templates(pdf_path: Path, folder: Path) -> dict:
             cajas, lecturas = field_boxes(pieza, escala)
             size = (ancho, alto)
             origen = "piece"
+            if pieza is principal and capa_base.size == size:
+                cajas = ensanchar(capa_base, cajas)
             if "product" in cajas and pieza is principal:
                 # El hueco medido es la silueta del producto del ejemplo (una
                 # refrigeradora alta y estrecha): un cilindro o una licuadora

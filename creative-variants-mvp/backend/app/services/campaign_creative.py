@@ -171,7 +171,7 @@ def _es_de_prueba(path: Path) -> bool:
     return bool(font_trial_name(path))
 
 
-def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
+def _campaign_fonts(campaign: Campaign) -> list[tuple[str, Path]]:
     font_candidates: list[tuple[str, Path]] = []
     for source in campaign.sources:
         # Una cara de prueba estampa «DEMO» sobre el texto del arte. Se ignora
@@ -195,6 +195,32 @@ def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
                 )))
             except Exception:  # noqa: BLE001
                 continue
+    return font_candidates
+
+
+#: Caras de titular: condensadas y de palo grueso, como las de los banners
+#: de retail ("HOY CELEBRAMOS SER UNA MARCA ECUATORIANA").
+_DISPLAY_TOKENS = (
+    "anton", "bebas", "oswald", "league gothic", "kenyan", "condensed",
+    "compressed", "impact", "knockout", "druk",
+)
+
+
+def _display_font_path(campaign: Campaign) -> str:
+    """La cara de titular del kit de la marca, o su negrita si no trae una."""
+
+    for nombre, path in _campaign_fonts(campaign):
+        clave = nombre.casefold()
+        if (
+            any(token in clave for token in _DISPLAY_TOKENS) and "italic" not in clave
+            and path.is_file() and not _es_de_prueba(path)
+        ):
+            return str(path)
+    return _font_path(campaign, bold=True)
+
+
+def _font_path(campaign: Campaign, *, bold: bool = False) -> str:
+    font_candidates = _campaign_fonts(campaign)
     if font_candidates:
         # En orden de preferencia: la primera palabra que aparezca manda. Una
         # "black" de prueba ganaba antes a la "Heavy" de la marca por sonar
@@ -385,6 +411,8 @@ def _vector_layout(
     safe: dict[str, float],
     *,
     bare: bool = False,
+    extras: tuple[str, ...] = (),
+    aspecto: float | None = None,
 ) -> tuple[Image.Image, dict[str, tuple[int, int, int, int]]] | None:
     """Placa y cajas del editable recompuestas para esta medida exacta.
 
@@ -395,7 +423,9 @@ def _vector_layout(
 
     Devuelve ``None`` cuando la medida coincide con la pieza dibujada en el
     editable: esa placa, renderizada del PDF, es más fiel que cualquier
-    recomposición.
+    recomposición. Salvo que la fila traiga ``extras`` —titular, CTA— que el
+    arte no tiene, o un producto apaisado (``aspecto``, ancho/alto) que en el
+    hueco alto del original saldría diminuto: entonces se recompone.
     """
 
     from . import campaign_vector
@@ -413,7 +443,8 @@ def _vector_layout(
         for placa in propias:
             medida = placa.get("size") or [0, 0]
             if (
-                placa.get("family") and medida[1]
+                not extras and (aspecto is None or aspecto < 1.25)
+                and placa.get("family") and medida[1]
                 and abs((width / height) / (medida[0] / medida[1]) - 1) < .02
                 and source.meta.get("vector_summary", {}).get("plates")
                 and any(
@@ -439,6 +470,8 @@ def _vector_layout(
             placa, cajas = campaign_vector.adapt(
                 fondo, capa, campos, canvas, safe,
                 omit={"price", "installment"} if bare else None,
+                extras=extras,
+                aspecto=aspecto,
             )
         except Exception:  # noqa: BLE001 - sin recomposición queda la placa de familia
             logger.info("No se pudo recomponer la placa del editable", exc_info=True)
@@ -449,6 +482,60 @@ def _vector_layout(
         }
         return placa.convert("RGBA"), regiones
     return None
+
+
+def _tiene_descomposicion(campaign: Campaign) -> bool:
+    return any(
+        isinstance(source.meta.get("vector_decomposition"), dict)
+        and source.meta["vector_decomposition"].get("capa")
+        for source in campaign.sources
+    )
+
+
+def _acento_del_arte(campaign: Campaign) -> tuple[int, int, int] | None:
+    """El color de la pastilla del precio en el editable, para el botón.
+
+    Se mide en la capa guardada, no en la pieza: una fila sin precio pinta la
+    placa sin pastilla y el botón salía del color del fondo.
+    """
+
+    for source in campaign.sources:
+        datos = source.meta.get("vector_decomposition")
+        if not isinstance(datos, dict) or not datos.get("capa"):
+            continue
+        campos = datos.get("fields") or {}
+        caja = next((campos[c] for c in ("price", "installment", "product_name") if c in campos), None)
+        if not caja:
+            return None
+        try:
+            ruta = campaign_store.campaign_path(campaign.client_id, campaign.campaign_id, datos["capa"])
+            capa = _imagen_cacheada(str(ruta), ruta.stat().st_mtime, "RGBA")
+        except Exception:  # noqa: BLE001
+            return None
+        muestra = capa.crop(tuple(int(v) for v in caja))
+        alfa = muestra.getchannel("A").getextrema()[1]
+        if alfa < 200:
+            return None
+        color = muestra.convert("RGB").resize((1, 1), Image.Resampling.BOX).getpixel((0, 0))
+        return tuple(int(v) for v in color)
+    return None
+
+
+def _aspecto_productos(products: list[Image.Image]) -> float | None:
+    """Ancho/alto de lo que se pintará en el hueco: uno solo o el grupo."""
+
+    medidas = []
+    for producto in products:
+        caja = producto.getchannel("A").getbbox() if producto.mode == "RGBA" else None
+        w, h = (caja[2] - caja[0], caja[3] - caja[1]) if caja else producto.size
+        if w > 0 and h > 0:
+            medidas.append(w / h)
+    if not medidas:
+        return None
+    # Como en ``_product_layers``: el primero entero y los demás algo menores
+    # y solapados.
+    alturas = [1.0] + [max(.5, .8 - .08 * (i // 2)) for i in range(len(medidas) - 1)]
+    return medidas[0] + sum(a * h * (1 - .18) for a, h in zip(medidas[1:], alturas[1:]))
 
 
 def _decorations(
@@ -874,7 +961,7 @@ def _layout(
 
 def _font(path: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
     try:
-        return ImageFont.truetype(path, max(8, size))
+        return ImageFont.truetype(path, max(6, size))
     except Exception:  # noqa: BLE001
         return ImageFont.load_default()
 
@@ -916,6 +1003,7 @@ def _text_layer(
     align: str = "left",
     badge: bool = False,
     strike: bool = False,
+    valign: str = "top",
 ) -> Image.Image:
     width, height = canvas
     x, y, w, h = box
@@ -928,17 +1016,29 @@ def _text_layer(
         colour = (35, 29, 92, 255)
         x += int(w * .08)
         w = int(w * .84)
+    if max_lines > 1 and h < 18:
+        # Dos renglones en una franja de 14 px son dos líneas de 6 px que se
+        # montan sobre el precio: mejor uno, más pequeño.
+        max_lines = 1
     start = max(10, int(h * (.72 if max_lines == 1 else .53)))
     font = _font(font_path, start)
     lines = _wrap(draw, text, font, w, max_lines)
-    while start > 8:
+    while start > 6:
         bbox = draw.multiline_textbbox((0, 0), "\n".join(lines), font=font, spacing=int(start * .12))
-        if bbox[2] <= w and bbox[3] <= h:
+        # Cabe de verdad solo si caben todas las palabras: con un renglón,
+        # "_wrap" devuelve la primera y "30 cuotas semanales" salía "30".
+        entero = " ".join(lines).split() == (text or "").split()
+        if bbox[2] <= w and bbox[3] <= h and entero:
             break
         start -= max(1, int(start * .06))
         font = _font(font_path, start)
         lines = _wrap(draw, text, font, w, max_lines)
     rendered = "\n".join(lines)
+    if valign == "middle":
+        # Un titular de un renglón en una caja pensada para dos quedaba
+        # arriba, descolgado del botón que tiene al lado.
+        caja_texto = draw.multiline_textbbox((0, 0), rendered, font=font, spacing=int(start * .12))
+        y += max(0, (h - caja_texto[3]) // 2)
     anchor = "la"
     tx = x
     if align == "center":
@@ -948,7 +1048,75 @@ def _text_layer(
     draw.multiline_text((tx, y), rendered, font=font, fill=colour, spacing=int(start * .12), anchor=anchor, align=align)
     if strike:
         draw.line((x, y + h // 2, x + min(w, int(draw.textlength(text, font=font))), y + h // 2), fill=colour, width=max(2, h // 18))
+    medida = draw.multiline_textbbox((0, 0), rendered, font=font, spacing=int(start * .12))
+    if medida[2] > w or medida[3] > h:
+        # Ni al cuerpo mínimo cabe (un nombre largo en la pastilla de un
+        # 300x250): se recorta a su caja antes que invadir el precio o salirse
+        # de la pastilla.
+        margen = max(2, h // 8)
+        recorte = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        zona = (max(0, x - margen), max(0, box[1] - margen), min(width, x + w + margen), min(height, box[1] + h + margen))
+        recorte.paste(layer.crop(zona), zona[:2])
+        return recorte
     return layer
+
+
+def _boton(
+    canvas: tuple[int, int],
+    box: tuple[int, int, int, int],
+    text: str,
+    font_path: str,
+    fill: tuple[int, int, int],
+) -> Image.Image:
+    """El CTA como botón: píldora del color de acento, texto centrado.
+
+    Un "Aplica ya" en blanco sobre el fondo no se leía como algo que se toca;
+    en los banners de retail el CTA siempre es un botón.
+    """
+
+    x, y, w, h = box
+    capa = Image.new("RGBA", canvas, (0, 0, 0, 0))
+    if w <= 4 or h <= 4:
+        return capa
+    # Si el texto no cabe en un renglón a un cuerpo legible, el botón crece
+    # un poco a lo ancho (desde su centro) antes que partir "VER PRODUCTOS".
+    medidor = ImageDraw.Draw(capa)
+    necesario = medidor.textlength(text, font=_font(font_path, max(7, int(h * .34)))) / .84
+    if necesario > w:
+        nuevo = min(int(necesario), int(w * 1.25))
+        x = max(0, min(canvas[0] - nuevo, x - (nuevo - w) // 2))
+        w = nuevo
+    radio = h // 2
+    sombra = Image.new("RGBA", canvas, (0, 0, 0, 0))
+    ImageDraw.Draw(sombra).rounded_rectangle(
+        (x, y + max(1, h // 12), x + w, y + h + max(1, h // 12)), radius=radio, fill=(0, 0, 0, 70)
+    )
+    capa.alpha_composite(sombra.filter(ImageFilter.GaussianBlur(max(1, h // 10))))
+    draw = ImageDraw.Draw(capa, "RGBA")
+    draw.rounded_rectangle((x, y, x + w, y + h), radius=radio, fill=(*fill, 255))
+    tinta = max(((255, 255, 255), DARK_INK), key=lambda t: _contrast(t, fill))
+    ancho_util, alto_util = int(w * .84), int(h * .56)
+    tamano = max(7, int(h * .5))
+    lineas = [text]
+    while True:
+        fuente = _font(font_path, tamano)
+        # Un renglón mientras el cuerpo se lea; si no cabe, dos antes que
+        # cortar: "VER PRODUCTOS" salía "VER" en el botón de un 300x250.
+        renglones = 1 if tamano > h * .26 else 2
+        lineas = _wrap(draw, text, fuente, ancho_util, renglones)
+        caja = draw.multiline_textbbox((0, 0), "\n".join(lineas), font=fuente, spacing=int(tamano * .1))
+        entero = " ".join(lineas).split() == text.split()
+        if entero and caja[2] - caja[0] <= ancho_util and caja[3] - caja[1] <= alto_util * (1 if len(lineas) == 1 else 1.6):
+            break
+        if tamano <= 7:
+            lineas = _wrap(draw, text, fuente, ancho_util, 3)
+            break
+        tamano -= max(1, int(tamano * .06))
+    draw.multiline_text(
+        (x + w // 2, y + h // 2), "\n".join(lineas), font=fuente, fill=(*tinta, 255),
+        anchor="mm", align="center", spacing=int(tamano * .1),
+    )
+    return capa
 
 
 def _placeholder(canvas: tuple[int, int], box: tuple[int, int, int, int], label: str) -> Image.Image:
@@ -1041,21 +1209,83 @@ def _product_layers(
     box: tuple[int, int, int, int],
     products: list[Image.Image],
 ) -> list[tuple[str, Image.Image]]:
+    """El producto en su hueco; varios, en grupo como en un bodegón de retail.
+
+    Una rejilla de 2x2 dejaba cada producto en su celda, pequeño y con aire
+    entre ellos: parecía un catálogo. Un grupo pone el primero delante y al
+    centro, el más grande, y los demás a los lados, algo menores y un poco
+    detrás, todos apoyados en la misma línea de suelo.
+    """
+
     if not products:
         return [("Producto · espacio variable", _placeholder(canvas, box, "PRODUCTO"))]
+    if len(products) == 1:
+        return [("Producto 1", _full_canvas(_fit_product(products[0], box), canvas))]
     x, y, w, h = box
-    count = len(products)
-    columns = count if count <= 2 else 2
-    rows = math.ceil(count / columns)
-    gap = max(4, min(w, h) // 50)
-    cell_w = max(1, (w - gap * (columns - 1)) // columns)
-    cell_h = max(1, (h - gap * (rows - 1)) // rows)
+    # Limpios pero sin recortar: ``_fit_product`` vuelve a pasar el quitafondos,
+    # y un producto recortado al ras —esquinas opacas del mismo gris— se
+    # tomaba entero por fondo y desaparecía.
+    recortes = [_remove_simple_background(producto) for producto in products]
+    medidas = []
+    for limpio in recortes:
+        caja = limpio.getchannel("A").getbbox()
+        medidas.append((caja[2] - caja[0], caja[3] - caja[1]) if caja else limpio.size)
+    # Posiciones: el primero al centro; los demás alternan derecha e
+    # izquierda hacia fuera, cada vez un poco menores.
+    alturas = [1.0] + [max(.5, .8 - .08 * (i // 2)) for i in range(len(recortes) - 1)]
+    lados = [0] + [1 if i % 2 == 0 else -1 for i in range(len(recortes) - 1)]
+    anchos = [
+        alto * h * medida[0] / max(1, medida[1])
+        for alto, medida in zip(alturas, medidas)
+    ]
+    solape = .18
+    derecha = [i for i, lado in enumerate(lados) if lado == 1]
+    izquierda = [i for i, lado in enumerate(lados) if lado == -1]
+
+    def total(escala: float) -> float:
+        suma = anchos[0] * escala
+        for grupo in (derecha, izquierda):
+            anterior = anchos[0] * escala
+            for i in grupo:
+                suma += anchos[i] * escala - min(anterior, anchos[i] * escala) * solape
+                anterior = anchos[i] * escala
+        return suma
+
+    escala = min(1.0, w / max(1.0, total(1.0)))
+    # El grupo se centra en el alto del hueco: apoyado abajo en una columna
+    # alta dejaba medio hueco vacío encima.
+    suelo = y + (h + h * escala) / 2
+    centro = x + w / 2
+    # El grupo se centra entero, no el producto del centro: con un lado más
+    # cargado se salía del hueco por ese lado.
+    lado_d = sum(anchos[i] * escala for i in derecha) - sum(
+        min(a, b) * solape * escala
+        for a, b in zip([anchos[0]] + [anchos[i] for i in derecha], [anchos[i] for i in derecha])
+    )
+    lado_i = sum(anchos[i] * escala for i in izquierda) - sum(
+        min(a, b) * solape * escala
+        for a, b in zip([anchos[0]] + [anchos[i] for i in izquierda], [anchos[i] for i in izquierda])
+    )
+    centro += (lado_i - lado_d) / 2
+    celdas: dict[int, tuple[int, int, int, int]] = {}
+    ancho0 = anchos[0] * escala
+    celdas[0] = (int(centro - ancho0 / 2), int(suelo - alturas[0] * h * escala), int(ancho0), int(alturas[0] * h * escala))
+    for grupo, signo in ((derecha, 1), (izquierda, -1)):
+        borde = centro + signo * ancho0 / 2
+        anterior = ancho0
+        for i in grupo:
+            ancho_i = anchos[i] * escala
+            alto_i = alturas[i] * h * escala
+            entra = min(anterior, ancho_i) * solape
+            x0 = borde - entra if signo == 1 else borde + entra - ancho_i
+            celdas[i] = (int(x0), int(suelo - alto_i), max(1, int(ancho_i)), max(1, int(alto_i)))
+            borde = x0 + ancho_i if signo == 1 else x0
+            anterior = ancho_i
     result: list[tuple[str, Image.Image]] = []
-    for index, product in enumerate(products):
-        column, row = index % columns, index // columns
-        cell = (x + column * (cell_w + gap), y + row * (cell_h + gap), cell_w, cell_h)
-        fitted = _fit_product(product, cell)
-        result.append((f"Producto {index + 1}", _full_canvas(fitted, canvas)))
+    # De fuera hacia dentro: el del centro se pinta el último, delante.
+    for indice in sorted(celdas, key=lambda i: -abs(celdas[i][0] + celdas[i][2] / 2 - centro)):
+        fitted = _fit_product(recortes[indice], celdas[indice])
+        result.append((f"Producto {indice + 1}", _full_canvas(fitted, canvas)))
     return result
 
 
@@ -1304,6 +1534,10 @@ def _render(
     colours = _palette(campaign.brief)
     canvas = (width, height)
     layers: list[tuple[str, Image.Image]] = []
+    if products and candidate.meta.get("plate_measured"):
+        # Recortados una vez aquí: la composición necesita su forma real (sin
+        # el fondo blanco de la foto de catálogo) para darles su hueco.
+        products = [_remove_simple_background(producto) for producto in products]
     bold = _font_path(campaign, bold=True)
     regular = _font_path(campaign, bold=False)
     keys = _candidate_keys(candidate)
@@ -1312,9 +1546,6 @@ def _render(
         else "landscape" if width / height > 1.35 else "square"
     )
     medidas = set(candidate.blueprint.placements.get(familia, {}))
-    vector = _vector_layout(campaign, canvas, safe) if candidate.meta.get("plate_measured") else None
-    if vector is not None:
-        medidas = set(vector[1])
     if candidate.meta.get("plate_measured") and medidas:
         # Todas las candidatas comparten la placa del editable, con su
         # pastilla y su hueco de producto pintados. Una candidata que no
@@ -1432,21 +1663,48 @@ def _render(
     # la matriz o redactado por la IA—: pasa a llevarlo, y el nombre sigue en
     # su franja. La pieza conserva su bloque de color en vez de un hueco.
     titular_en_pastilla = ""
-    if sin_precio and "price" in medidas and row is not None:
+    # Con la composición del editable el titular tiene su propio bloque: la
+    # pastilla se retira y el nombre ocupa su sitio.
+    if sin_precio and "price" in medidas and row is not None and not _tiene_descomposicion(campaign):
         titular_en_pastilla = titular
         if titular_en_pastilla:
             sin_precio = False
             if "headline" in extras:
                 extras.remove("headline")
-    regions = _layout(candidate, width, height, safe, proposal, visible)
-    if vector is not None:
-        regions.update(vector[1])
     # Un banner (320x50, 728x90) o un rascacielos no tienen sitio para una
-    # pila de texto: ahí solo va lo que el arte trae.
+    # pila de texto: ahí solo va lo que el arte trae y, si lo hay, el botón.
     if width / height > 3 or width / height < .4:
         for clave in extras:
-            values[clave] = ""
-        extras = []
+            if clave != "cta":
+                values[clave] = ""
+        extras = [clave for clave in extras if clave == "cta"]
+    # La composición del editable se hace con el mensaje de la fila dentro:
+    # el titular y el botón tienen su bloque en la retícula, en vez de
+    # apilarse encima del producto.
+    # Sin precio la pastilla se retira de la composición —no queda su hueco
+    # vacío— y el nombre del producto encabeza el bloque de mensaje.
+    desnuda = bool(sin_precio and _tiene_descomposicion(campaign))
+    en_bloque = list(extras)
+    if desnuda and values.get("product_name", "").strip():
+        en_bloque = ["product_name", *extras]
+    vector = (
+        _vector_layout(
+            campaign, canvas, safe, bare=desnuda, extras=tuple(en_bloque),
+            aspecto=_aspecto_productos(products or []) if show_product else None,
+        )
+        if candidate.meta.get("plate_measured") else None
+    )
+    regions = _layout(candidate, width, height, safe, proposal, visible)
+    colocados: set[str] = set()
+    if vector is not None:
+        regions.update(vector[1])
+        colocados = set(en_bloque) & set(vector[1])
+    if extras:
+        keys = set(keys) | {
+            {"headline": "titular", "subheadline": "subtitulo", "previous_price": "precio_anterior",
+             "discount": "descuento", "cta": "cta", "validity": "vigencia"}[clave]
+            for clave in extras
+        }
     if width / height > 3 and candidate.meta.get("plate_measured") and values.get("price", "").strip():
         # En 50-90 px de alto el nombre y la cuota no se leen y montan el
         # precio encima. El banner lleva solo el precio, en la parte de color
@@ -1461,8 +1719,10 @@ def _render(
         values["product_name"] = ""
         values["installment"] = ""
     lineas_nombre = 2
-    if extras and "product" in medidas and "product" in regions:
-        # La pila de campos escritos a mano ocupa la parte alta del hueco del
+    pendientes = [clave for clave in extras if clave not in colocados]
+    if pendientes and "product" in medidas and "product" in regions:
+        # Sin recomposición (una campaña sin descomposición guardada), la pila
+        # de campos escritos a mano ocupa la parte alta del hueco del
         # producto, en orden de lectura, y el producto se encaja debajo.
         px, py, pw, ph = regions["product"]
         pesos = {
@@ -1471,7 +1731,7 @@ def _render(
         }
         separacion = int(ph * .018)
         y = py
-        for clave in extras:
+        for clave in pendientes:
             alto_campo = int(ph * pesos[clave])
             # Un botón a lo ancho de una columna estrecha parte "Aplica ya" en
             # dos renglones; en una ancha, un botón de lado a lado no parece
@@ -1481,11 +1741,6 @@ def _render(
             regions[clave] = (px, y, ancho_campo, alto_campo)
             y += alto_campo + separacion
         regions["product"] = (px, y, pw, max(int(ph * .45), py + ph - y))
-        keys = set(keys) | {
-            {"headline": "titular", "subheadline": "subtitulo", "previous_price": "precio_anterior",
-             "discount": "descuento", "cta": "cta", "validity": "vigencia"}[clave]
-            for clave in extras
-        }
     if titular_en_pastilla:
         cajas = [regions[clave] for clave in ("price", "installment") if clave in medidas]
         x0 = min(c[0] for c in cajas)
@@ -1496,10 +1751,18 @@ def _render(
         values["headline"] = titular_en_pastilla
         keys = set(keys) | {"titular"}
     if candidate.meta.get("plate_measured"):
-        for clave, caso in (candidate.meta.get("text_case") or {}).items():
+        casos = candidate.meta.get("text_case") or {}
+        for clave, caso in casos.items():
             if caso == "upper" and values.get(clave):
                 values[clave] = values[clave].upper()
-        if sin_precio and values.get("product_name", "").strip():
+        if "upper" in casos.values():
+            # Un arte que escribe en mayúsculas lo hace también en su titular
+            # y su botón: "Tu cocina a crédito" en caja baja junto a
+            # "REFRIGERADORA TOP MOUNT" parecía de otra pieza.
+            for clave in colocados & {"headline", "cta"}:
+                if values.get(clave):
+                    values[clave] = values[clave].upper()
+        if sin_precio and values.get("product_name", "").strip() and "product_name" not in colocados:
             # Sin precio, la placa pierde su pastilla y el nombre se quedaba
             # como una línea diminuta flotando. Ocupa el sitio entero de la
             # pastilla: así es el protagonista del bloque, no un resto.
@@ -1533,12 +1796,7 @@ def _render(
     if branding_background is not None:
         plate = None
     elif vector is not None:
-        placa_vector = vector[0]
-        if sin_precio:
-            desnuda = _vector_layout(campaign, canvas, safe, bare=True)
-            if desnuda is not None:
-                placa_vector = desnuda[0]
-        plate = ("Placa de plantilla · editable", placa_vector)
+        plate = ("Placa de plantilla · editable", vector[0])
     else:
         plate = _template_plate(campaign, candidate, canvas, bare=bool(sin_precio))
     if plate is not None:
@@ -1583,9 +1841,35 @@ def _render(
         ("Vigencia", "validity", "vigencia", regular, False, 1, False, False),
         ("Legal", "legal", "legal", regular, False, 3, False, False),
     ]
+    # El botón toma el color de la pastilla del precio del propio arte: así
+    # el CTA es parte de la pieza, no un rectángulo blanco genérico.
+    acento = _acento_del_arte(campaign) if colocados else None
+    if acento is None:
+        acento = colours[3] if len(colours) > 3 else (255, 210, 67)
+    display = _display_font_path(campaign) if colocados else bold
+    centro_cta = None
+    if "cta" in colocados:
+        cx, _cy, cw, _ch = regions["cta"]
+        centro_cta = cx + cw / 2
     for label, value_key, slot_key, font_path, is_bold, lines, badge, strike in text_specs:
         value = values.get(value_key, "").strip()
         if slot_key not in keys or not value:
+            continue
+        if value_key in colocados:
+            caja = regions[value_key]
+            if value_key == "cta":
+                layers.append((label, _boton(canvas, caja, value, bold, acento)))
+                continue
+            # Centrado cuando el bloque está apilado; a la izquierda cuando el
+            # botón va a su lado, como en una barra de mensaje.
+            junto_al_boton = centro_cta is not None and centro_cta > caja[0] + caja[2]
+            layer = _text_layer(
+                canvas, caja, value, display if value_key == "headline" else font_path,
+                colour=_ink_for(backdrop, caja, blueprint.text_colors.get("product_name", "")),
+                bold=is_bold, max_lines=lines, align="left" if junto_al_boton else "center",
+                strike=strike, valign="middle",
+            )
+            layers.append((label, layer))
             continue
         # El color que el diseñador le dio a ese texto en el arte original. Si
         # no se midió, blanco, como siempre. Importa donde el propio arte pone
